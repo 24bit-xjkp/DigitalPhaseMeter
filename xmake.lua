@@ -1,0 +1,18 @@
+set_project("DigitalPhaseMeter")
+set_xmakever("3.1.1")
+set_version("0.1.0")
+set_languages("c++latest")
+set_warnings("allextra", "pedantic")
+includes("script/*.lua")
+add_rules("mode.debug", "mode.release", "mode.releasedbg")
+set_allowedmodes("debug", "release", "releasedbg")
+add_addons("format-plugin")
+set_policy("build.c++.modules.hide_dependencies", true)
+set_defaultmode("release")
+if not is_mode("debug") then
+    set_policy("build.optimization.lto", true)
+end
+add_requires("doctest_module", { configs = { shared = true, lto = true } })
+add_requires("verilator_utils", { configs = { shared = true, lto = true } })
+add_defines(std_harden_defines)
+includes("*/xmake.lua")

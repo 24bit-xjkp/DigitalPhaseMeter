@@ -1,0 +1,21 @@
+{
+    ["doxygen-plugin"] = {
+        repo = {
+            branch = "master",
+            commit = "e063b2eb1633b9c5d37fbfe9a51b39b5115883fa",
+            url = "https://gitee.com/tboox/xmake-repo.git"
+        },
+        version = "v1.0.0"
+    },
+    ["format-plugin"] = {
+        repo = {
+            branch = "master",
+            commit = "7a4e27d95beab748e079e9165f969a025225dcd7",
+            url = "https://github.com/xmake-io/xmake-repo.git"
+        },
+        version = "v1.0.0"
+    },
+    __meta__ = {
+        version = "1.0"
+    }
+}

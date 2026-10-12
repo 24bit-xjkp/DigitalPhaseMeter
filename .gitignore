@@ -1,0 +1,8 @@
+target
+project
+build
+.vscode
+.metals
+.bloop
+.bsp
+.xmake
