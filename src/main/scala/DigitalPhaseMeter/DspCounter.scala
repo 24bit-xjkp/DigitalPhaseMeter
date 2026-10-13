@@ -26,6 +26,6 @@ class DspCounter(width: Int = 48) extends Module {
     io.value := cnt
 }
 
-object DspCounter extends Main {
+object EmitDspCounter extends Main {
     emitSystemVerilog(new DspCounter)
 }

@@ -20,6 +20,6 @@ class EdgeDetector(n: Int = 3) extends Module {
     io.trigger := currentValue && !previousValue
 }
 
-object EdgeDetector extends Main {
+object EmitEdgeDetector extends Main {
     emitSystemVerilog(new EdgeDetector)
 }
