@@ -5,9 +5,9 @@ local chisel_dir = path.join(os.scriptdir(), "..", "build", "chisel")
 for _, file in ipairs(os.files("*.cpp")) do
     local name = path.basename(file)
     target(name .. "Verilator", function ()
-        set_toolchains("verilator")
+        add_toolchains("verilator")
         add_rules("verilator.shared")
-        add_files(path.join(chisel_dir, name, "*.sv"))
+        set_warnings("none")
         set_policy("build.fence", true)
         if is_mode("debug") then
             set_optimize("fast")
@@ -15,6 +15,10 @@ for _, file in ipairs(os.files("*.cpp")) do
         add_values("verilator.flags", verilator_options)
 
         on_load(function (target)
+            local sv_dir = path.join(chisel_dir, name)
+            for file in io.lines(path.join(sv_dir, "filelist.f")) do
+                target:add("files", path.join(sv_dir, file), {})
+            end
             target:set("targetdir", path.join(target:targetdir(), name))
         end)
     end)
