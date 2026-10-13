@@ -2,12 +2,12 @@ local verilator_options = {
     "-Wall", "--trace-fst", { "--x-assign", "unique" }, { "--x-initial", "unique" }, "--coverage"
 }
 local chisel_dir = path.join(os.scriptdir(), "..", "build", "chisel")
-for _, dir in ipairs(os.dirs(path.join(chisel_dir, "*"))) do
-    local name = path.basename(dir)
+for _, file in ipairs(os.files("*.cpp")) do
+    local name = path.basename(file)
     target(name .. "Verilator", function ()
         set_toolchains("verilator")
         add_rules("verilator.shared")
-        add_files(path.join(dir, "*.sv"))
+        add_files(path.join(chisel_dir, name, "*.sv"))
         set_policy("build.fence", true)
         if is_mode("debug") then
             set_optimize("fast")

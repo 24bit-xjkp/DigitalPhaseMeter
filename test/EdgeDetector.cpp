@@ -17,10 +17,7 @@ namespace
         bit_slice<CData> io_in;
         bit_slice<CData> io_trigger;
 
-        explicit port_t(dut_t& dut) :
-            clock{dut.clock}, reset{dut.reset}, io_in{dut.io_in}, io_trigger{dut.io_trigger}
-        {
-        }
+        explicit port_t(dut_t& dut) : clock{dut.clock}, reset{dut.reset}, io_in{dut.io_in}, io_trigger{dut.io_trigger} {}
     };
 }  // namespace
 
@@ -41,12 +38,7 @@ TEST_SUITE("EdgeDetector")
 
         const auto verify{
             [&](bool rising) -> task<void> {
-                return verify_at(
-                    port.clock,
-                    [=, &port] {
-                        CHECK_EQ(port.io_trigger, rising);
-                    },
-                    delay);
+                return verify_at(port.clock, [=, &port] { CHECK_EQ(port.io_trigger, rising); }, delay);
             },
         };
         const auto stimulate{

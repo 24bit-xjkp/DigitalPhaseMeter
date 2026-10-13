@@ -1,0 +1,59 @@
+---
+Checks: >
+  -*,
+  clang-analyzer-*,
+  modernize-*,
+  -modernize-use-trailing-return-type,
+  -modernize-use-designated-initializers,
+  google-*,
+  -google-runtime-float,
+  -google-build-using-namespace,
+  -google-objc-*,
+  readability-*,
+  -readability-function-cognitive-complexity,
+  -readability-uppercase-literal-suffix,
+  -readability-magic-numbers,
+  -readability-static-accessed-through-instance,
+  -readability-redundant-member-init,
+  -readability-math-missing-parentheses,
+  -readability-trailing-comma,
+  -readability-redundant-parentheses,
+  cert-*,
+  -cert-int09-c,
+  -cert-dcl16-c,
+  concurrency-*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  cppcoreguidelines-*,
+  -cppcoreguidelines-missing-std-forward,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-avoid-const-or-ref-data-members,
+  -cppcoreguidelines-avoid-reference-coroutine-parameters,
+  -cppcoreguidelines-pro-bounds-avoid-unchecked-container-access,
+  -cppcoreguidelines-avoid-capturing-lambda-coroutines,
+  misc-*,
+  -misc-include-cleaner,
+  performance-*,
+  boost-use-ranges,
+  portability-*,
+  fuchsia-virtual-inheritance
+
+# 关于-cppcoreguidelines-missing-std-forward
+# 该选项本不应该对显示对象形参(this auto&& self)进行检查<https://clang.llvm.org/extra/clang-tidy/checks/cppcoreguidelines/missing-std-forward.html#limitations>
+# 但clang-tidy(d46351c80)实现存在问题，没有排除显示对象形参，导致代码出现了大量的误报
+# 暂时禁用该检查项
+
+WarningsAsErrors: ''
+UseColor: true
+HeaderFilterRegex: '^(?!.*\.(h)$).*' # 过滤.h文件，避免第三方库产生大量警告
+CheckOptions:
+  - key: readability-identifier-length.IgnoredVariableNames
+    value: &allowed_shot_name '^(_|i|n|id)$'
+  - key: readability-identifier-length.IgnoredParameterNames
+    value: *allowed_shot_name
+  - key: readability-identifier-length.IgnoredBindingNames
+    value: *allowed_shot_name
+  - key: misc-non-private-member-variables-in-classes.IgnoreClassesWithAllMemberVariablesBeingPublic
+    value: true
+...
