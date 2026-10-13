@@ -3,10 +3,10 @@ package DigitalPhaseMeter
 import chisel3._
 import chisel3.util._
 
-/**
-  * 基于DSP的计数器
+/** 基于DSP的计数器
   *
-  * @param width 宽度
+  * @param width
+  *   宽度
   */
 class DspCounter(width: Int = 48) extends Module {
     assert(width <= 48)

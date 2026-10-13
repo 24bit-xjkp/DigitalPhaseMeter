@@ -15,8 +15,7 @@ trait Main extends App {
       */
     def emitSystemVerilog(
         genModule: => RawModule,
-        name: String =
-            this.getClass.getSimpleName.stripSuffix("$").stripPrefix("Emit")
+        name: String = this.getClass.getSimpleName.stripSuffix("$").stripPrefix("Emit")
     ): Unit = {
         val outputDir = Paths.get("build", "chisel", name)
         val chiselArgs = args.concat(
