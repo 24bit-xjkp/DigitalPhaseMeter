@@ -22,7 +22,7 @@
 Controller          低速域 FSM：闸门计数、与 PhaseMeter 握手、锁存结果
 ├── SyncReset       复位同步链（4 级），综合时替换为 xpm_cdc_sync_rst
 └── PhaseMeter      高速域测量核心
-    ├── EdgeDetector ×4   3 级流水的上升沿检测（sig1、sig2 与两类握手脉冲）
+    ├── EdgeDetector ×4   3 级流水的边沿检测（sig1、sig2 与两类握手脉冲）
     └── DspCounter   ×2   use_dsp 计数器，分别累计 edgeCnt / phaseCnt
 ```
 

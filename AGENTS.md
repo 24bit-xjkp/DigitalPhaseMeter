@@ -45,9 +45,8 @@
 | 测量语义、理论值、容限与已知精度下界（写验证判据时） | `dpm-measurement-model` |
 | 提交前的格式化、静态检查与全量回归 | `dpm-pre-delivery-check` |
 
-- **外部 skill**：`verilator_utils` 测试框架与 xmake 的通用用法由框架作者维护在 `/home/luo/verilator_utils/.agents/skills/`（如 `verilator-utils-unit-testing`、`xmake-targets`、`xmake-tests`、`xmake-scripting`）。这些**不在本仓库的 skill 根目录下，不会被自动加载**，需要按路径直接读取 `SKILL.md`。本仓库把 `verilator_utils` 当作 xmake 包使用（见 `script/package.lua`），框架细节以该目录为准。
 - **备选一：网络搜索**。skill 未覆盖，或 skill 与项目/环境的实际行为不一致时，先查官方文档与 issue；就地可用的官方帮助（如 `xmake <command> --help`）属于同一类的快速形式。
-- **备选二：读源码**。网络搜索仍不明确时，再阅读实现代码：框架行为查 `~/verilator_utils/src/`，生成结果查 `build/chisel/`。
+- **备选二：读源码**。网络搜索仍不明确时，再阅读实现代码：生成结果查 `build/chisel/`。
 - 不要跳过 skill 直接进入备选方法。通过备选方法得到的结论，在报告中注明来源（文档链接，或源码文件与行号），并考虑把结论补进 skill。
 - skill 与实际行为不一致时，**以实际行为为准**，并在报告中说明差异。
 
