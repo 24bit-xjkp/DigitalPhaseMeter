@@ -27,7 +27,7 @@ class EdgeDetector(val n: Int = 3, val edgeType: EdgeType.Type = EdgeType.rising
         val trigger = Output(Bool())
     })
     val pipeline = RegInit(VecInit.fill(n)(false.B))
-    if (async) { addAttribute(pipeline, """async_reg = "yes"""") }
+    if (async) { addAttribute(pipeline, """ASYNC_REG = "TRUE"""") }
     for (i <- 0 until n) { pipeline(i) := (if (i == 0) io.in else pipeline(i - 1)) }
     edgeType match {
         case EdgeType.rising  => io.trigger := !pipeline(n - 1) && pipeline(n - 2)

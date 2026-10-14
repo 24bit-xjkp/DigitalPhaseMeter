@@ -4,13 +4,9 @@ import chisel3._
 import chisel3.util._
 import chisel3.experimental.prefix
 
-/** 相位计状态控制字
-  */
-object PhaseMeterStateEnum extends ChiselEnum { val start, stop = Value }
-
 /** 相位计输入信号，sig1为参考信号，sig2为被测信号
   */
-class PhaseMeterInputSignal extends Bundle { val sig1, sig2 = Input(Bool()) }
+class PhaseMeterSignalPayload extends Bundle { val sig1, sig2 = Input(Bool()) }
 
 /** 相位计，工作在高速时钟域
   *
@@ -22,69 +18,45 @@ class PhaseMeterInputSignal extends Bundle { val sig1, sig2 = Input(Bool()) }
   *   边沿检测器延迟
   */
 class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extends Module {
+    class PhaseMeterResponsePayload extends Bundle {
+        // 检测到参考信号的总边沿数
+        val edgeCnt = UInt(edgeCntWidth.W)
+        // 相位差计数
+        val phaseCnt = UInt(phaseCntWidth.W)
+    }
     val io = IO(new Bundle {
         // 输入信号
-        val sig = new PhaseMeterInputSignal
+        val sig = new PhaseMeterSignalPayload
         // 请求控制字
-        val request = Flipped(DecoupledIO(new Bundle { val state = PhaseMeterStateEnum() }))
+        val request = Input(Bool())
         // 响应控制字
-        val response = DecoupledIO(new Bundle {
-            val state = PhaseMeterStateEnum()
-            // 检测到参考信号的总边沿数
-            val edgeCnt = UInt(edgeCntWidth.W)
-            // 相位差计数
-            val phaseCnt = UInt(phaseCntWidth.W)
-        })
+        val response = DecoupledIO(new PhaseMeterResponsePayload)
     })
 
-    val pulseSig1 = EdgeDetector(io.sig.sig1)
-    val pulseSig2 = EdgeDetector(io.sig.sig2)
+    private val pulseSig1 = EdgeDetector(io.sig.sig1)
+    private val pulseSig2 = EdgeDetector(io.sig.sig2)
 
-    val requestValid = EdgeDetector(io.request.valid)
-    val requestState = io.request.bits.state
-    val requestReady = RegInit(false.B)
-    io.request.ready := requestReady
-    when(!io.request.valid) { requestReady := false.B }
-    val responseReady = EdgeDetector(io.response.ready)
-    val responseValid = RegInit(false.B)
-    val responseState = Reg(PhaseMeterStateEnum())
-    io.response.bits.state := responseState
-    io.response.valid := responseValid
-    when(responseReady) { responseValid := false.B }
+    private val request = CdcToggleHandShake.receive(io.request)
+    private val responseReady = CdcToggleHandShake.receive(io.response.ready)
+    private val responseValid = CdcToggleHandShake.send(io.response.valid)
 
-    object StateEnum extends ChiselEnum { val idle, waitStart, measuring, waitStop, keepingResult = Value }
+    private object StateEnum extends ChiselEnum { val idle, waitStart, measuring, waitStop, keepingResult = Value }
     import StateEnum._
-    val stateReg = RegInit(idle)
-    val request = (state: PhaseMeterStateEnum.Type) => requestValid && requestState === state
-    val response = (state: PhaseMeterStateEnum.Type) => {
-        responseState := state
-        responseValid := true.B
-    }
+    private val stateReg = RegInit(idle)
     prefix("fsm") {
-        import PhaseMeterStateEnum._
         switch(stateReg) {
-            is(idle) {
-                when(request(start)) {
-                    stateReg := waitStart
-                    requestReady := true.B
-                }
-            }
+            is(idle) { when(request) { stateReg := waitStart } }
             is(waitStart) {
                 when(pulseSig1) {
                     stateReg := measuring
-                    response(start)
+                    responseValid.send
                 }
             }
-            is(measuring) {
-                when(request(stop)) {
-                    stateReg := waitStop
-                    requestReady := true.B
-                }
-            }
+            is(measuring) { when(request) { stateReg := waitStop } }
             is(waitStop) {
                 when(pulseSig2) {
                     stateReg := keepingResult
-                    response(stop)
+                    responseValid.send
                 }
             }
             is(keepingResult) { when(responseReady) { stateReg := idle } }
@@ -92,20 +64,13 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
     }
     when(!stateReg.isValid) { stateReg := idle }
 
-    val clearCnt = stateReg === idle
-    val pulseSig1Valid = stateReg.isOneOf(waitStart, measuring) && pulseSig1
-    val pulseSig2Valid = stateReg.isOneOf(waitStart, measuring, waitStop) && pulseSig2
-    val phaseCntEnable = RegInit(false.B)
+    private val clearCnt = stateReg === idle
+    private val pulseSig1Valid = stateReg.isOneOf(waitStart, measuring) && pulseSig1
+    private val pulseSig2Valid = stateReg.isOneOf(waitStart, measuring, waitStop) && pulseSig2
+    private val phaseCntEnable = RegInit(false.B)
     when(pulseSig1Valid) { phaseCntEnable := true.B }.elsewhen(pulseSig2Valid) { phaseCntEnable := false.B }
     io.response.bits.edgeCnt := DspCounter(edgeCntWidth, clearCnt, pulseSig1Valid)
     io.response.bits.phaseCnt := DspCounter(phaseCntWidth, clearCnt, phaseCntEnable)
-}
-
-object PhaseMeter {
-    def apply(edgeCntWidth: Int = 32, phaseCntWidth: Int = 32) = {
-        val phaseMeter = Module(new PhaseMeter(edgeCntWidth, phaseCntWidth))
-        phaseMeter.io
-    }
 }
 
 object EmitPhaseMeter extends Main {

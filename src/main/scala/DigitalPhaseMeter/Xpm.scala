@@ -1,8 +1,6 @@
 package DigitalPhaseMeter
 
 import chisel3._
-import chisel3.util._
-import chisel3.util.experimental.ForceNameAnnotation
 
 class SyncResetBundle extends Bundle { val dstRst = Output(Bool()) }
 
@@ -15,7 +13,7 @@ class SyncResetSynthesize(n: Int) extends ExtModule(Map("DEST_SYNC_FF" -> n)) {
 
 class SyncResetSimulate(n: Int) extends Module {
     val io = IO(new SyncResetBundle)
-    val pipeline = Reg(UInt(n.W))
+    val pipeline = RegInit(((1 << n) - 1).U(n.W))
     pipeline := pipeline << 1 | reset.asBool
     io.dstRst := pipeline(n - 1)
 }
