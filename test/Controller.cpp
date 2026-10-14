@@ -1,0 +1,485 @@
+#include <array>
+#include <cmath>
+#include <optional>
+#include <span>
+
+#include <verilator_fwd.hpp>
+#include "doctest_macros.hpp"
+import verilator_utils.full;
+#include <ControllerVerilator.h>
+#include <verilator_bwd.hpp>
+
+// Controller 跨两个时钟域：控制 FSM 与闸门计数器运行在低速的 clock 域（50MHz），
+// PhaseMeter 运行在高速的 dspClock 域（200MHz）。测试把 Controller 当作测量仪表，
+// 用 verilator_utils 的近似比较（approx）校验测量结果与理论值的偏差是否落在容限内，
+// 而不逐周期复现内部时序。
+//
+// 测量语义（对应 PhaseMeter 的实现）：
+//   - gateCnt 是测量窗口内低速时钟的周期数：窗口开始时清零、每个低速周期加一。
+//     控制器在闸门计数达到目标值后才发出停止请求，停止响应返回并锁存负载还会经过
+//     若干低速周期，因此实测值比目标值略大，容限按固定的小偏移给出；
+//   - edgeCnt 是测量窗口内参考信号 sig1 的上升沿数。窗口长度约等于 gateCnt 个低速
+//     时钟周期，理论值为 gateCnt * T_clock / T_sig1；窗口边界与被测频率不整除时会
+//     多算或少算一个沿，容限取 ±2；
+//   - phaseCnt 在参考信号上升沿使能、在被测信号上升沿停止，每个参考周期内累计
+//     一个“参考沿到被测沿”的高速时钟周期数，因此理论值为 offset / T_dspClock 乘以
+//     参考沿数。每个周期的计数只能取整数，容限取每个参考周期 1 个高速时钟周期，
+//     覆盖参考沿与被测沿落在高速时钟网格上的量化；被测相位偏移小于半个信号周期
+//     时该映射保持一一对应，因此相位扫描限制在该范围内。
+//
+// 为让量化误差可忽略、测量误差在长闸门时间内相互抵消，闸门时间取 2000 个低速
+// 周期（约 40us，覆盖数十到上千个信号周期），并用 doctest 的 GENERATE 扫描多个
+// 信号频率与相位偏移。
+
+namespace
+{
+    using namespace verilator_utils;
+    using dut_t = ControllerVerilator;
+    using dut_context_t = dut_context<dut_t, VerilatedFstC>;
+
+    /// 高速时钟周期，200MHz
+    constexpr auto dsp_period{5_ns};
+    /// 低速时钟周期，50MHz。两个时钟周期之比为整数，相位计测量的是高速时钟域内的
+    /// 参考沿到被测沿间隔，与两域周期比无关
+    constexpr auto clock_period{20_ns};
+    /// 目标闸门计数，对应约 40us 的闸门时间
+    constexpr std::uint64_t target_gate{2000zu};
+
+    /// 闸门计数容限：相位计要等到被测信号的下一个上升沿才能给出停止响应，因此测量
+    /// 窗口最多比目标闸门时间多一个被测信号周期，换算成低速时钟周期就是 T_sig2 /
+    /// T_clock 再留一个周期的余量
+    [[nodiscard]] ::verilator_utils::approx<::std::uint64_t> gate_cnt_tolerance(std::uint64_t sig2_period_fs)
+    {
+        const auto extra_slow_cycles{static_cast<::std::uint64_t>(
+            ::std::lround(static_cast<double>(sig2_period_fs) / static_cast<double>(clock_period.rep)))};
+        return {extra_slow_cycles + 1zu, 0.0};
+    }
+
+    /// 边沿计数容限：窗口边界上可能多算或少算一个沿
+    constexpr ::verilator_utils::approx<::std::uint64_t> edge_cnt_tolerance{2zu, 0.0};
+    /// 相位计数容限：每个参考周期允许的高速时钟周期误差，覆盖参考沿与被测沿落在
+    /// 高速时钟网格上的采样量化
+    constexpr std::uint64_t phase_cnt_per_edge_tolerance{1zu};
+
+    /// DUT 端口包装：Controller 有低速 clock 与高速 dspClock 两个时钟输入
+    struct port_t
+    {
+        bit_slice<CData> clock;
+        bit_slice<CData> reset;
+        bit_slice<CData> dsp_clock;
+        bit_slice<CData> io_sig_sig1;
+        bit_slice<CData> io_sig_sig2;
+        bit_slice<CData> io_in_valid;
+        vector_slice<IData> io_in_bits_target_gate;
+        bit_slice<CData> io_out_valid;
+        vector_slice<IData> io_out_bits_gate_cnt;
+        vector_slice<IData> io_out_bits_edge_cnt;
+        vector_slice<IData> io_out_bits_phase_cnt;
+
+        explicit port_t(dut_t& dut) :
+            clock{dut.clock}, reset{dut.reset}, dsp_clock{dut.dspClock, boolean}, io_sig_sig1{dut.io_sig_sig1, boolean},
+            io_sig_sig2{dut.io_sig_sig2, boolean}, io_in_valid{dut.io_in_valid, boolean},
+            io_in_bits_target_gate{dut.io_in_bits_targetGate, 28zu, dec_unsigned}, io_out_valid{dut.io_out_valid, boolean},
+            io_out_bits_gate_cnt{dut.io_out_bits_gateCnt, 28zu, dec_unsigned},
+            io_out_bits_edge_cnt{dut.io_out_bits_edgeCnt, 32zu, dec_unsigned},
+            io_out_bits_phase_cnt{dut.io_out_bits_phaseCnt, 32zu, dec_unsigned}
+        {
+        }
+    };
+
+    /// 一次测量的激励参数
+    struct stimulus_t
+    {
+        /// 参考信号 sig1 的周期与高电平时间
+        femtosecond_t sig1_period{400_ns};
+        femtosecond_t sig1_high{200_ns};
+        /// 被测信号 sig2 的周期与高电平时间
+        femtosecond_t sig2_period{400_ns};
+        femtosecond_t sig2_high{200_ns};
+        /// 被测信号上升沿相对参考信号上升沿的相位偏移
+        femtosecond_t phase_offset{200_ns};
+        /// 目标闸门计数
+        std::uint64_t gate_cnt{target_gate};
+    };
+
+    /// 一次测量的输出负载
+    struct result_t
+    {
+        /// 闸门计数，单位为低速时钟周期
+        std::uint64_t gate_cnt{};
+        /// 参考信号上升沿数
+        std::uint64_t edge_cnt{};
+        /// 相位计数，单位为高速时钟周期
+        std::uint64_t phase_cnt{};
+        /// out.valid 为高的低速时钟周期数
+        std::size_t valid_cycles{};
+    };
+
+    /// 测量任务的结果：是否观察到输出，以及输出负载
+    struct measurement_t
+    {
+        bool observed{};
+        result_t result{};
+    };
+
+    /**
+     * @brief 生成 sig1/sig2 激励，发起一次测量并读取结果
+     *
+     * 两个信号都是自由运行的周期信号：相位计在进入等待停止状态之后仍需要 sig2 的
+     * 上升沿，因此不能用一次性脉冲。信号只在高速时钟下降沿更新，此时两个时钟均为
+     * 低电平，每个高速时钟上升沿采样到的电平都是确定的，不会与低速域握手冲突。
+     *
+     * @param port DUT 端口
+     * @param option 激励参数
+     * @return 测量任务
+     */
+    [[nodiscard]] task<measurement_t> measure_once(port_t& port, const stimulus_t& option)
+    {
+        constexpr std::uint64_t low{0};
+        port.io_sig_sig1 = low;
+        port.io_sig_sig2 = low;
+        port.io_in_valid = low;
+        port.io_in_bits_target_gate = option.gate_cnt;
+
+        measurement_t measurement{};
+        // 信号按“周期 + 相位”自由运行，每个高速时钟下降沿更新电平，使每个高速时钟
+        // 上升沿采样到的电平完全确定；时间统一换算到飞秒后用整数运算
+        const auto signal_level{[](std::uint64_t now, std::uint64_t phase, std::uint64_t period, std::uint64_t high) {
+            const auto phase_in_period{phase % period};
+            const auto position{(now % period + period - phase_in_period) % period};
+            return static_cast<std::uint64_t>(position < high);
+        }};
+        const auto sig1_period{static_cast<std::uint64_t>(option.sig1_period.rep)};
+        const auto sig1_high{static_cast<std::uint64_t>(option.sig1_high.rep)};
+        const auto sig2_period{static_cast<std::uint64_t>(option.sig2_period.rep)};
+        const auto sig2_high{static_cast<std::uint64_t>(option.sig2_high.rep)};
+        const auto sig2_phase{static_cast<std::uint64_t>(option.phase_offset.rep)};
+
+        co_await wait_reset_finish(port.reset);
+        // 对齐到高速时钟下降沿后再发起请求
+        co_await wait_stimulate(port.dsp_clock);
+        port.io_in_valid = 1;
+        co_await wait_stimulate(port.dsp_clock);
+
+        // 信号自由运行，直到控制器给出测量结果
+        while(static_cast<std::uint64_t>(port.io_out_valid) == 0u)
+        {
+            // 时间精度为10ps，换算到飞秒需要乘以1e4
+            const auto now{static_cast<std::uint64_t>(co_await time_in_time_precision()) * 10000zu};
+            port.io_sig_sig1 = signal_level(now, 0zu, sig1_period, sig1_high);
+            port.io_sig_sig2 = signal_level(now, sig2_phase, sig2_period, sig2_high);
+            co_await wait_stimulate(port.dsp_clock);
+        }
+
+        measurement.observed = true;
+        measurement.result.gate_cnt = static_cast<std::uint64_t>(port.io_out_bits_gate_cnt);
+        measurement.result.edge_cnt = static_cast<std::uint64_t>(port.io_out_bits_edge_cnt);
+        measurement.result.phase_cnt = static_cast<std::uint64_t>(port.io_out_bits_phase_cnt);
+
+        // 撤销请求并统计输出有效的低速周期数：先统计当前周期，再等待后续周期
+        port.io_in_valid = 0;
+        ++measurement.result.valid_cycles;
+        co_await wait_verify(port.clock);
+        while(static_cast<std::uint64_t>(port.io_out_valid) != 0u)
+        {
+            ++measurement.result.valid_cycles;
+            co_await wait_verify(port.clock);
+        }
+        co_return measurement;
+    }
+
+    /// 用同一组激励连续执行若干次测量并结束仿真
+    [[nodiscard]] task<void> run_measurements(port_t& port, const stimulus_t& option, std::span<measurement_t> measurements)
+    {
+        for(auto&& measurement: measurements) { measurement = co_await measure_once(port, option); }
+        co_await eval_finish();
+    }
+
+    /// 依次用不同的目标闸门计数执行测量并结束仿真
+    [[nodiscard]] task<void> run_gate_sweep(port_t& port,
+                                            stimulus_t option,
+                                            std::span<const std::uint64_t> gate_cnts,
+                                            std::span<measurement_t> measurements)
+    {
+        for(auto&& [gate_cnt, measurement]: ::std::views::zip(gate_cnts, measurements))
+        {
+            option.gate_cnt = gate_cnt;
+            measurement = co_await measure_once(port, option);
+        }
+        co_await eval_finish();
+    }
+
+    /**
+     * @brief 校验测量结果与理论值的偏差在容限内
+     *
+     * @param result 测量结果
+     * @param option 激励参数
+     */
+    void check_common(const result_t& result)
+    {
+        CAPTURE(result.gate_cnt);
+        CAPTURE(result.edge_cnt);
+        CAPTURE(result.phase_cnt);
+        CAPTURE(result.valid_cycles);
+
+        // 输出只应保持有效一个低速时钟周期
+        CHECK_EQ(result.valid_cycles, 1zu);
+    }
+
+    /**
+     * @brief 校验闸门计数与边沿计数
+     *
+     * @param result 测量结果
+     * @param option 激励参数
+     */
+    void check_window(const result_t& result, const stimulus_t& option)
+    {
+        check_common(result);
+
+        // 闸门计数是测量窗口内的低速时钟周期数，比目标值多出停止握手与负载锁存的周期
+        CHECK_EQ(result.gate_cnt, gate_cnt_tolerance(option.sig2_period.rep)(option.gate_cnt));
+
+        // 窗口长度为目标闸门数乘以低速时钟周期，理论边沿数由此换算；窗口边界与被测
+        // 频率不整除时会多算或少算一个沿
+        const auto window_fs{static_cast<double>(option.gate_cnt) * static_cast<double>(clock_period.rep)};
+        const auto expected_edge_cnt{
+            static_cast<::std::uint64_t>(::std::lround(window_fs / static_cast<double>(option.sig1_period.rep)))};
+        CHECK_EQ(result.edge_cnt, edge_cnt_tolerance(expected_edge_cnt));
+    }
+
+    /**
+     * @brief 校验相位计数与相位偏移对应的高速时钟周期数一致
+     *
+     * @param result 测量结果
+     * @param option 激励参数
+     * @note 被测相位偏移应当小于被测信号周期的一半，此时每个参考周期内的相位计数
+     * 与偏移一一对应
+     */
+    void check_phase(const result_t& result, const stimulus_t& option)
+    {
+        check_common(result);
+        CAPTURE(static_cast<double>(result.phase_cnt) / static_cast<double>(result.edge_cnt));
+
+        // 相位计数在每个参考周期内累计一个“参考沿到被测沿”的高速时钟周期数，因此
+        // 理论值为相位偏移对应的高速时钟周期数乘以参考沿数；每个周期的计数只能取
+        // 整数，容限取每个参考周期 1 个高速时钟周期以覆盖该量化
+        const auto offset_cycles{static_cast<double>(option.phase_offset.rep) / static_cast<double>(dsp_period.rep)};
+        const auto theory_phase_cnt{
+            static_cast<::std::uint64_t>(::std::lround(offset_cycles * static_cast<double>(result.edge_cnt)))};
+        const auto phase_cnt_tolerance{
+            ::verilator_utils::approx<::std::uint64_t>{phase_cnt_per_edge_tolerance * result.edge_cnt, 0.0}
+        };
+        CAPTURE(theory_phase_cnt);
+        CHECK_EQ(result.phase_cnt, phase_cnt_tolerance(theory_phase_cnt));
+    }
+}  // namespace
+
+TEST_SUITE("Controller")
+{
+    TEST_CASE("reset holds the controller idle and produces no result")
+    {
+        dut_context_t ctx{
+            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
+        };
+        ctx.set_base_name("Controller.reset");
+        port_t port{ctx.dut()};
+
+        ctx.add_task(generate_clock(port.clock, clock_period));
+        ctx.add_task(generate_clock(port.dsp_clock, dsp_period));
+
+        const stimulus_t option{
+            .sig1_period = 400_ns,
+            .sig1_high = 200_ns,
+            .sig2_period = 400_ns,
+            .sig2_high = 200_ns,
+            .gate_cnt = 100zu,
+        };
+
+        std::optional<measurement_t> after_reset{};
+        const auto do_verify{[&] -> task<void> {
+            port.io_sig_sig1 = 0;
+            port.io_sig_sig2 = 0;
+            port.io_in_valid = 0;
+            port.io_in_bits_target_gate = 4zu;
+
+            // 复位期间不应产生测量结果，输出负载也不应被更新
+            for(auto cycle{0zu}; cycle != 20zu; ++cycle)
+            {
+                co_await wait_verify(port.clock);
+                CHECK_EQ(port.io_out_valid, 0u);
+            }
+
+            // 撤销复位后仍应保持空闲，直到收到测量请求
+            port.reset = 0;
+            for(auto cycle{0zu}; cycle != 20zu; ++cycle)
+            {
+                co_await wait_verify(port.clock);
+                CHECK_EQ(port.io_out_valid, 0u);
+            }
+
+            // 复位之后控制器必须能正常工作：完成一次测量
+            after_reset = co_await measure_once(port, option);
+            co_await eval_finish();
+        }};
+        port.reset = 1;
+        ctx.add_task(do_verify());
+
+        ctx.loop_until_finish(10_ms);
+        MESSAGE(ctx.stats());
+
+        REQUIRE(after_reset.has_value());
+        // REQUIRE失败会终止当前用例，因此此处访问是安全的
+        const auto& result{after_reset.value()};  // NOLINT(bugprone-unchecked-optional-access)
+        REQUIRE(result.observed);
+        CHECK_EQ(result.result.gate_cnt, gate_cnt_tolerance(option.sig2_period.rep)(option.gate_cnt));
+    }
+
+    TEST_CASE("the gate count matches the target gate regardless of the signal periods")
+    {
+        const auto sig1_period_ns{GENERATE(100zu, 200zu, 400zu, 1000zu, 2000zu)};
+        const auto sig2_period_ns{GENERATE(100zu, 200zu, 400zu, 1000zu, 2000zu)};
+        const stimulus_t option{
+            .sig1_period = femtosecond_t{static_cast<double>(sig1_period_ns) * 1e6},
+            .sig1_high = femtosecond_t{static_cast<double>(sig1_period_ns) * 5e5},
+            .sig2_period = femtosecond_t{static_cast<double>(sig2_period_ns) * 1e6},
+            .sig2_high = femtosecond_t{static_cast<double>(sig2_period_ns) * 5e5},
+        };
+        CAPTURE(sig1_period_ns);
+        CAPTURE(sig2_period_ns);
+
+        dut_context_t ctx{
+            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
+        };
+        ctx.set_base_name(::std::format("Controller.gate.{}_{}", sig1_period_ns, sig2_period_ns));
+        port_t port{ctx.dut()};
+
+        ctx.add_task(generate_clock(port.clock, clock_period));
+        ctx.add_task(generate_clock(port.dsp_clock, dsp_period));
+        ctx.add_task(generate_reset(port.reset, port.clock));
+
+        std::array<measurement_t, 1zu> measurements{};
+        ctx.add_task(run_measurements(port, option, measurements));
+
+        ctx.loop_until_finish(5_ms);
+        MESSAGE(ctx.stats());
+
+        REQUIRE(measurements[0].observed);
+        check_window(measurements[0].result, option);
+    }
+
+    TEST_CASE("the phase count matches the phase offset between the two signals")
+    {
+        // 被测相位偏移必须小于半个信号周期，否则“参考沿到被测沿”的映射不再一一对应
+        const auto sig_period_ns{GENERATE(400zu, 1000zu)};
+        const auto offset_ns{GENERATE(50zu, 200zu)};
+        const stimulus_t option{
+            .sig1_period = femtosecond_t{static_cast<double>(sig_period_ns) * 1e6},
+            .sig1_high = femtosecond_t{static_cast<double>(sig_period_ns) * 5e5},
+            .sig2_period = femtosecond_t{static_cast<double>(sig_period_ns) * 1e6},
+            .sig2_high = femtosecond_t{static_cast<double>(sig_period_ns) * 5e5},
+            .phase_offset = femtosecond_t{static_cast<double>(offset_ns) * 1e6},
+        };
+        CAPTURE(sig_period_ns);
+        CAPTURE(offset_ns);
+
+        dut_context_t ctx{
+            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
+        };
+        ctx.set_base_name(::std::format("Controller.phase.{}_{}", sig_period_ns, offset_ns));
+        port_t port{ctx.dut()};
+
+        ctx.add_task(generate_clock(port.clock, clock_period));
+        ctx.add_task(generate_clock(port.dsp_clock, dsp_period));
+        ctx.add_task(generate_reset(port.reset, port.clock));
+
+        std::array<measurement_t, 1zu> measurements{};
+        ctx.add_task(run_measurements(port, option, measurements));
+
+        ctx.loop_until_finish(5_ms);
+        MESSAGE(ctx.stats());
+
+        REQUIRE(measurements[0].observed);
+        check_phase(measurements[0].result, option);
+        check_window(measurements[0].result, option);
+    }
+
+    TEST_CASE("the measurement window follows io.in.bits.targetGate")
+    {
+        constexpr std::array gate_cnts{200zu, 500zu, 2000zu};
+        const stimulus_t option{
+            .sig1_period = 400_ns,
+            .sig1_high = 200_ns,
+            .sig2_period = 400_ns,
+            .sig2_high = 200_ns,
+        };
+        CAPTURE(gate_cnts[0]);
+        CAPTURE(gate_cnts[1]);
+        CAPTURE(gate_cnts[2]);
+
+        dut_context_t ctx{
+            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
+        };
+        ctx.set_base_name("Controller.target_gate");
+        port_t port{ctx.dut()};
+
+        ctx.add_task(generate_clock(port.clock, clock_period));
+        ctx.add_task(generate_clock(port.dsp_clock, dsp_period));
+        ctx.add_task(generate_reset(port.reset, port.clock));
+
+        std::array<measurement_t, gate_cnts.size()> measurements{};
+        ctx.add_task(run_gate_sweep(port, option, gate_cnts, measurements));
+
+        ctx.loop_until_finish(20_ms);
+        MESSAGE(ctx.stats());
+
+        // 每次测量都要跟随输入的目标闸门计数，且窗口内的参考沿数随之变化
+        for(auto&& [gate_cnt, measurement]: ::std::views::zip(gate_cnts, measurements))
+        {
+            REQUIRE(measurement.observed);
+            auto expected{option};
+            expected.gate_cnt = gate_cnt;
+            check_window(measurement.result, expected);
+        }
+        CHECK_LT(measurements[0].result.gate_cnt, measurements[1].result.gate_cnt);
+        CHECK_LT(measurements[1].result.gate_cnt, measurements[2].result.gate_cnt);
+    }
+
+    TEST_CASE("consecutive measurements report the same result")
+    {
+        const stimulus_t option{
+            .sig1_period = 400_ns,
+            .sig1_high = 200_ns,
+            .sig2_period = 400_ns,
+            .sig2_high = 200_ns,
+        };
+        dut_context_t ctx{
+            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
+        };
+        ctx.set_base_name("Controller.consecutive");
+        port_t port{ctx.dut()};
+
+        ctx.add_task(generate_clock(port.clock, clock_period));
+        ctx.add_task(generate_clock(port.dsp_clock, dsp_period));
+        ctx.add_task(generate_reset(port.reset, port.clock));
+
+        std::array<measurement_t, 3zu> measurements{};
+        ctx.add_task(run_measurements(port, option, measurements));
+
+        ctx.loop_until_finish(20_ms);
+        MESSAGE(ctx.stats());
+
+        // 同一组激励下每次测量的结果应当一致，且与理论值相符
+        for(const auto& measurement: measurements)
+        {
+            REQUIRE(measurement.observed);
+            check_window(measurement.result, option);
+            check_phase(measurement.result, option);
+        }
+        for(auto index{1zu}; index != measurements.size(); ++index)
+        {
+            CHECK_EQ(measurements[index].result.gate_cnt, measurements[0].result.gate_cnt);
+            CHECK_EQ(measurements[index].result.edge_cnt, measurements[0].result.edge_cnt);
+            CHECK_EQ(measurements[index].result.phase_cnt, measurements[0].result.phase_cnt);
+        }
+    }
+}

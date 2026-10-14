@@ -1,6 +1,7 @@
 local verilator_options = {
     "-Wall", "--trace-fst", { "--x-assign", "unique" }, { "--x-initial", "unique" }, "--coverage"
 }
+local test_args = { "+verilator+rand+reset+2", "-fc" }
 local chisel_dir = path.join(os.scriptdir(), "..", "build", "chisel")
 for _, file in ipairs(os.files("*.cpp")) do
     local name = path.basename(file)
@@ -34,6 +35,7 @@ for _, file in ipairs(os.files("*.cpp")) do
             target:set("targetdir", path.join(target:targetdir(), name))
         end)
 
-        add_tests("rtl", { runargs = { "+verilator+rand+reset+2", "-fc" } })
+        set_runargs(test_args)
+        add_tests("rtl", { runargs = test_args })
     end)
 end
