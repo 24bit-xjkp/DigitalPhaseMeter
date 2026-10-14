@@ -25,9 +25,9 @@ class Axi4LiteSlave(val addrWidth: Int = 32, val dataWidth: Int = 32) extends Mo
         // AXI4-Lite 从口
         val axi = new Axi4LiteSlavePorts(addrWidth, dataWidth)
         // 写命令，到寄存器堆
-        val wr = Decoupled(new AxiLiteWritePayload(addrWidth, dataWidth))
+        val wr = DecoupledIO(new AxiLiteWritePayload(addrWidth, dataWidth))
         // 读命令，到寄存器堆
-        val rd = Decoupled(new AxiLiteReadPayload(addrWidth))
+        val rd = DecoupledIO(new AxiLiteReadPayload(addrWidth))
         // 读数据，由寄存器堆组合给出
         val rdData = Input(UInt(dataWidth.W))
     })

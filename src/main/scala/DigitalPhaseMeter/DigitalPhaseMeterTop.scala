@@ -64,8 +64,8 @@ class DigitalPhaseMeterTop(
     val sig1 = IO(Input(Bool()))
     val sig2 = IO(Input(Bool()))
     // 片内信号源：PL 内 MMCM 产生的两路同频、相位差可调的时钟（异步于测量时钟域）
-    val srcSig1 = IO(Input(Clock()))
-    val srcSig2 = IO(Input(Clock()))
+    val srcSig1 = IO(Input(Bool()))
+    val srcSig2 = IO(Input(Bool()))
     // 片内信号源 MMCM 的锁定指示（异步电平）
     val srcLocked = IO(Input(Bool()))
     // 控制/状态与结果寄存器从口（AXI4-Lite）
@@ -73,31 +73,8 @@ class DigitalPhaseMeterTop(
     // 测量完成中断，高有效电平
     val interrupt = IO(Output(Bool()))
 
-    /** 把顶层 AXI 从口接到内部从口
-      *
-      * 两者使用同一套 bundle、字段方向相同：内部从口的输入取顶层输入，顶层输出取内部从口输出。 逐字段按方向连接可以避免手写几十行容易漏项的同名连接。
-      *
-      * @param top
-      *   顶层端口
-      * @param inner
-      *   内部从口
-      */
-    private def connectTopPort(top: Record, inner: Record): Unit = {
-        for ((name, innerField) <- inner.elements) {
-            val topField = top.elements(name)
-            DataMirror.directionOf(innerField) match {
-                case ActualDirection.Input  => innerField := topField
-                case ActualDirection.Output => topField := innerField
-                case other                  => throw new RuntimeException(s"AXI 端口 $name 的方向未确定：$other")
-            }
-        }
-    }
-
     // 主时钟域的复位：异步置位、同步释放
-    private val resetSynchronizer = Module(new ResetSynchronizer(resetDepth))
-    resetSynchronizer.clock := clock
-    resetSynchronizer.resetn := resetn
-    private val mainReset = resetSynchronizer.reset
+    private val mainReset = ResetSynchronizer(clock, resetn, resetDepth)
 
     withClockAndReset(clock, mainReset) {
         val controller =
@@ -117,20 +94,16 @@ class DigitalPhaseMeterTop(
         val axiLiteSlave = Module(new Axi4LiteSlave(addrWidth, dataWidth))
 
         // AXI4-Lite 从口 ↔ 寄存器堆
-        connectTopPort(s_axi_lite, axiLiteSlave.io.axi)
-        controlRegs.io.wr <> axiLiteSlave.io.wr
-        controlRegs.io.rd <> axiLiteSlave.io.rd
+        s_axi_lite :<>= axiLiteSlave.io.axi
+        controlRegs.io.wr :<>= axiLiteSlave.io.wr
+        controlRegs.io.rd :<>= axiLiteSlave.io.rd
         axiLiteSlave.io.rdData := controlRegs.io.rdData
 
         // 寄存器堆 ↔ 控制器
-        controller.io.in.valid := controlRegs.io.request.valid
-        controller.io.in.bits := controlRegs.io.request.bits
-        controlRegs.io.response.valid := controller.io.out.valid
-        controlRegs.io.response.bits := controller.io.out.bits
+        controller.io.in := controlRegs.io.request
+        controlRegs.io.response := controller.io.out
         // 片内信号源与输入选择配置：整字跨到测量域
-        controller.io.config.valid := controlRegs.io.config.valid
-        controller.io.config.bits := controlRegs.io.config.bits
-        controlRegs.io.config.ready := controller.io.config.ready
+        controller.io.config :<>= controlRegs.io.config
 
         interrupt := controlRegs.io.interrupt
     }

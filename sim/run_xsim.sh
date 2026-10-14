@@ -62,7 +62,7 @@ done
 
 if [[ "${generate_rtl}" == true ]]; then
     echo "== 生成 SystemVerilog（--type=syn）=="
-    (cd "${ROOT_DIR}" && sbt -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop --type=syn")
+    (cd "${ROOT_DIR}" && sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop --type=syn")
 fi
 
 if [[ ! -f "${RTL_DIR}/filelist.f" ]]; then

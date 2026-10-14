@@ -1,6 +1,7 @@
 package DigitalPhaseMeter
 
 import chisel3._
+import chisel3.util._
 
 /** 复位同步器：异步置位、同步释放
   *
@@ -21,10 +22,18 @@ class ResetSynchronizer(val n: Int = 4) extends RawModule {
     val reset = IO(Output(Bool()))
 
     // 复位链的寄存器用异步复位：resetn 拉低时立即清零，输出随之置位
-    private val pipeline = withClockAndReset(clock, (!resetn).asAsyncReset) { RegInit(VecInit.fill(n)(false.B)) }
-    pipeline(0) := true.B
-    for (i <- 1 until n) { pipeline(i) := pipeline(i - 1) }
-    reset := !pipeline(n - 1)
+    private val pipeline = withClockAndReset(clock, (!resetn).asAsyncReset) { RegInit(VecInit.fill(n)(true.B)) }
+    for (i <- 0 until n) { pipeline(i) := (if (i == 0) false.B else pipeline(i - 1)) }
+    reset := pipeline(n - 1)
+}
+
+object ResetSynchronizer {
+    def apply(clock: Clock, resetn: Bool, n: Int = 4): Bool = {
+        val resetSynchronizer = Module(new ResetSynchronizer(n))
+        resetSynchronizer.clock := clock
+        resetSynchronizer.resetn := resetn
+        resetSynchronizer.reset
+    }
 }
 
 object EmitResetSynchronizer extends Main {

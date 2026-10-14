@@ -62,10 +62,10 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
         // 外部输入信号（引脚送来，异步）
         val sig = new PhaseMeterSignalPayload
         // 片内信号源：MMCM 产生的两路同频、相位差可调的时钟（异步于测量时钟域）
-        val sourceSig1 = Input(Clock())
-        val sourceSig2 = Input(Clock())
+        val sourceSig1 = Input(Bool())
+        val sourceSig2 = Input(Bool())
         // 片内信号源使能与输入选择配置（低速域），整字跨到高速域
-        val config = Flipped(Decoupled(new SignalConfigPayload))
+        val config = Flipped(DecoupledIO(new SignalConfigPayload))
         val in = Flipped(ValidIO(new ControllerInPayload(gateCntWidth)))
         val out = ValidIO(new ControllerOutPayload(gateCntWidth, edgeCntWidth, phaseCntWidth))
     })
@@ -89,8 +89,8 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
     signalInputMux.io.sig2External := io.sig.sig2
     // 片内源：MMCM 的两路输出直接作为被测信号（与外部输入共用 PhaseMeter 的异步采样链），
     // 使能无效时把它门成恒低
-    signalInputMux.io.sig1Internal := io.sourceSig1.asBool && cdcConfig.io.out.enable
-    signalInputMux.io.sig2Internal := io.sourceSig2.asBool && cdcConfig.io.out.enable
+    signalInputMux.io.sig1Internal := io.sourceSig1 && cdcConfig.io.out.enable
+    signalInputMux.io.sig2Internal := io.sourceSig2 && cdcConfig.io.out.enable
     signalInputMux.io.selectInternal := cdcConfig.io.out.srcSelect
     phaseMeter.io.sig.sig1 := signalInputMux.io.sig1
     phaseMeter.io.sig.sig2 := signalInputMux.io.sig2
@@ -131,8 +131,7 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
             is(waitStop) {
                 when(responseValid) {
                     stateReg := idle
-                    payload.edgeCnt := phaseMeter.io.response.bits.edgeCnt
-                    payload.phaseCnt := phaseMeter.io.response.bits.phaseCnt
+                    payload.waiveAllAs[PhaseMeterResponsePayload] :<= phaseMeter.io.response.bits
                     payload.gateCnt := gateCnt
                     outValid := true.B
                     responseReady.send

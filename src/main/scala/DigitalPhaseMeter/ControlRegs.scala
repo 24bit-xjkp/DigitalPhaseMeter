@@ -93,9 +93,9 @@ class ControlRegs(
 
     val io = IO(new Bundle {
         // 来自 AXI4-Lite 从口的写命令
-        val wr = Flipped(Decoupled(new AxiLiteWritePayload(addrWidth, dataWidth)))
+        val wr = Flipped(DecoupledIO(new AxiLiteWritePayload(addrWidth, dataWidth)))
         // 来自 AXI4-Lite 从口的读命令
-        val rd = Flipped(Decoupled(new AxiLiteReadPayload(addrWidth)))
+        val rd = Flipped(DecoupledIO(new AxiLiteReadPayload(addrWidth)))
         // 组合读数据
         val rdData = Output(UInt(dataWidth.W))
         // 测量请求，接 Controller 的 in
@@ -107,7 +107,7 @@ class ControlRegs(
         // MMCM 锁定状态（异步输入，寄存器堆内部同步后供状态位使用）
         val srcLocked = Input(Bool())
         // 片内信号源后分频与输入选择配置，接 Controller 的 config（整字跨到高速域）
-        val config = Decoupled(new SignalConfigPayload)
+        val config = DecoupledIO(new SignalConfigPayload)
     })
 
     // ---- 寄存器 ----
@@ -129,7 +129,7 @@ class ControlRegs(
     private val sigEnable = RegInit(false.B)
     private val srcSelect = RegInit(false.B)
     // MMCM 的 locked 异步于主时钟，先同步成主时钟域的电平再进状态位
-    private val srcLocked = CdcLevel.sync(io.srcLocked)
+    private val srcLocked = CdcLevel(io.srcLocked)
     // 待送出的配置快照与「快照尚未组装」「配置尚未送到测量域」标志
     private val configSnapshot = Reg(new SignalConfigPayload)
     private val configDirty = RegInit(false.B)

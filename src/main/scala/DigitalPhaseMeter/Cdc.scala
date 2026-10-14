@@ -41,13 +41,7 @@ object CdcLevel {
       * @return
       *   目的时钟域的电平
       */
-    def sync(sig: Bool, n: Int = 3): Bool = {
-        assert(n >= 2)
-        val pipeline = RegInit(VecInit.fill(n)(false.B))
-        addAttribute(pipeline, """ASYNC_REG = "TRUE"""")
-        for (i <- 0 until n) { pipeline(i) := (if (i == 0) sig else pipeline(i - 1)) }
-        pipeline(n - 1)
-    }
+    def apply(sig: Bool, n: Int = 3): Bool = { MyShiftRegister(sig, n) }
 }
 
 /** 多 bit 配置总线的跨时钟域传递（源时钟域 → 目的时钟域）
@@ -68,7 +62,7 @@ class CdcConfigBus[T <: Data](gen: T) extends Module {
     val dstClock = IO(Input(Clock()))
     val io = IO(new Bundle {
         // 源时钟域的配置写入
-        val in = Flipped(Decoupled(gen.cloneType))
+        val in = Flipped(DecoupledIO(gen.cloneType))
         // 目的时钟域的配置（电平），保持到下一笔配置
         val out = Output(gen.cloneType)
         // 目的时钟域的「新配置到达」脉冲，一拍有效

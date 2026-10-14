@@ -18,11 +18,7 @@ class DspCounter(val width: Int = 48) extends Module {
 
     val cnt = RegInit(0.U(width.W))
     addAttribute(cnt, """use_dsp = "yes"""")
-    when(io.clear) {
-        cnt := 0.U
-    }.elsewhen(io.enable) {
-        cnt := cnt + 1.U
-    }
+    cnt := Mux(io.clear, 0.U, cnt + io.enable)
     io.value := cnt
 }
 
