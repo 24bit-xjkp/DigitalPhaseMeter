@@ -4,20 +4,23 @@
 
 ## 项目概览
 
-基于 Chisel 的数字相位计：测量两路同频信号的相位差。测量通路在高速时钟域（目标 200MHz+），控制与闸门计数在低速时钟域（50MHz）。PL 侧测量与控制 RTL 已完成，其余阶段的规划见 `README.md` 的路线图。
+基于 Chisel 的数字相位计：测量两路同频信号的相位差。测量通路在高速时钟域（DSP 域，当前 400MHz，由 PL 内 MMCM 从 50MHz 倍频得到），控制、闸门计数与 AXI4-Lite 接口在低速时钟域（50MHz）。PS↔PL 的数据交换走 AXI4-Lite 寄存器（GPIO 式，一次测量只有 4 个字，不用 BRAM），并用测量完成中断通知 PS。PL 侧测量与控制 RTL、PS↔PL 互联、Vivado IP 与 block design 已完成；其余阶段的规划见 `README.md` 的路线图。
 
 ## 目录结构与任务优先级
 
 ```text
 ├── src/main/scala/DigitalPhaseMeter/   # Chisel RTL：每个模块一个 .scala，附 Emit<Name> 生成主类
 ├── test/                               # Verilator C++ 测试：每个 <Name>.cpp 自动注册一个测试目标
+├── sim/                                # xsim 的 SystemVerilog 测试激励与运行脚本（AXI4 接口/顶层 IP）
+├── vivado/                             # IP 打包、block design、综合实现脚本与顶层约束
 ├── script/                             # xmake 包定义（Lua）
 ├── build/chisel/<Name>/                # 由 Chisel 生成的 SystemVerilog 与 filelist.f（构建产物，不入库）
+├── build/vivado/                       # 打包出的 IP、BD 工程与综合实现产物（构建产物，不入库）
 ├── .agents/skills/                     # 项目级 skill（见下文"skill 优先"）
 └── xmake.lua                           # 顶层构建脚本
 ```
 
-**任务优先级**：以 RTL 功能实现、缺陷修复、补充测试为主；未明确指定时，优先修改 `src/` 与 `test/`，必要时更新 `.agents/skills/` 中对应的 skill。
+**任务优先级**：以 RTL 功能实现、缺陷修复、补充测试为主；未明确指定时，优先修改 `src/`、`test/` 与 `sim/`，必要时更新 `vivado/` 脚本与 `.agents/skills/` 中对应的 skill。
 
 ## 环境与构建入口
 
@@ -26,8 +29,10 @@
 | 入口 | 职责 |
 | --- | --- |
 | `sbt` | 运行 Chisel，生成 SystemVerilog 到 `build/chisel/<Name>/` |
-| `xmake` | 构建 Verilator 测试目标、运行测试 |
+| `xmake` | 构建 Verilator 测试目标、运行测试（测量通路） |
 | Verilator | 由 xmake 的目标规则调用，编译生成的 SystemVerilog |
+| `sim/run_xsim.sh` | 用 Vivado xsim 跑 `sim/` 下的 SystemVerilog 激励（AXI4 接口与顶层 IP） |
+| `vivado/` 下的 tcl | 打包 IP、创建 block design、综合实现与导出 XSA |
 
 - 本项目使用 clang 工具链。gcc 在编译带 C++20 模块的测试代码时会产生编译器内部错误（ICE）——该结论沿用 `verilator_utils` 系列项目的记录，未在本仓库单独复现：不要用 gcc 配置、构建或做"可移植性验证"。
 - 各入口的具体命令、选项与已知陷阱写在对应 skill 中（见下表），本文件不重复。
@@ -43,6 +48,7 @@
 | 编写/修改 Chisel RTL、生成 SystemVerilog（`sim` / `syn` 两种产物） | `dpm-chisel-rtl` |
 | 编写、运行、调试 Verilator C++ 测试 | `dpm-verilator-testing` |
 | 测量语义、理论值、容限与已知精度下界（写验证判据时） | `dpm-measurement-model` |
+| 打包 Vivado IP、改 PS↔PL 互联的 BD、写/跑 xsim 的 SV 激励、综合实现 | `dpm-vivado-ip` |
 | 提交前的格式化、静态检查与全量回归 | `dpm-pre-delivery-check` |
 
 - **备选一：网络搜索**。skill 未覆盖，或 skill 与项目/环境的实际行为不一致时，先查官方文档与 issue；就地可用的官方帮助（如 `xmake <command> --help`）属于同一类的快速形式。

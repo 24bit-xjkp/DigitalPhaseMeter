@@ -54,13 +54,26 @@ const auto& result{after_reset.value()};  // NOLINT(bugprone-unchecked-optional-
 
 ## 3. 回归测试
 
+按改动范围选择回归入口，改了 AXI4 接口或顶层就要两条都跑：
+
 ```bash
-xmake test -v
+xmake test -v          # Verilator：测量通路（Controller / EdgeDetector）
+sim/run_xsim.sh        # xsim：AXI4 接口与顶层 IP（SystemVerilog 激励，详见 dpm-vivado-ip）
 ```
+
+- 改了 `Axi*.scala`、`ControlRegs.scala`、`Bram.scala`、`DigitalPhaseMeterTop.scala` 时，
+  **必须**重新生成 syn 产物并跑 `sim/run_xsim.sh`（脚本默认会先跑生成入口）；
+  Verilator 侧没有 XPM 模型，覆盖不到这部分。
+- 只改了测量通路（`Controller` / `PhaseMeter` / `EdgeDetector` / `DspCounter`）时，
+  重新生成 sim 产物后跑 `xmake test -v` 即可；但顶层的端口或行为变了也要顺带跑 xsim。
+- 改了 `vivado/` 下的脚本时，至少重新执行对应脚本并确认没有 ERROR / CRITICAL WARNING
+  （`validate_bd_design` 的告警不会让脚本退出码非零，必须看日志）。
 
 - 必须是**全量**：只跑单个目标或用例（`xmake run <Name> ...`）不能作为回归证据，它只用于定位问题。
 - 运行参数是用例级配置（`test/xmake.lua` 中 `add_tests` 的 `runargs`，本项目为 `+verilator+rand+reset+2` 与 `-fc`），只有 `xmake test` 会应用：`xmake run` 走的是 target 级 `runargs`，本项目没有设置。因此"寄存器初值随机"这类只在带 plusargs 时出现的行为，在 `xmake run` 下可能被掩盖——两个入口结果不一致时以 `xmake test` 为准。
 - 改动过 RTL 时，先重新生成 SystemVerilog 再跑测试（见 `dpm-chisel-rtl`）；只改了测试代码则不需要重新生成。
+- `xmake test -v` 的通过判据是末尾的 `100% tests passed`；xsim 的通过判据是日志里出现
+  `==== 测试通过`（xsim 的退出码不足以判定，`$fatal` 也可能返回 0）。
 - 报告里写明实际跑的目标、用例数与断言数（doctest 结尾会打印 `test cases / assertions / Status`）。
 
 ## 4. 交付范围

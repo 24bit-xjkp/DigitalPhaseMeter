@@ -7,3 +7,9 @@ build
 .bsp
 .xmake
 .VSCodeCounter
+# Vivado/xsim 在仓库根目录留下的临时文件
+.Xil
+*.pb
+xsim.dir
+*.jou
+*.log
