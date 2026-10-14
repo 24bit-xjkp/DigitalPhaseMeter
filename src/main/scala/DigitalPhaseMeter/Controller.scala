@@ -54,8 +54,7 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
     val responseState = phaseMeter.response.bits.state
 
     val gateCntClear = RegInit(false.B)
-    val gateCntEnable = RegInit(false.B)
-    val (gateCnt, _) = Counter(0 to (1 << gateCntWidth) - 1, gateCntEnable, gateCntClear)
+    val (gateCnt, _) = Counter(0 to (1 << gateCntWidth) - 1, true.B, gateCntClear)
 
     object StateEnum extends ChiselEnum { val idle, waitStart, measuring, waitStop = Value }
     import StateEnum._
@@ -70,7 +69,6 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
         switch(stateReg) {
             is(idle) {
                 gateCntClear := true.B
-                gateCntEnable := false.B
                 responseReady := false.B
                 outValid := false.B
                 when(io.in.valid) {
@@ -81,7 +79,6 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
             is(waitStart) {
                 when(response(start)) {
                     stateReg := measuring
-                    gateCntEnable := true.B
                     gateCntClear := false.B
                     responseReady := true.B
                 }
