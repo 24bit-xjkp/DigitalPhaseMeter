@@ -201,7 +201,7 @@ namespace
                                             std::span<const std::uint64_t> gate_cnts,
                                             std::span<measurement_t> measurements)
     {
-        for(auto&& [gate_cnt, measurement]: ::std::views::zip(gate_cnts, measurements))
+        for(auto&& [gate_cnt, measurement]: std::views::zip(gate_cnts, measurements))
         {
             option.gate_cnt = gate_cnt;
             measurement = co_await measure_once(port, option);
@@ -305,16 +305,14 @@ TEST_SUITE("Controller")
             // 复位期间不应产生测量结果，输出负载也不应被更新
             for(auto cycle{0zu}; cycle != 20zu; ++cycle)
             {
-                co_await wait_verify(port.clock);
-                CHECK_EQ(port.io_out_valid, 0u);
+                co_await verify_at(port.clock, [&] { CHECK_EQ(port.io_out_valid, 0u); });
             }
 
             // 撤销复位后仍应保持空闲，直到收到测量请求
             port.reset = 0;
             for(auto cycle{0zu}; cycle != 20zu; ++cycle)
             {
-                co_await wait_verify(port.clock);
-                CHECK_EQ(port.io_out_valid, 0u);
+                co_await verify_at(port.clock, [&] { CHECK_EQ(port.io_out_valid, 0u); });
             }
 
             // 复位之后控制器必须能正常工作：完成一次测量
@@ -325,7 +323,6 @@ TEST_SUITE("Controller")
         ctx.add_task(do_verify());
 
         ctx.loop_until_finish(10_ms);
-        MESSAGE(ctx.stats());
 
         REQUIRE(after_reset.has_value());
         // REQUIRE失败会终止当前用例，因此此处访问是安全的
@@ -361,7 +358,6 @@ TEST_SUITE("Controller")
         ctx.add_task(run_measurements(port, option, measurements));
 
         ctx.loop_until_finish(5_ms);
-        MESSAGE(ctx.stats());
 
         REQUIRE(measurements[0].observed);
         check_window(measurements[0].result, option);
@@ -385,7 +381,7 @@ TEST_SUITE("Controller")
         dut_context_t ctx{
             {.coverage = true, .time_precision = verilator_time_unit::ps_10}
         };
-        ctx.set_base_name(::std::format("Controller.phase.{}_{}", sig_period_ns, offset_ns));
+        ctx.set_base_name(std::format("Controller.phase.{}_{}", sig_period_ns, offset_ns));
         port_t port{ctx.dut()};
 
         ctx.add_task(generate_clock(port.clock, clock_period));
@@ -396,7 +392,6 @@ TEST_SUITE("Controller")
         ctx.add_task(run_measurements(port, option, measurements));
 
         ctx.loop_until_finish(5_ms);
-        MESSAGE(ctx.stats());
 
         REQUIRE(measurements[0].observed);
         check_phase(measurements[0].result, option);
@@ -430,10 +425,9 @@ TEST_SUITE("Controller")
         ctx.add_task(run_gate_sweep(port, option, gate_cnts, measurements));
 
         ctx.loop_until_finish(20_ms);
-        MESSAGE(ctx.stats());
 
         // 每次测量都要跟随输入的目标闸门计数，且窗口内的参考沿数随之变化
-        for(auto&& [gate_cnt, measurement]: ::std::views::zip(gate_cnts, measurements))
+        for(auto&& [gate_cnt, measurement]: std::views::zip(gate_cnts, measurements))
         {
             REQUIRE(measurement.observed);
             auto expected{option};
@@ -466,7 +460,6 @@ TEST_SUITE("Controller")
         ctx.add_task(run_measurements(port, option, measurements));
 
         ctx.loop_until_finish(20_ms);
-        MESSAGE(ctx.stats());
 
         // 同一组激励下每次测量的结果应当一致，且与理论值相符
         for(const auto& measurement: measurements)
