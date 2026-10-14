@@ -1,0 +1,81 @@
+---
+name: dpm-pre-delivery-check
+description: 'Use when: 在 DigitalPhaseMeter 中完成一处修改、准备提交或向用户报告结果之前，需要跑格式化、静态检查与回归测试。覆盖 C++（clang-format / clang-tidy）、Scala（scalafmt）与全量测试的检查命令、编译数据库的重新生成、交付范围的确认，以及验证结果的报告要求。'
+argument-hint: '本次要交付的改动'
+---
+
+# 交付前检查
+
+## 适用场景
+
+- 改完 RTL 或测试，准备提交、交付或向用户汇报。
+- 需要判断"跑哪些检查才算数"。
+
+各步骤按顺序执行，任何一步不通过都不要进入下一步。
+
+本仓库的 `.clang-format` / `.clang-tidy` / `.clangd` 与 `verilator_utils` 仓库中的同名配置完全一致，C++ 层面的检查约定可以对照 `~/verilator_utils/.agents/skills/verilator-utils-pre-delivery-check/SKILL.md`（该目录不被自动加载，需按路径直接读取）。
+
+## 1. 格式化
+
+| 语言 | 命令 |
+| --- | --- |
+| C++ | `clang-format -i <改动的 .cpp>`（配置 `.clang-format`，`ColumnLimit = 130`、4 空格缩进） |
+| Scala | `scalafmt`（就地格式化）；`scalafmt --test` 只检查、不改文件 |
+
+`scalafmt --test` 会检查仓库内的全部 Scala 源文件（含 `build.sbt`），是提交前的最低要求。
+
+## 2. 静态检查
+
+C++ 代码用 clang-tidy，配置在 `.clang-tidy`（`clang-analyzer-*`、`modernize-*`、`google-*`、`readability-*`、`cert-*`、`concurrency-*`、`bugprone-*`、`cppcoreguidelines-*` 等，含项目自定的若干关闭项）：
+
+```bash
+clang-tidy -p .vscode --config-file=.clang-tidy test/Controller.cpp
+```
+
+- `-p .vscode` 指向编译数据库 `.vscode/compile_commands.json`；它由 xmake 生成，需要重新生成时：
+
+  ```bash
+  xmake project -k compile_commands --lsp=clangd .vscode
+  ```
+
+- **标准是 0 warning**。新增告警要么改代码，要么在确实属于工具误报时按下一条处理。
+
+### 误报的处理约定
+
+确认是误报时用行内 `NOLINT(<check>)` 精确抑制，并写清原因，不要整段关闭检查。当前的既有例子：`REQUIRE` 失败会终止用例，其后对 `std::optional` 的访问是安全的，但 clang-tidy 仍会报 `bugprone-unchecked-optional-access`：
+
+```cpp
+REQUIRE(after_reset.has_value());
+// REQUIRE失败会终止当前用例，因此此处访问是安全的
+const auto& result{after_reset.value()};  // NOLINT(bugprone-unchecked-optional-access)
+```
+
+当前代码里已按下述方式处理过这类告警，改动时不要重新引入：先判断后执行的循环用普通 `while` 而不是 `do-while`（`cppcoreguidelines-avoid-do-while`）；浮点转整用 `::std::lround`（`bugprone-incorrect-roundings`）。
+
+## 3. 回归测试
+
+```bash
+xmake test -v
+```
+
+- 必须是**全量**：只跑单个目标或用例（`xmake run <Name> ...`）不能作为回归证据，它只用于定位问题。
+- 运行参数是用例级配置（`test/xmake.lua` 中 `add_tests` 的 `runargs`，本项目为 `+verilator+rand+reset+2` 与 `-fc`），只有 `xmake test` 会应用：`xmake run` 走的是 target 级 `runargs`，本项目没有设置。因此"寄存器初值随机"这类只在带 plusargs 时出现的行为，在 `xmake run` 下可能被掩盖——两个入口结果不一致时以 `xmake test` 为准。
+- 改动过 RTL 时，先重新生成 SystemVerilog 再跑测试（见 `dpm-chisel-rtl`）；只改了测试代码则不需要重新生成。
+- 报告里写明实际跑的目标、用例数与断言数（doctest 结尾会打印 `test cases / assertions / Status`）。
+
+## 4. 交付范围
+
+```bash
+git diff --check      # 行尾空白等
+git status --short    # 确认没有把不该提交的东西带进来
+```
+
+- 逐项确认 `git status --short` 里的文件都是本次改动**有意**产生的；哪些目录属于构建产物、不要提交，见仓库根目录 `AGENTS.md` 的"修改边界"。
+- 特别注意仓库根目录有没有散落生成的 `.sv` / `filelist.f`：用 sbt 生成 SystemVerilog 时若参数形式写错，产物会落到仓库根而不是 `build/chisel/<Name>/`（见 `dpm-chisel-rtl`）。
+
+## 5. 报告
+
+按仓库根目录 `AGENTS.md` 的"基本约定"报告（注明实际运行的目标与配置、区分已验证与未验证），另外：
+
+- 报告里给出本次实际跑的目标、用例数与断言数（doctest 结尾会打印 `test cases / assertions / Status`）。
+- 发现 skill 与项目/环境实际行为不一致时，在报告里指出，并把结论补回对应 skill。
