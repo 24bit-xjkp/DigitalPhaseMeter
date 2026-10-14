@@ -111,7 +111,45 @@ xsim <snapshot> -runall
     握手后回到下降沿再撤销信号，避免与 DUT 的时序寄存器竞争；
   - BFM 任务按通道顺序实现即可（AW 与 W 互相独立，分开握手是合法的），
     但要专门用「写数据先到」的顺序写一笔，覆盖 AW/W 偏斜；
-  - 每个用例结束前多等几个周期再 `$finish`，看门狗用 `initial #<超时>; $fatal`。
+  - 每个用例结束前多等几个周期再 `$finish`，看门狗用 `initial #<超时>; $fatal`；
+  - **「闸门计数」类的容限要按被测信号周期给**：XDC/激励里的引脚与时钟固定下来以后，
+    `gateCnt` 的余量是「等到被测信号的下一个上升沿」，最多一个信号周期。激励里写死
+    `gate_target + 8` 这类常数，在外部 400ns 信号（= 20 个低速周期）上够用，换到片内信号源
+    640ns（= 32 个低速周期）就会误判。`check_record` 现在按
+    `$ceil(signal_period / CLOCK_PERIOD) + 8` 计算，与 `dpm-measurement-model` 的公式一致。
+- **顶层 xsim 用例是寄存器堆通路的唯一守门人**：`test/` 下的 Verilator 单测直接驱动
+  `Controller` / `SignalSource` 的端口，**不经过 AXI 从口与 `ControlRegs`**。本仓库实测过一次
+  「寄存器堆往测量域的配置输出被 firtool 优化成常量 0」的缺陷（见 `dpm-chisel-rtl`），
+  Verilator 全绿、只有顶层 xsim 用例（写寄存器 → 启动测量 → 校验结果跟随片内源）能抓到。
+  因此**动 AXI 寄存器通路必须跑 `sim/run_xsim.sh`**，并把新寄存器纳入激励：读回、字节选通、
+  复位默认值、以及「配置真的改变了测量结果」这类有区分度的断言。
+
+## 片内信号源：MMCM 的动态重配置（DRP）
+
+`create_bd.tcl` 里的 `clk_wiz_src` 打开 `CONFIG.USE_DYN_RECONFIG {true}`，把 MMCM 的**频率与相位差**
+交给 PS 通过 AXI4-Lite 在线设定（PG065 的 Dynamic Reconfiguration 寄存器映射，寄存器文件从偏移
+0x200 起）。要点：
+
+- **从口多于一个时改用 `axi_interconnect`**（`NUM_SI=1`、`NUM_MI=2`），它会自动插入 `auto_pc`
+  完成 AXI3 → AXI4-Lite 的转换；只有一个从口时用 `axi_protocol_converter` 更省。地址段分别落在
+  `dpm_top_0/s_axi_lite/Reg`（0x43C0_0000）与 `clk_wiz_src/s_axi_lite/Reg`（0x43C1_0000）。
+- **开了 DRP 的 clk_wiz 没有 `reset` 端口**（复位由 DRP 状态机内部驱动），但仍有 `s_axi_aclk` /
+  `s_axi_aresetn`；它的 AXI 接口名是 **`s_axi_lite`**（不是 `s_axi`）。`connect_bd_net` 之前先用
+  `get_bd_pins <cell>/*` 确认端口名，别照抄其它 AXI IP 的命名。
+- **输出选点要考虑相位范围**：MMCM 每个输出的相位寄存器覆盖 64 个 VCO 周期，换成输出相位是
+  `64 / D` 个输出周期（D = CLKOUTx 分频）。本仓库初始工作点 25MHz（VCO 800MHz、D = 32）→ 2 个
+  输出周期，0～360° 全覆盖；D = 64（12.5MHz）刚好 1 个周期；D = 128（6.25MHz）只剩 0～180°。
+  要更低频率时优先把 VCO 调到下限（600MHz），不要在 MMCM 上把 D 拉到 128 再想要大相位。
+- **不要在 IP 里对 MMCM 输出再做数字分频**：本仓库试过「测量时钟域里数边沿后分频（÷N）把频率
+  做到 1kHz」，除了低频端相位差会带上 0～1 个源周期的固定偏移，分频器本身在 400MHz 域里的
+  「取配置字 → 计数终值减法 → 比较器 → 计数器」路径也一直违约（实测 −1.7ns，即使在模块内先打
+  一拍、并把减法挪到 50MHz 域）。最终方案是**两路 MMCM 输出直接作为被测信号**（与外部引脚共用
+  同一条异步采样链），频率下限就取 MMCM 的输出下限（约 4.7MHz），400MHz 域里不再新增任何逻辑，
+  时序一次通过。要更低频率就应该换用别的手段（例如换更低的参考时钟或外部分频），不要在测量域里做。
+- **重配置期间输出时钟会停止**（MMCM 被复位、重新锁定），因此软件要在测量空闲时改。
+- **MMCM 输出的两路时钟在 IP 里当数据用**（被测量时钟域的边沿检测链采样），因此 XDC 上按异步输入
+  处理：`set_false_path -from [get_clocks *clk_wiz_src*] -to [get_clocks *clk_wiz_0*]`；
+  `locked` 是准静态电平，进慢域前经 3 级同步链，用 `set_max_delay -datapath_only 20` 约束。
 
 ## 实测陷阱
 
@@ -123,6 +161,8 @@ xsim <snapshot> -runall
 | 日志里中文变成 `0xff` 字节 | xsim 会破坏经 `string` 参数/拼接传递的非 ASCII；静态提示用中文、任务参数用 ASCII |
 | `[BD 41-1732]` / `[BD 41-1761]` | IP-XACT 里复位与时钟的关联写多了，见上节 |
 | `write_bitstream` 报 `NSTD-1` / `UCIO-1` | 没有板级约束时 PS 的 MIO/DDR 引脚未指定；`build_bitstream.tcl` 把这两条 DRC 降级为警告，用具体开发板时应补板级约束并去掉降级 |
+| `xvlog` 编译激励时报「中文变成 `0xff`」 | 见上表；作为任务参数传递的字符串用 ASCII |
+| 引脚约束写法 | 外部被测信号 `sig1 → W18`、`sig2 → W19`（`xc7z010clg400-1` 的 bank 34，差分对 `L22` 的 P/N 两半，当两路独立单端输入用，LVCMOS33 需要该 bank VCCO = 3.3V）。只给 PL 引脚约束并不能消掉 `NSTD-1`/`UCIO-1`——没有 board part 时 PS 的 MIO/DDR 仍无法解析，所以 `hook_write_bitstream.tcl` 的降级要保留 |
 
 ## DSP 域高速时钟（默认 400MHz）
 

@@ -82,11 +82,33 @@ ctx.set_base_name(std::format("Controller.gate.{}_{}", sig1_period_ns, sig2_peri
 
 ### 4. 端口宽度与类型
 
-- 单 bit 端口用 `bit_slice<CData>`，多 bit 端口用 `vector_slice<IData>`；把 `vector_slice<CData>` 用在 28/32 位端口上会编译失败（Verilator 的 `VL_IN` / `VL_OUT` 是 `IData`）。
+- 单 bit 端口用 `bit_slice<CData>`；多 bit 端口按 **Verilator 的实际类型**选 `vector_slice<T>`：
+  ≤8 位是 `CData`、≤16 位是 `SData`、≤32 位是 `IData`。**16 位端口必须写 `vector_slice<SData>`**，
+  写成 `vector_slice<IData>` 会编译失败（`no matching constructor ... SData to IData&`）。
 - 端口构造建议集中在一个 `port_t` 结构体里，顺便在这里指定宽度与显示进制（如 `{dut.io_out_bits_gateCnt, 28zu, dec_unsigned}`），避免宽度散落在断言里。
 - 宽度要和 Chisel 侧一致（`Controller` 的 `gateCnt` 28 位、`edgeCnt` / `phaseCnt` 32 位）。
 
-### 5. 波形与仿真结束
+### 5. 窄脉冲激励要跨过一个上升沿再撤销
+
+在下降沿驱动、上升沿采样之后，`co_await wait_stimulate(port.clock)` 会一直停在**下降沿**。若写成
+「置 1 → 等一个下降沿 → 清零」，脉冲只存在半个时钟周期，正好落在两个上升沿之间，**永远采不到**：
+本仓库给 `SignalSource` 送 `reload` 脉冲时就这么错过过一次，表现为「改了相位字但输出没变」。
+正确写法是让脉冲跨过一个上升沿：
+
+```cpp
+port.io_reload = 1;
+co_await wait_stimulate(port.clock);   // 对齐到下降沿
+co_await wait_verify(port.clock);      // 上升沿采到 1
+port.io_reload = 0;                    // 上升沿之后撤销，恰好一拍
+```
+
+### 6. 被改动模块的下游端口不会因为「没驱动」而报错
+
+DUT 新增输入端口后，`port_t` 里没写的端口在 Verilator 里保持 0（不是 X），因此旧测试会静默地
+继续跑「默认配置」那条分支。给 DUT 加端口时，`port_t` 与各用例里的初始化要显式补上新端口；
+真正验证新通路的用例必须显式驱动它们（例如 `Controller` 的 `io_config_valid` / `io_config_bits_*`）。
+
+### 7. 波形与仿真结束
 
 - 激励最后用 `wait_stimulate` 多等几个周期再 `eval_finish()`，避免波形被截断。
 - 每个用例结束时 `MESSAGE(ctx.stats())` 打印仿真时间与速度，便于判断闸门时间是否合理。

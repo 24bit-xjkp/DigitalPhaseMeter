@@ -4,7 +4,7 @@
 
 ## 项目概览
 
-基于 Chisel 的数字相位计：测量两路同频信号的相位差。测量通路在高速时钟域（DSP 域，当前 400MHz，由 PL 内 MMCM 从 50MHz 倍频得到），控制、闸门计数与 AXI4-Lite 接口在低速时钟域（50MHz）。PS↔PL 的数据交换走 AXI4-Lite 寄存器（GPIO 式，一次测量只有 4 个字，不用 BRAM），并用测量完成中断通知 PS。PL 侧测量与控制 RTL、PS↔PL 互联、Vivado IP 与 block design 已完成；其余阶段的规划见 `README.md` 的路线图。
+基于 Chisel 的数字相位计：测量两路同频信号的相位差。测量通路在高速时钟域（DSP 域，当前 400MHz，由 PL 内 MMCM 从 50MHz 倍频得到），控制、闸门计数与 AXI4-Lite 接口在低速时钟域（50MHz）。PS↔PL 的数据交换走 AXI4-Lite 寄存器（GPIO 式，一次测量只有 4 个字，不用 BRAM），并用测量完成中断通知 PS。测量输入有两条通路：外部引脚（`sig1`/`sig2`，默认约束到 W18/W19）与片内信号源（MMCM 时基 + 相位累加器，频率与相位差可调），由 PL 内的寄存器在两者之间切换。PL 侧测量与控制 RTL、PS↔PL 互联、Vivado IP 与 block design 已完成；其余阶段的规划见 `README.md` 的路线图。
 
 ## 目录结构与任务优先级
 

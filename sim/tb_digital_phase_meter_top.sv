@@ -9,7 +9,11 @@
 //   - 测量完成中断（高电平）、中断使能门控，以及软件写 IRQ_STATUS 清中断/清 resultValid/清丢失计数；
 //   - 读 4 个结果寄存器并用理论模型校验 gateCnt / edgeCnt / phaseCnt
 //     （模型见 .agents/skills/dpm-measurement-model）；
-//   - 结果只保留最新一条：不读走就再次测量会覆盖旧结果并累加 LOST_COUNT。
+//   - 结果只保留最新一条：不读走就再次测量会覆盖旧结果并累加 LOST_COUNT；
+//   - 片内信号源与输入选择：SIG_CTRL / SIG_STATUS 经 AXI 读写，选中片内源时测量跟随片内信号、
+//     切回外部输入后跟随外部引脚信号（两条通路的理论值不同，因此这个用例能区分「切换生效」与
+//     「切换没生效」）。片内源的两路信号来自 PL 内 MMCM（动态可重配置），仿真里用两个固定相位差的
+//     信号源代替（周期 640ns、相位差 160ns），MMCM 的频率/相位寄存器不在本激励的覆盖范围内。
 //
 // 运行方式见 sim/run_xsim.sh。
 
@@ -36,8 +40,9 @@ module tb_digital_phase_meter_top;
     localparam int unsigned GATE_TARGET_TINY = 8;
     // 版本号："DPM2"，末尾 02 表示数据经寄存器（GPIO 式）传递
     localparam logic [31:0] VERSION_VALUE = 32'h4450_4d02;
-    // CAPS：b[7:0] 每条结果字数 = 4、b[15:8] 结果深度 = 1、b16 数据通道为寄存器 = 1
-    localparam logic [31:0] CAPS_VALUE = 32'h0001_0104;
+    // CAPS：b[7:0] 每条结果字数 = 4、b[15:8] 结果深度 = 1、b16 数据通道为寄存器 = 1、
+    // b17 带片内信号源与输入选择寄存器 = 1
+    localparam logic [31:0] CAPS_VALUE = 32'h0003_0104;
 
     // 寄存器偏移（字对齐）
     localparam logic [31:0] REG_CTRL = 32'h00;
@@ -51,6 +56,8 @@ module tb_digital_phase_meter_top;
     localparam logic [31:0] REG_IRQ_STATUS = 32'h20;
     localparam logic [31:0] REG_VERSION = 32'h24;
     localparam logic [31:0] REG_CAPS = 32'h28;
+    localparam logic [31:0] REG_SIG_CTRL = 32'h2c;
+    localparam logic [31:0] REG_SIG_STATUS = 32'h30;
 
     // CTRL 位
     localparam int unsigned CTRL_START = 0;
@@ -65,6 +72,21 @@ module tb_digital_phase_meter_top;
     localparam int unsigned IRQ_PENDING = 0;
     localparam int unsigned IRQ_RESULT_ACK = 1;
     localparam int unsigned IRQ_LOST_CLEAR = 2;
+    // SIG_CTRL 位
+    localparam int unsigned SIG_ENABLE = 0;
+    localparam int unsigned SIG_SELECT = 1;
+    // SIG_STATUS 位
+    localparam int unsigned SIG_STATUS_ENABLE = 0;
+    localparam int unsigned SIG_STATUS_SELECT = 1;
+    localparam int unsigned SIG_STATUS_LOCKED = 2;
+    localparam int unsigned SIG_STATUS_READY = 3;
+
+    // 片内信号源工作点：MMCM 两路输出的周期 640ns、相位差 160ns（90°），两路输出直接作为
+    // 被测信号（测量核心的异步采样链只把它量化到 1 个高速时钟周期）
+    localparam real SOURCE_PERIOD = 640.0;
+    localparam real SOURCE_OFFSET = 160.0;
+    localparam real INTERNAL_PERIOD = SOURCE_PERIOD;
+    localparam real INTERNAL_OFFSET = SOURCE_OFFSET;
 
     // ---------------- 时钟与复位 ----------------
     logic clock = 1'b0;
@@ -74,7 +96,7 @@ module tb_digital_phase_meter_top;
     always #(CLOCK_PERIOD / 2.0) clock = ~clock;
     always #(DSP_CLOCK_PERIOD / 2.0) dsp_clock = ~dsp_clock;
 
-    // ---------------- 被测信号源 ----------------
+    // ---------------- 被测信号源（外部引脚） ----------------
     logic sig1 = 1'b0;
     logic sig2 = 1'b0;
 
@@ -94,6 +116,44 @@ module tb_digital_phase_meter_top;
             #(SIGNAL_PERIOD / 2.0);
             sig2 = 1'b0;
             #(SIGNAL_PERIOD / 2.0);
+        end
+    end
+
+    // ---------------- 片内信号源（MMCM 的两路输出） ----------------
+    // 实际电路中这两路来自 PL 内 MMCM（clk_wiz，动态可重配置）的两个输出：频率与相位差由
+    // MMCM 的配置寄存器给出。仿真里用两个固定相位差的信号源代替，IP 只需要它们的边沿。
+    logic src_sig1 = 1'b0;
+    logic src_sig2 = 1'b0;
+    logic src_locked = 1'b0;
+
+    initial begin : src_sig1_source
+        forever begin
+            src_sig1 = 1'b1;
+            #(SOURCE_PERIOD / 2.0);
+            src_sig1 = 1'b0;
+            #(SOURCE_PERIOD / 2.0);
+        end
+    end
+
+    initial begin : src_sig2_source
+        #(SOURCE_OFFSET);
+        forever begin
+            src_sig2 = 1'b1;
+            #(SOURCE_PERIOD / 2.0);
+            src_sig2 = 1'b0;
+            #(SOURCE_PERIOD / 2.0);
+        end
+    end
+
+    // MMCM 锁定指示：复位期间为低，复位释放 10us 后拉高（再次复位时重新拉低）
+    initial begin : src_lock
+        src_locked = 1'b0;
+        forever begin
+            @(posedge resetn);
+            #10000.0;
+            src_locked = 1'b1;
+            @(negedge resetn);
+            src_locked = 1'b0;
         end
     end
 
@@ -127,6 +187,9 @@ module tb_digital_phase_meter_top;
         .dspClock(dsp_clock),
         .sig1(sig1),
         .sig2(sig2),
+        .srcSig1(src_sig1),
+        .srcSig2(src_sig2),
+        .srcLocked(src_locked),
         .s_axi_lite_awaddr(s_axi_lite_awaddr),
         .s_axi_lite_awprot(s_axi_lite_awprot),
         .s_axi_lite_awvalid(s_axi_lite_awvalid),
@@ -332,22 +395,27 @@ module tb_digital_phase_meter_top;
     task automatic check_record(input logic [31:0] gate_cnt, input logic [31:0] edge_cnt,
                                 input logic [31:0] phase_cnt, input logic [31:0] seq,
                                 input logic [31:0] gate_target, input logic [31:0] expect_seq,
-                                input string name);
+                                input string name,
+                                input real signal_period = SIGNAL_PERIOD,
+                                input real phase_offset = PHASE_OFFSET);
         int unsigned expected_edge_cnt;
         int unsigned expected_phase_cnt;
         int unsigned edge_diff;
         int unsigned phase_diff;
+        int unsigned gate_tolerance;
         $display("[%0t] %s：gateCnt=%0d edgeCnt=%0d phaseCnt=%0d seq=%0d", $time, name, gate_cnt, edge_cnt,
                  phase_cnt, seq);
-        // 闸门计数：目标值加上停止握手与结果锁存的少量低速周期
-        check_range(gate_cnt, gate_target, gate_target + 8, {name, " gateCnt"});
+        // 闸门计数：窗口要等到被测信号的下一个上升沿才关闭，因此最多多一个信号周期；
+        // 再加上停止握手与结果锁存需要的几个低速周期（模型见 dpm-measurement-model）
+        gate_tolerance = $rtoi($ceil(signal_period / CLOCK_PERIOD)) + 8;
+        check_range(gate_cnt, gate_target, gate_target + gate_tolerance, {name, " gateCnt"});
         // 边沿计数：窗口长度除以参考信号周期，窗口边界上允许 ±2
-        expected_edge_cnt = (gate_cnt * CLOCK_PERIOD) / SIGNAL_PERIOD;
+        expected_edge_cnt = (gate_cnt * CLOCK_PERIOD) / signal_period;
         edge_diff = (edge_cnt > expected_edge_cnt) ? (edge_cnt - expected_edge_cnt)
                                                    : (expected_edge_cnt - edge_cnt);
         check_range(edge_diff, 0, 2, {name, " edgeCnt error"});
         // 相位计数：每个参考周期累计 offset / T_dsp 个高速周期，容限为每周期 1 个高速周期
-        expected_phase_cnt = (edge_cnt * PHASE_OFFSET) / DSP_CLOCK_PERIOD;
+        expected_phase_cnt = (edge_cnt * phase_offset) / DSP_CLOCK_PERIOD;
         phase_diff = (phase_cnt > expected_phase_cnt) ? (phase_cnt - expected_phase_cnt)
                                                       : (expected_phase_cnt - phase_cnt);
         check_range(phase_diff, 0, edge_cnt, {name, " phaseCnt error"});
@@ -401,6 +469,11 @@ module tb_digital_phase_meter_top;
         check_equal_u32(read_value, 32'h0, "IRQ_STATUS after reset");
         axi_lite_read(REG_CTRL, read_value);
         check_equal_u32(read_value, 32'h0, "CTRL after reset");
+        axi_lite_read(REG_SIG_CTRL, read_value);
+        check_equal_u32(read_value, 32'h0, "SIG_CTRL after reset");
+        // 默认选外部输入，因此 sourceReady 为 1（外部通路在配置上总是可用的）；此时 MMCM 还没锁定
+        axi_lite_read(REG_SIG_STATUS, read_value);
+        check_equal_u32(read_value, 32'h8, "SIG_STATUS after reset");
         read_result(snapshot[0], snapshot[1], snapshot[2], snapshot[3]);
         check_equal_u32(snapshot[0], 32'h0, "RESULT_GATE after reset");
         check_equal_u32(snapshot[1], 32'h0, "RESULT_EDGE after reset");
@@ -549,7 +622,42 @@ module tb_digital_phase_meter_top;
         check_record(snapshot[0], snapshot[1], snapshot[2], snapshot[3], GATE_TARGET_SLOW, 2,
                      "only one result from double start");
 
-        // ---- 14. 复位再次生效：中断清除、状态归零、结果寄存器回默认值 ----
+
+        // ---- 14. 片内信号源：配置寄存器 → 跨时钟域 → 测量，以及外部/内部输入切换 ----
+        // 源信号（MMCM 的两路输出）周期 640ns、相位差 160ns（90°），直接作为被测信号。
+        // 外部引脚上仍然驱动 400ns / 120ns 的信号：选中片内源时测量必须跟随片内源，切回外部
+        // 输入后必须跟随外部信号——两条通路的理论值不同，结论才有区分度。
+        // 使能片内源并切换到片内源
+        axi_lite_write(REG_SIG_CTRL, (1 << SIG_ENABLE) | (1 << SIG_SELECT));
+        axi_lite_read(REG_SIG_CTRL, read_value);
+        check_equal_u32(read_value, 32'h3, "SIG_CTRL readback (internal)");
+        axi_lite_read(REG_SIG_STATUS, read_value);
+        check_bit(read_value[SIG_STATUS_ENABLE], 1'b1, "SIG_STATUS.enable (internal)");
+        check_bit(read_value[SIG_STATUS_SELECT], 1'b1, "SIG_STATUS.srcSelect (internal)");
+        check_bit(read_value[SIG_STATUS_LOCKED], 1'b1, "SIG_STATUS.srcLocked (internal)");
+        check_bit(read_value[SIG_STATUS_READY], 1'b1, "SIG_STATUS.sourceReady (internal)");
+
+        run_measurement(GATE_TARGET_SLOW, "measurement with internal source");
+        read_result(snapshot[0], snapshot[1], snapshot[2], snapshot[3]);
+        check_record(snapshot[0], snapshot[1], snapshot[2], snapshot[3], GATE_TARGET_SLOW, 3,
+                     "internal source measurement", INTERNAL_PERIOD, INTERNAL_OFFSET);
+        ack_result();
+
+        // 切回外部输入：同一寄存器里的选择位清 0，外部引脚上的信号重新成为被测对象
+        axi_lite_write(REG_SIG_CTRL, 32'h0);
+        axi_lite_read(REG_SIG_CTRL, read_value);
+        check_equal_u32(read_value, 32'h0, "SIG_CTRL readback (external)");
+        // 切回外部输入：选择位清 0，MMCM 仍锁定（b2 = 1），sourceReady 因选外部输入恒为 1
+        axi_lite_read(REG_SIG_STATUS, read_value);
+        check_equal_u32(read_value, 32'hC, "SIG_STATUS after switching to external");
+        run_measurement(GATE_TARGET_SLOW, "measurement with external input");
+        read_result(snapshot[0], snapshot[1], snapshot[2], snapshot[3]);
+        check_record(snapshot[0], snapshot[1], snapshot[2], snapshot[3], GATE_TARGET_SLOW, 4,
+                     "external input measurement after switching back");
+        ack_result();
+
+        // ---- 15. 复位再次生效：中断清除、状态归零、结果与信号源配置回默认值 ----
+
         @(negedge clock);
         resetn = 1'b0;
         repeat (4) @(negedge clock);
@@ -567,6 +675,11 @@ module tb_digital_phase_meter_top;
         check_equal_u32(read_value, 32'h0, "RESULT_SEQ after second reset");
         axi_lite_read(REG_VERSION, read_value);
         check_equal_u32(read_value, VERSION_VALUE, "VERSION after second reset");
+        axi_lite_read(REG_SIG_CTRL, read_value);
+        check_equal_u32(read_value, 32'h0, "SIG_CTRL after second reset");
+        // 复位同样把 MMCM 的锁定指示拉低（仿真模型：复位期间 locked = 0）
+        axi_lite_read(REG_SIG_STATUS, read_value);
+        check_equal_u32(read_value, 32'h8, "SIG_STATUS after second reset");
 
         // ---- 汇总 ----
         if (error_count == 0) begin

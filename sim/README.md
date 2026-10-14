@@ -36,7 +36,17 @@ XILINX_VIVADO=/path/to/Vivado sim/run_xsim.sh    # 指定 Vivado 安装路径
 - 数据通道（GPIO 式寄存器）：读 4 个结果寄存器拿一条结果；结果只保留最新一条，
   不读走就再次测量会覆盖旧结果并累加 `LOST_COUNT`；`CTRL.clear` 后序号重新计数；
 - 结果正确性：用测量模型（[`dpm-measurement-model`](../.agents/skills/dpm-measurement-model/SKILL.md)）
-  校验 `gateCnt` / `edgeCnt` / `phaseCnt` 与 `seq` 序号。
+  校验 `gateCnt` / `edgeCnt` / `phaseCnt` 与 `seq` 序号（容限里的闸门计数余量按被测信号周期给，
+  因此片内信号源这种「周期是低速时钟周期整数倍」的信号也适用）；
+- 片内信号源与输入切换：写 `SIG_CTRL` 并读回、读 `SIG_STATUS` 的四个状态位（含复位默认值），
+  选中片内源后测量结果跟随片内信号（周期 640ns、相位差 160ns），切回外部输入后跟随引脚信号
+  （400ns / 120ns）；两条通路的理论值不同，因此能区分「切换生效」与「切换没生效」。
+  片内源的两路信号在仿真里由测试激励直接驱动，模拟 PL 内 MMCM 的两个输出。
+- 该用例曾经抓到一个 Verilator 单测覆盖不到的缺陷：`ControlRegs` 的配置输出被优化成常量 0
+  （写通道里的标志位没有被消费），上层测量因此一直用外部输入。**顶层 AXI 通路上的改动必须跑 xsim**。
+- MMCM 本身不在这个激励里：仿真只喂两路固定频率/相位差的源信号（等价于 MMCM 已按目标参数锁定），
+  因此「MMCM 的动态重配置寄存器是否被正确写入」不在本激励的覆盖范围内——那部分由厂商 IP
+  自己的仿真模型与 PG065 寄存器映射保证，Vivado 侧只做 `validate_bd_design` 与地址分配检查。
 
 ## 实测陷阱（写激励时踩过的）
 

@@ -7,6 +7,14 @@ IP 对外只有**一个 AXI 从口**：`s_axi_lite`（AXI4-Lite，4KB 寄存器�
 结果直接锁存在 `ControlRegs` 的只读结果寄存器里（`RESULT_GATE` / `RESULT_EDGE` / `RESULT_PHASE` /
 `RESULT_SEQ`），PS 收到中断后读 4 个寄存器即可——没有 BRAM、没有第二个 AXI 从口，也没有突发传输。
 
+同一个寄存器区里还有**片内信号源使能与输入选择**的寄存器（`SIG_CTRL` / `SIG_STATUS`，
+偏移 0x2C–0x30）：PL 内用选择位在**外部引脚输入**与**片内信号源**之间切换，`SIG_CTRL.enable` 控制
+片内源的使能。
+片内信号源本身由 BD 里另一个 **MMCM（`clk_wiz_src`，带动态重配置）** 产生：两路输出同频、相位差可调，
+**频率与相位差由 PS 通过 AXI4-Lite 写它的 DRP 寄存器在线设定**（独立地址段 `0x43C1_0000`，
+寄存器映射见 PG065），两路输出**直接**作为被测信号送进 IP 的异步采样链。
+寄存器定义见仓库根目录 [`README.md`](../README.md#寄存器映射s_axi_lite基地址-0x43c0_0000)。
+
 ## 前提
 
 1. 先用 sbt 生成综合产物 SystemVerilog（XPM 原语版本）：
@@ -173,30 +181,37 @@ BD 又无法直接例化原语（`-type primitive` 不支持，`-reference BUFGC
 8 拍：手写门控的 CE 直接跟 `locked`（立即关时钟），Safe Clock Startup 要连续 8 拍采到
 `locked=0` 才关；两者都是无毛刺地停时钟，DSP 域寄存器/FSM 保持不动。
 
-**时序余量怎么看**：place/route 有 run-to-run 波动（同一网表实测 ±0.2ns），所以不能用上面那一对
-单次结果断言哪一版更快。可比的是多次实现：Safe Clock Startup 这一版用 `impl_multi.tcl` 跑了
-**6 次独立实现，全部为正**（最好 +0.358ns、最差 +0.191ns），手写门控此前记录在案的是 6 次全部
-为正、最差 +0.236ns。两者都在同一量级、都收敛，**这次替换没有让 400MHz 时序变差到不可接受**。
+**时序余量怎么看**：place/route 有 run-to-run 波动（同一网表实测 ±0.2ns），所以不能用单次结果
+断言收敛。可比的是多次实现：**加入片内信号源（第二个 MMCM）后，`impl_multi.tcl` 的 6 次独立实现
+WNS 全部为正，最差 +0.153ns、最好 +0.389ns，WHS 均为 +0.025ns**（见下文「本仓库的实测结果」）。
+作为对照：Safe Clock Startup 那一版（没有片内信号源）6 次为 +0.191～+0.358ns，手写门控版最差
++0.236ns——三者同一量级，**加入片内信号源没有让 400MHz 时序变差到不可接受**；真正把余量吃掉的
+是「在 400MHz 域里做 32 位加减 / 16 位分频比较」的那几版尝试（WNS −0.55 / −0.71 / −1.7ns），
+最终把信号生成全部交回 MMCM、测量域不再新增逻辑后回到正值（见 `dpm-vivado-ip` 的同名结论）。
 
 ## Block design 结构
 
 ```text
-processing_system7_0 ──M_AXI_GP0(AXI3, ID 12)──► axi_protocol_converter_0 ──M_AXI(AXI4-Lite)──► dpm_top_0/s_axi_lite
-        │  FCLK_CLK0 50MHz ──► proc_sys_reset_0 ─► 协议转换器与 IP 的主时钟/复位
-        │                   └► clk_wiz_0(MMCM + Safe Clock Startup) ─► dpm_top_0/dspClock
+processing_system7_0 ──M_AXI_GP0(AXI3, ID 12)──► axi_interconnect_0 ──M00_AXI(AXI4-Lite)──► dpm_top_0/s_axi_lite
+        │                                               └──M01_AXI(AXI4-Lite)──► clk_wiz_src/s_axi_lite（DRP）
+        │  FCLK_CLK0 50MHz ──► proc_sys_reset_0 ─► 互联与两个从口的主时钟/复位
+        │                   ├► clk_wiz_0(MMCM + Safe Clock Startup) ─► dpm_top_0/dspClock
+        │                   └► clk_wiz_src(MMCM + 动态重配置) ─► dpm_top_0/srcSig1、srcSig2、srcLocked
         └◄── IRQ_F2P ◄── xlconcat_0 ◄── dpm_top_0/interrupt（IRQ_F2P[0]）
 
-sig1 / sig2：BD 外部端口 → dpm_top_0（顶层 XDC 里约束到实际引脚）
+sig1 / sig2：BD 外部端口 → dpm_top_0（顶层 XDC 里约束到引脚 W18 / W19，LVCMOS33）
+
+dpm_top_0 内部：外部 sig1/sig2 与片内源（MMCM 的两路输出）经 SignalInputMux 二选一；
+使能与选择位从 s_axi_lite 的寄存器区经 CdcConfigBus 跨到 DSP 域。
 ```
 
 要点：
 
-- **只用一个 `axi_protocol_converter`，不用 `axi_interconnect`**：IP 只剩一个 AXI4-Lite 从口，
-  没有地址译码需求，只需要把 Zynq-7000 `M_AXI_GP0` 的 **AXI3**（ID 宽 12、最大突发 16）
-  转成 IP 的 **AXI4-Lite**。协议转换器就是 Vivado 自动插入的 `auto_pc` 用的那个 IP
-  （`xilinx.com:ip:axi_protocol_converter:2.1`，`SI_PROTOCOL=AXI3`、`MI_PROTOCOL=AXI4LITE`、
-  `DATA_WIDTH=32`、`ADDR_WIDTH=32`、`ID_WIDTH=12`、`TRANSLATION_MODE=2`），
-  比互联少一层面积与延迟。地址分配直接穿过转换器落在 `dpm_top_0/s_axi_lite/Reg` 上。
+- **从口多于一个时用 `axi_interconnect`**：测量 IP 与片内源 MMCM 的动态重配置口都是 AXI4-Lite 从口，
+  互联负责地址译码，并自动插入 `auto_pc` 完成 Zynq-7000 `M_AXI_GP0` 的 **AXI3**（ID 宽 12、
+  最大突发 16）→ **AXI4-Lite** 协议转换（`SI_PROTOCOL=AXI3`、`MI_PROTOCOL=AXI4LITE`、`ID_WIDTH=12`、
+  `TRANSLATION_MODE=2`，与手工例化 `axi_protocol_converter` 的配置一致）。只有一个从口时
+  不必上互联，直接用 `axi_protocol_converter` 更省面积与延迟（本仓库早期的做法）。
 - `ID_WIDTH=12` 与 PS 的 ID 宽一致：`ID_WIDTH=0` 时转换器从口根本没有 ID 信号（`C_IGNORE_ID=1`），
   PS 的 `AWID/ARID/BID/RID` 会被悬空。
 - **DSP 域时钟由 PL 内 MMCM 倍频**，不用 PS 的 `FCLK_CLK1`：Zynq-7000 的 FCLK 由 PS 的 IO PLL
@@ -204,6 +219,15 @@ sig1 / sig2：BD 外部端口 → dpm_top_0（顶层 XDC 里约束到实际引�
   在 PL 内用 MMCM。参考时钟取 `FCLK_CLK0`（50MHz，与 AXI/低速控制域同源，锁相稳定），目标频率由
   `create_bd.tcl` 的第一个参数给出（默认 400MHz）。当前配置：`PRIM_IN_FREQ=50`、
   `MMCM_CLKFBOUT_MULT_F=16`、`MMCM_CLKOUT0_DIVIDE_F=2` → VCO 800MHz、输出 400MHz。
+- **片内信号源的 MMCM 带动态重配置**（`CONFIG.USE_DYN_RECONFIG=true`，初始 25MHz + 90° 相位差）：
+  两路输出同频、相位差由每个输出的相位寄存器给出；PS 通过 AXI4-Lite 写 DRP 寄存器（PG065 的
+  Clocking Wizard 动态重配置寄存器映射）改频率（CLKFBOUT 倍频、CLKOUTx 分频）与相位差
+  （CLKOUTx 相位），再写 Load 寄存器让 MMCM 重新锁定。**重配置期间两路输出会停止**，因此要在测量
+  空闲时改。这里不再手写 DRP 状态机与 MMCM 寄存器编码（lock/filter/VCO 参数、`CLKOUTx` 的
+  `high_time/low_time/phase_mux/delay_time` 编码都在厂商 IP 里），只用它的 AXI 接口。
+  初始频率选 25MHz（D = 32）：MMCM 相位寄存器的可表示范围是 64 个 VCO 周期，换成输出相位是
+  `64 / D` 个输出周期，D = 32 时正好 2 个周期，0～360° 全覆盖；输出频率越低（D 越大）相位范围越小
+  （D = 128 时只剩 0～180°），需要更低频率时优先把 VCO 调到下限而不是把 D 拉满。
 - **「MMCM 锁定前不放时钟」用 clk_wiz 自带的 Safe Clock Startup**（`CONFIG.USE_SAFE_CLOCK_STARTUP=true`），
   不再手写门控模块。开启后 Wizard 自动把 `CLKOUT1_DRIVES` 限定成 `BUFGCE`，并生成
   「MMCM 输出 → `BUFGCE`（`CE = seq_reg1[7]`）→ `clk_out1`」：`seq_reg1` 是同一 MMCM 输出经 `BUFH`
@@ -231,11 +255,12 @@ sig1 / sig2：BD 外部端口 → dpm_top_0（顶层 XDC 里约束到实际引�
 
 ## 地址映射
 
-| 从口                   | 基地址        | 范围 | 用途                                 |
-| ---------------------- | ------------- | ---- | ------------------------------------ |
-| `dpm_top_0/s_axi_lite` | `0x43C0_0000` | 4 KB | 控制/状态寄存器 + 只读测量结果寄存器 |
+| 从口                       | 基地址        | 范围 | 用途                                                                 |
+| -------------------------- | ------------- | ---- | -------------------------------------------------------------------- |
+| `dpm_top_0/s_axi_lite`     | `0x43C0_0000` | 4 KB | 控制/状态寄存器 + 只读测量结果寄存器 + 片内源使能/输入选择           |
+| `clk_wiz_src/s_axi_lite`   | `0x43C1_0000` | 4 KB | 片内信号源 MMCM 的动态重配置寄存器（PG065 寄存器映射）               |
 
-只有这一个地址段（`SEG_dpm_top_0_Reg`）。寄存器定义见仓库根目录
+两段地址（`SEG_dpm_top_0_Reg`、`SEG_clk_wiz_src_Reg`）。寄存器定义见仓库根目录
 [`README.md`](../README.md#pspl-互联与寄存器接口) 与权威映射表
 [`../src/main/scala/DigitalPhaseMeter/ControlRegs.scala`](../src/main/scala/DigitalPhaseMeter/ControlRegs.scala)；
 在 Vitis 里对应 `XPAR_DPM_TOP_0_S_AXI_LITE_BASEADDR`。
@@ -257,7 +282,18 @@ sig1 / sig2：BD 外部端口 → dpm_top_0（顶层 XDC 里约束到实际引�
 #define DPM_LOST_COUNT   0x1Cu
 #define DPM_IRQ_STATUS   0x20u        /* W1C：[0] irqPending [1] resultValid [2] lost */
 #define DPM_VERSION      0x24u        /* 0x44504D02 */
-#define DPM_CAPS         0x28u        /* b[7:0] 每条结果字数=4，b[15:8] 深度=1，b16 数据通道为寄存器 */
+#define DPM_CAPS         0x28u        /* b[7:0] 每条结果字数=4，b[15:8] 深度=1，b16 数据通道为寄存器，b17 有片内信号源 */
+#define DPM_SIG_CTRL     0x2Cu        /* [0] enable 片内源使能  [1] srcSelect 0=外部引脚 1=片内源 */
+#define DPM_SIG_STATUS   0x30u        /* [0] enable [1] srcSelect [2] srcLocked [3] sourceReady */
+
+/* 片内信号源的 MMCM（clk_wiz_src）动态重配置口：另一个 4KB 地址段（基地址见 xparameters.h
+   的 XPAR_DPM_SYSTEM_CLK_WIZ_SRC_0_S_AXI_LITE_BASEADDR）。寄存器文件从偏移 0x200 起，
+   配置寄存器 / Load / Status 的具体偏移与位域见 PG065（Clocking Wizard）的
+   Dynamic Reconfiguration 章节；写流程：改时钟配置寄存器 → 写 Load 寄存器 → 等 Status.locked。
+   常用参数：
+     频率 = VCO / CLKOUTx 分频，VCO = 输入频率 × CLKFBOUT 倍频 ÷ DIVCLK，VCO 需落在 600～1200MHz；
+     相位差 = CLKOUT0 与 CLKOUT1 的相位寄存器之差（分辨率为 VCO 周期的 1/8）。 */
+#define CLKWIZ_DRP_BASE  0x43C10000u
 
 static inline void dpm_write(u32 off, u32 value) { Xil_Out32(DPM_BASE + off, value); }
 static inline u32  dpm_read(u32 off)             { return Xil_In32(DPM_BASE + off); }
@@ -268,6 +304,20 @@ void dpm_start(u32 gate_target)
     dpm_write(DPM_GATE_TARGET, gate_target);
     dpm_write(DPM_CTRL, (1u << 1) | (1u << 0));
 }
+
+/* 选中片内信号源（MMCM 的两路输出直接作为被测信号，初始 25MHz / 90°） */
+void dpm_select_internal_source(void)
+{
+    /* 1) 需要改频率/相位差时，先写 MMCM 的动态重配置寄存器（PG065 映射），
+          再写 Load 寄存器并等锁定；这里假设沿用 BD 里的初始工作点（25MHz / 90°） */
+    /* 2) 使能并选中片内源；AXI 写会在配置跨到测量域后才完成，因此写返回即已生效 */
+    dpm_write(DPM_SIG_CTRL, (1u << 0) | (1u << 1)); /* enable | srcSelect */
+    /* 3) 确认 MMCM 已锁定、源可用 */
+    while ((dpm_read(DPM_SIG_STATUS) & ((1u << 2) | (1u << 3))) != ((1u << 2) | (1u << 3))) { }
+}
+
+/* 切回外部引脚输入（sig1 → W18、sig2 → W19） */
+void dpm_select_external_source(void) { dpm_write(DPM_SIG_CTRL, 0u); }
 
 /* 中断服务程序：清中断，读走 4 个结果寄存器（结果只有一份，不需要循环取多条记录） */
 void dpm_irq_handler(void)
@@ -300,8 +350,8 @@ void dpm_irq_handler(void)
    `clkfbout`（都等于 50MHz，约束在 MMCM 原语内部，不跨到 fabric）、DSP 域的
    `clk_out1_dpm_system_clk_wiz_0_0`(400MHz)。**实际存在时序路径的时钟对只有 3 类**：
    - `clk_fpga_0 → clk_fpga_0`（慢域内部，WNS +12.608ns）
-   - `clk_fpga_0 → clk_out1_...`（慢→快，2 个端点：`request`、`responseReady` 的翻转信号，
-     在 DSP 域被 3 级 ASYNC_REG 同步链采样）
+   - `clk_fpga_0 → clk_out1_...`（慢→快：`request`、`responseReady` 的翻转信号，以及信号源配置的
+     翻转握手与配置字，在 DSP 域被 3 级 ASYNC_REG 同步链采样；配置字在整笔传输期间保持稳定）
    - `clk_out1_... → clk_fpga_0`（快→慢，65 个端点：`response.valid`/`response.ready`
      以及结果载荷在慢域被同步链采样）
    两类跨域通路都由 [`constraints/dpm_top.xdc`](constraints/dpm_top.xdc) 的**双向**
@@ -309,7 +359,10 @@ void dpm_irq_handler(void)
 3. **为什么 sig1/sig2 用 `set_false_path` 而不是 max_delay**：它们是外部异步输入，
    在 IP 内部立刻进 `EdgeDetector` 的 3 级 `ASYNC_REG` 同步链（见 `dpm-chisel-rtl`），
    第一级就是同步器，不需要建立/保持关系。`check_timing` 把它列为 MEDIUM 提示是预期的
-   （提示「有 false path 的输入端口没有 input delay」），只要引脚与 IO 标准按板卡补上即可。
+   （提示「有 false path 的输入端口没有 input delay」）；引脚与 IO 标准已在
+   [`constraints/dpm_top.xdc`](constraints/dpm_top.xdc) 中给出（`sig1 → W18`、`sig2 → W19`，
+   LVCMOS33），换板卡时按实际供电与引脚改这两行。片内信号源由 DSP 域时钟直接驱动，与测量核心
+   同源，因此没有额外的输入约束。
 4. **复位与时钟基础设施不是数据通路**：`resetn` 经 `ResetSynchronizer` 同步，DSP 域的
    `dspReset` 由 `SyncReset`（综合化为 `xpm_cdc_sync_rst`）从主复位同步得到；MMCM 的
    `locked` 只驱动 clk_wiz 内部 Safe Clock Startup 的移位寄存器与 `BUFGCE` 的 CE
@@ -322,23 +375,28 @@ void dpm_irq_handler(void)
 
 ## 本仓库的实测结果（Vivado 2025.2，xc7z010clg400-1）
 
-数据通道改成寄存器（GPIO 式）、DSP 域时钟改为 MMCM 倍频到 400MHz，并把手写 BUFGCE 门控换成
-clk_wiz 自带的 Safe Clock Startup 之后重跑的脚本，均为实际运行结果：
+加入片内信号源（BD 里第二个 MMCM + 动态重配置口）并把手写 BUFGCE 门控换成 clk_wiz 自带的
+Safe Clock Startup 之后重跑的脚本，均为实际运行结果：
 
 | 步骤                    | 结果                                                                                                                                                                                                                                                                                        |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `package_ip.tcl`        | 通过，`ipx::check_integrity: Integrity check passed`，0 ERROR / 0 CRITICAL WARNING；IP 对外 **5 个** bus interface：`s_axi_lite`（19 根 AXI4-Lite 信号全部推断成功）、`clock`、`dspClock`、`resetn`、`interrupt`，**没有 `s_axi_bram`**；地址块只有 `s_axi_lite/Reg`（4KB、usage=register） |
-| `create_bd.tcl`         | 通过（`BD_DONE: dpm_system`），`validate_bd_design` 0 ERROR / 0 CRITICAL WARNING；BD 用 `axi_protocol_converter_0`（AXI3→AXI4-Lite，无 axi_interconnect），DSP 域时钟只经过 `clk_wiz_0`（无额外门控单元）；地址映射只有一段 `SEG_dpm_top_0_Reg offset=0x43C00000 range=0x00001000`           |
-| 综合 + 实现 + bitstream | 通过（`SYNTH_DONE` / `IMPL_DONE` / `XSA_DONE`，`write_bitstream completed successfully`，`All user specified timing constraints are met`）；**时序 WNS = +0.358 ns、WHS = +0.062 ns**，TNS = THS = 0，**0 个失败端点**；DSP 域（41 个端点）WNS = +0.358 ns / WHS = +0.157 ns，慢域 WNS = +12.108 ns |
-| 时钟                    | `clk_fpga_0` 50 MHz（FCLK_CLK0，20 ns，AXI/低速控制域 + MMCM 参考）、DSP 域 400 MHz（MMCM 输出，2.5 ns；`PRIM_IN_FREQ=50`、`MMCM_CLKFBOUT_MULT_F=20`、`MMCM_CLKOUT0_DIVIDE_F=2.5`）；DSP 域时钟路径 = `MMCM → BUFGCE`（Safe Clock Startup 自带），另有 1 个 `BUFH` 给其移位寄存器供时钟 |
-| 跨时钟域（CDC）         | 两条握手通路都在有界 `set_max_delay -datapath_only 20ns` 下：慢→快 WNS = +18.584 ns、快→慢 WNS = +18.170 ns；`check_timing` 报 0 个未约束端点 / 0 个无时钟寄存器 / 0 个多时钟 / 0 个环路（详见下文「约束审计」）                                                                                |
-| 资源占用                | Slice LUT 557（3.16%）、Slice Register 954（2.71%）、**Block RAM Tile 0（0.00%）**、DSP 2（0.91%）、Bonded IOB 2（1.60%）、BUFGCTRL 3（9.38%）、BUFH 1（2.08%）；与手写门控版相比 −1 BUFGCTRL、+1 BUFH、+8 Register                                                                          |
-| bitstream               | `build/vivado/bd_proj/dpm_bd.runs/impl_1/dpm_system_wrapper.bit`（2083870 字节 ≈ 2.0 MB）                                                                                                                                                                                                   |
-| XSA                     | `build/vivado/dpm_system.xsa`（275106 字节 ≈ 269 KB，含 bitstream）                                                                                                                                                                                                                         |
-| `xsim`                  | 顶层 IP 的 SV 激励在 [`../sim/`](../sim/)，运行方式与结果见 [`../sim/README.md`](../sim/README.md)；本目录的验证不覆盖仿真                                                                                                                                                                  |
+| `package_ip.tcl`        | 通过，`ipx::check_integrity: Integrity check passed`，0 ERROR / 0 CRITICAL WARNING；IP 对外 **5 个** bus interface：`s_axi_lite`（19 根 AXI4-Lite 信号全部推断成功）、`clock`、`dspClock`、`resetn`、`interrupt`；片内源的三根信号（`srcSig1` / `srcSig2` / `srcLocked`）是普通引脚 |
+| `create_bd.tcl`         | 通过（`BD_DONE: dpm_system`），`validate_bd_design` 0 ERROR / 0 CRITICAL WARNING；BD 用 `axi_interconnect_0`（NUM_SI=1、NUM_MI=2，自动插入 `auto_pc` 做 AXI3→AXI4-Lite）、两个 MMCM（`clk_wiz_0` 出 DSP 域时钟、`clk_wiz_src` 带 DRP）；两段地址 `SEG_dpm_top_0_Reg 0x43C00000` 与 `SEG_clk_wiz_src_Reg 0x43C10000` |
+| 综合 + 实现 + bitstream | 通过（`SYNTH_DONE` / `IMPL_DONE` / `XSA_DONE`，`write_bitstream completed successfully`）；**6 次独立实现的 WNS 全部为正：最差 +0.153ns、最好 +0.389ns**，WHS 均为 +0.025ns，TNS = THS = 0，**0 个失败端点**（每次的报告见 `impl_multi.tcl` 的输出） |
+| 时钟                    | `clk_fpga_0` 50 MHz（FCLK_CLK0）、DSP 域 400 MHz（`clk_wiz_0` 的 MMCM 输出，2.5 ns）、片内源 2 × 25 MHz 且相位差 90°（`clk_wiz_src` 的 `clk_out1` / `clk_out2`，波形 `{0,20}` 与 `{10,30}` ns，即 90°）；**器件只有 2 个 MMCM，本设计两个都用掉了** |
+| 跨时钟域（CDC）         | 三类握手通路（慢↔快的请求/应答、慢→快的配置整字）都在有界 `set_max_delay -datapath_only 20ns` 下；片内源两路时钟到 DSP 域按异步输入 `set_false_path` 处理，`srcLocked` 用 `set_max_delay -datapath_only 20ns` 进慢域 |
+| 资源占用                | Slice LUT 2030（11.53%）、Slice Register 2743（7.79%）、**Block RAM Tile 0（0.00%）**、DSP 3（3.75%）、Bonded IOB 2（2.00%，即 W18/W19）、BUFGCTRL 6（18.75%）、**MMCME2_ADV 2（100%，器件上限）** |
+| bitstream               | `build/vivado/bd_proj/dpm_bd.runs/impl_1/dpm_system_wrapper.bit`                                                                                                                                                                                                                            |
+| XSA                     | `build/vivado/dpm_system.xsa`（含 bitstream）                                                                                                                                                                                                                                               |
+| `xsim`                  | 顶层 IP 的 SV 激励在 [`../sim/`](../sim/)，通过（`==== 测试通过`）：片内源的两路信号由激励直接驱动（周期 640ns、相位差 160ns），测得 `phaseCnt/edgeCnt` 精确等于 32 个高速时钟周期；运行方式与覆盖范围见 [`../sim/README.md`](../sim/README.md)                                                            |
 
-未验证项：没有上板跑过（无开发板、无板级约束），PS 侧软件未编写，因此「中断真的被 PS 收到」
-「PS 读到的结果与仿真一致」这两条只有仿真证据。
+未验证项：
+
+- 没有上板跑过（无开发板、无板级约束），PS 侧软件未编写，因此「中断真的被 PS 收到」「PS 读到的结果
+  与仿真一致」这两条只有仿真证据；
+- **MMCM 的动态重配置本身没有仿真**：仿真里只喂两路固定频率/相位差的源信号，没有例化 clk_wiz 的
+  仿真模型，因此 DRP 寄存器映射、Load/locked 时序与「改频率后输出真的变化」都只有厂商 IP 与 PG065
+  的依据，以及 `validate_bd_design` 的结构检查；上板后需要先确认这一点。
 
 ## 注意事项与已知限制
 
@@ -351,9 +409,12 @@ clk_wiz 自带的 Safe Clock Startup 之后重跑的脚本，均为实际运行�
   `dpm_system_processing_system7_0_0.xdc`：没有 board part 时它无法把 MIO 引脚解析成 package pin。
   MIO 的 IO 标准与方向由 PS 的配置（boot header / PS 配置字）在启动时生效，不影响 PL 侧的
   综合、实现与 bitstream 生成；加了板级约束后这些告警会消失。
-- `sig1`/`sig2` 的 `PACKAGE_PIN`/`IOSTANDARD` 需要按实际板卡在
-  [`constraints/dpm_top.xdc`](constraints/dpm_top.xdc) 中填写；两个信号按异步输入约束
-  （`set_false_path`），PL 内部由带 `ASYNC_REG` 的同步链采样。
+- `sig1`/`sig2` 的 `PACKAGE_PIN`/`IOSTANDARD` 已按本仓库默认板级方案写死在
+  [`constraints/dpm_top.xdc`](constraints/dpm_top.xdc)（`sig1 → W18`、`sig2 → W19`，LVCMOS33）。
+  这两个引脚在 `xc7z010clg400-1` 上属于 bank 34 的差分对 `L22`（`IO_L22P_T3_34` / `IO_L22N_T3_34`），
+  这里当两路独立单端输入用；换板卡时按实际引脚与 bank 供电（LVCMOS33 需要 VCCO=3.3V）改这两行。
+  两个信号按异步输入约束（`set_false_path`），PL 内部由带 `ASYNC_REG` 的同步链采样。
+  由于 MIO/DDR 等 PS 侧引脚在没有 board part 时仍无法解析，`NSTD-1`/`UCIO-1` 的降级 hook 依然保留。
 - IP 的 AXI4-Lite 从口没有突发与传输宽度概念：每笔读写各一次握手，读/写响应恒为 `OKAY`，
   未映射地址读回 0、写被忽略。IP-XACT 里声明的 `MAX_BURST_LENGTH=1` 与「读写各一笔未完成事务」
   只是把能力如实写全；PS 侧经协议转换器发出的 AXI3 访问会被拆成单拍 AXI4-Lite 传输。

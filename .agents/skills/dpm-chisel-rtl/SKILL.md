@@ -119,6 +119,42 @@ sbt 会把字面量 `--` 作为第一个参数传给程序，`emitSystemVerilog`
   只保留最新一条时，配一个 `LOST_COUNT`（结果未被读走即被覆盖的次数）加自增 `seq`，软件就能发现漏读。
 - `Fill(n, value)` 是两个参数；`MuxCase(default, Seq(cond -> value))` 里的条件必须是 `Bool`
   （写 `(mode === 1.U) -> addr` 而不是 `mode -> addr`）。
+- **400MHz 域里不要放 32 位加减法**：片内信号源最初用「32 位相位累加器 + 相位字预置」实现，实测在
+  `xc7z010clg400-1`（−1）上综合实现直接违约（配置字预置 → 32 位进位链 → 累加器 D 端，WNS −0.55ns），
+  把预置值改成寄存器直连后违约路径换成了「跨区域取配置字 → 比较器」，WNS −0.71ns。最终改成
+  **MMCM 出两路同频、相位差可调的时钟 + 测量时钟域里的小计数器数边沿分频**：
+  频率与相位差交给 PL 内 MMCM 的动态重配置（寄存器写），400MHz 域里只剩 16 位计数器与比较器，
+  时序一次通过。结论：**高速域只放计数器/比较器这类短逻辑，宽加减法与相位累加放到 MMCM 或低速域**。
+- **跨时钟域送来的多 bit 配置在高速域里落点可能很远**：分频比从配置总线到分频器属于同一个 DSP 域，
+  但两者跟随的物理通路不同，布局后这条同域路径实测 6.3ns（逻辑 2.9 + 布线 3.5）。处理方式是在
+  消费模块里先打一拍（`RegNext(io.config)`），让比较器与计数器同处一块区域，并在 XDC 里把
+  「配置寄存器 → 消费模块」这条同域长路径按准静态放宽（`set_max_delay -datapath_only 20`）：
+  这个值只在软件写寄存器时改变，且跨时钟域握手保证它在采样窗口内稳定。
+- **派生运算放到低速域，高速域只留「取寄存器 → 比较/计数」**：分频比要先变成计数终值 `N - 1`，
+  第一版在高速域里算，路径变成「取配置字 → 16 位减法 → 比较器 → 计数器」，即使两者都在同一个
+  模块里也违约（实测 −1.7ns，其中布线 2.3ns）。规律：**只要一个值在配置期算得出来，就不要留到
+  400MHz 的每拍路径上**（与「预置值减法」那条坑同源）。
+  最终结论更彻底：这个分频器整体被删掉了——把「产生低频信号」的职责交回 MMCM（只改 MMCM 的输出
+  范围），高速域不再新增任何逻辑，时序一次通过。见 `dpm-vivado-ip` 的「不要在 IP 里对 MMCM 输出
+  再做数字分频」。
+- **寄存器堆往下游的输出必须真的被消费，否则整条通路会被 firtool 删掉**：本仓库在 `ControlRegs` 里
+  用 `WireDefault(false.B)` 声明了一个「本拍写了配置」的标志，却在三个 `is(...)` 分支里只给它赋值、
+  忘了用它置 `configDirty`。结果 `configPending` 恒为 0 → `io.config.valid` 恒 0 → firtool 把
+  **跨时钟域总线、目的域配置寄存器、以及 `Controller` 上那一组 `io_config_*` 端口全部优化掉**，
+  顶层实例化里连端口都不剩。表现很有迷惑性：寄存器读写回读完全正常（`SIG_CTRL` 读回 3），
+  但下游一直用默认配置（选择位恒 0）；而只测 `Controller`、绕过寄存器堆的 Verilator 单测**全绿**。
+  防御手段有两个：生成后 `grep` 一下顶层 SV 里目标模块还有没有那组端口；以及**寄存器堆到下游的
+  通路必须有 xsim 顶层用例覆盖**（见 `dpm-vivado-ip`）。
+- **独立生成给 Verilator 单测的模块要能过 `-Wall`**：`test/xmake.lua` 用 `-Wall` 编译
+  `build/chisel/<Name>/`，警告即失败（`%Error: Exiting due to N warning(s)`）。两类常见告警都来自
+  「共享数据结构 + 只关心一部分」：
+  - `UNUSEDSIGNAL: Signal is not used: 'io_config_srcSelect'`：模块接收了一个自己用不到的字段
+    （输入选择位只在 `SignalInputMux` 用）。做法是给只关心部分字段的模块一个**窄 payload**
+    （`SignalSourceConfigPayload`），宽 payload（`SignalConfigPayload`）只留给跨时钟域整字传递。
+  - `Bits of signal are not used: '_phaseShifted_T'[30:0]`：只用中间信号的最高位，其余位成了
+    「未使用信号」。寄存器（`Reg`）的部分位不被使用不会告警，**`wire` 会**。做法是把「相位差值比较
+    半个周期」改成两个独立累加器（`phase1` / `phase2`，初值 `-phaseWord`），而不是
+    `phase - phaseWord` 后再取最高位；实在需要中间 wire 时，把它写进寄存器。
 
 ## 时钟域
 
@@ -126,6 +162,11 @@ sbt 会把字面量 `--` 作为第一个参数传给程序，`emitSystemVerilog`
 
 - 高速域模块用 `withClockAndReset(dspClock, dspReset) { ... }` 例化，`dspReset` 来自 `SyncReset()`；不要在高速域直接使用低速域的 `reset`。
 - 跨域的控制信号沿用现有的握手约定（`Controller` 用 `request` / `response` 的 valid-ready 加 `EdgeDetector` 做脉冲展宽），不要新增裸的跨域电平信号。
+- **多 bit 配置不要逐位同步**：`CdcConfigBus`（`Cdc.scala`）用「数据先稳定 → 翻转请求 → 目的域锁存并回应答」的
+  整字握手，源域收到应答才放行下一笔，因此连续快速配置既不丢中间值、目的域也不会读到中间态。
+  两个易错点：目的域配置寄存器要 `RegInit(0.U.asTypeOf(gen))` 给一个确定的复位默认值（否则 Verilator
+  的随机初值会让选择位随机）；源域的「应答」与「发起」两个 `when` 的先后顺序决定同拍冲突时谁赢
+  （Chisel 后写优先），这里让「发起」写在后面。跨域通路由 `dpm-vivado-ip` 里那条双向 max_delay 覆盖。
 - 不要为了仿真方便改变寄存器的复位方式；测试侧通过复位序列获得确定初值（见 `dpm-verilator-testing`）。
 
 ## 格式与检查

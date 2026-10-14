@@ -27,6 +27,12 @@ import verilator_utils.full;
 //     覆盖参考沿与被测沿落在高速时钟网格上的量化；被测相位偏移小于半个信号周期
 //     时该映射保持一一对应，因此相位扫描限制在该范围内。
 //
+// 输入侧：Controller 把外部引脚的 sig1/sig2 与片内信号源（PL 内 MMCM 产生的两路同频、相位差
+// 可调的时钟）在高速域二选一，使能与选择位经 io.config 整字跨到高速域；两路源信号与外部输入
+// 共用 PhaseMeter 的异步采样链。测试同时覆盖「配置经低速域 valid/ready 送到高速域」的握手，
+// 以及切换真的发生在输入选择处：选中片内源时外部引脚上仍然驱动另一组信号，测量结果必须跟随
+// 片内源；切回外部输入后必须跟随外部信号。
+//
 // 为让量化误差可忽略、测量误差在长闸门时间内相互抵消，闸门时间取 2000 个低速
 // 周期（约 40us，覆盖数十到上千个信号周期），并用 doctest 的 GENERATE 扫描多个
 // 信号频率与相位偏移。
@@ -69,6 +75,12 @@ namespace
         bit_slice<CData> dsp_clock;
         bit_slice<CData> io_sig_sig1;
         bit_slice<CData> io_sig_sig2;
+        bit_slice<CData> io_source_sig1;
+        bit_slice<CData> io_source_sig2;
+        bit_slice<CData> io_config_ready;
+        bit_slice<CData> io_config_valid;
+        bit_slice<CData> io_config_bits_enable;
+        bit_slice<CData> io_config_bits_src_select;
         bit_slice<CData> io_in_valid;
         vector_slice<IData> io_in_bits_target_gate;
         bit_slice<CData> io_out_valid;
@@ -78,7 +90,10 @@ namespace
 
         explicit port_t(dut_t& dut) :
             clock{dut.clock}, reset{dut.reset}, dsp_clock{dut.dspClock, boolean}, io_sig_sig1{dut.io_sig_sig1, boolean},
-            io_sig_sig2{dut.io_sig_sig2, boolean}, io_in_valid{dut.io_in_valid, boolean},
+            io_sig_sig2{dut.io_sig_sig2, boolean}, io_source_sig1{dut.io_sourceSig1, boolean},
+            io_source_sig2{dut.io_sourceSig2, boolean}, io_config_ready{dut.io_config_ready, boolean},
+            io_config_valid{dut.io_config_valid, boolean}, io_config_bits_enable{dut.io_config_bits_enable, boolean},
+            io_config_bits_src_select{dut.io_config_bits_srcSelect, boolean}, io_in_valid{dut.io_in_valid, boolean},
             io_in_bits_target_gate{dut.io_in_bits_targetGate, 28zu, dec_unsigned}, io_out_valid{dut.io_out_valid, boolean},
             io_out_bits_gate_cnt{dut.io_out_bits_gateCnt, 28zu, dec_unsigned},
             io_out_bits_edge_cnt{dut.io_out_bits_edgeCnt, 32zu, dec_unsigned},
@@ -100,6 +115,15 @@ namespace
         femtosecond_t phase_offset{200_ns};
         /// 目标闸门计数
         std::uint64_t gate_cnt{target_gate};
+        /// 是否把测量输入切到片内信号源；为真时 sig1_period/sig2_period/phase_offset
+        /// 描述片内源输出的期望值
+        bool select_internal{false};
+        /// 片内信号源（MMCM 两路输出）的周期与相位差：测试直接按这两个参数驱动 io.sourceSig*
+        femtosecond_t source_period{640_ns};
+        femtosecond_t source_phase_offset{160_ns};
+        /// 选中片内源时外部引脚上仍在驱动的信号：周期与相位偏移
+        femtosecond_t external_sig_period{400_ns};
+        femtosecond_t external_phase_offset{120_ns};
     };
 
     /// 一次测量的输出负载
@@ -123,6 +147,29 @@ namespace
     };
 
     /**
+     * @brief 通过配置端口下发片内信号源与输入选择配置
+     *
+     * 低速域的 valid/ready 握手：在下降沿驱动 valid，在上升沿观察到 ready 后撤销；配置随后由
+     * Controller 内部的跨时钟域总线上整字送到高速域。配置到达高速域会让信号源重新装载相位，
+     * 因此这里再等几个低速周期，让测量从确定的相位开始。
+     *
+     * @param port DUT 端口
+     * @param option 激励参数（片内源使能与选择位）
+     * @return 配置任务
+     */
+    [[nodiscard]] task<void> configure_source(port_t& port, const stimulus_t& option)
+    {
+        port.io_config_bits_enable = option.select_internal ? 1 : 0;
+        port.io_config_bits_src_select = option.select_internal ? 1 : 0;
+        co_await wait_stimulate(port.clock);
+        port.io_config_valid = 1;
+        co_await wait_verify(port.clock);
+        while(static_cast<std::uint64_t>(port.io_config_ready) == 0u) { co_await wait_verify(port.clock); }
+        port.io_config_valid = 0;
+        co_await wait_stimulate(port.clock, 16zu);
+    }
+
+    /**
      * @brief 生成 sig1/sig2 激励，发起一次测量并读取结果
      *
      * 两个信号都是自由运行的周期信号：相位计在进入等待停止状态之后仍需要 sig2 的
@@ -138,6 +185,9 @@ namespace
         constexpr std::uint64_t low{0};
         port.io_sig_sig1 = low;
         port.io_sig_sig2 = low;
+        port.io_source_sig1 = low;
+        port.io_source_sig2 = low;
+        port.io_config_valid = low;
         port.io_in_valid = low;
         port.io_in_bits_target_gate = option.gate_cnt;
 
@@ -149,13 +199,22 @@ namespace
             const auto position{(now % period + period - phase_in_period) % period};
             return static_cast<std::uint64_t>(position < high);
         }};
-        const auto sig1_period{static_cast<std::uint64_t>(option.sig1_period.rep)};
-        const auto sig1_high{static_cast<std::uint64_t>(option.sig1_high.rep)};
-        const auto sig2_period{static_cast<std::uint64_t>(option.sig2_period.rep)};
-        const auto sig2_high{static_cast<std::uint64_t>(option.sig2_high.rep)};
-        const auto sig2_phase{static_cast<std::uint64_t>(option.phase_offset.rep)};
+        // 选中片内源时外部引脚上仍然驱动另一组信号，用来证明测量确实跟随被选中的输入
+        const auto sig1_period{
+            static_cast<std::uint64_t>((option.select_internal ? option.external_sig_period : option.sig1_period).rep)};
+        const auto sig1_high{option.select_internal ? sig1_period / 2zu : static_cast<std::uint64_t>(option.sig1_high.rep)};
+        const auto sig2_period{
+            static_cast<std::uint64_t>((option.select_internal ? option.external_sig_period : option.sig2_period).rep)};
+        const auto sig2_high{option.select_internal ? sig2_period / 2zu : static_cast<std::uint64_t>(option.sig2_high.rep)};
+        const auto sig2_phase{
+            static_cast<std::uint64_t>((option.select_internal ? option.external_phase_offset : option.phase_offset).rep)};
+        // 片内信号源：直接驱动两路源信号（实际电路里它们来自 PL 内 MMCM 的两个输出）
+        const auto source_period{static_cast<std::uint64_t>(option.source_period.rep)};
+        const auto source_high{source_period / 2zu};
+        const auto source_phase{static_cast<std::uint64_t>(option.source_phase_offset.rep)};
 
         co_await wait_reset_finish(port.reset);
+        co_await configure_source(port, option);
         // 对齐到高速时钟下降沿后再发起请求
         co_await wait_stimulate(port.dsp_clock);
         port.io_in_valid = 1;
@@ -168,6 +227,8 @@ namespace
             const auto now{static_cast<std::uint64_t>(co_await time_in_time_precision()) * 10000zu};
             port.io_sig_sig1 = signal_level(now, 0zu, sig1_period, sig1_high);
             port.io_sig_sig2 = signal_level(now, sig2_phase, sig2_period, sig2_high);
+            port.io_source_sig1 = signal_level(now, 0zu, source_period, source_high);
+            port.io_source_sig2 = signal_level(now, source_phase, source_period, source_high);
             co_await wait_stimulate(port.dsp_clock);
         }
 
@@ -474,5 +535,87 @@ TEST_SUITE("Controller")
             CHECK_EQ(measurements[index].result.edge_cnt, measurements[0].result.edge_cnt);
             CHECK_EQ(measurements[index].result.phase_cnt, measurements[0].result.phase_cnt);
         }
+    }
+
+    TEST_CASE("the measurement follows the selected signal input")
+    {
+        // 片内信号源：MMCM 的两路输出直接作为被测信号，周期 640ns、相位差 160ns（90°）。
+        // 选中片内源时外部引脚上仍然驱动另一组信号（400ns / 120ns），测量结果必须跟随片内源；
+        // 再切回外部输入，结果又必须跟随外部信号——两个方向一起证明切换真的发生在输入选择处
+        constexpr femtosecond_t internal_period{640_ns};
+        constexpr femtosecond_t internal_offset{160_ns};
+        constexpr femtosecond_t source_period{internal_period};
+        constexpr femtosecond_t source_offset{internal_offset};
+        constexpr femtosecond_t external_period{400_ns};
+        constexpr femtosecond_t external_offset{120_ns};
+
+        stimulus_t option{
+            .sig1_period = internal_period,
+            .sig1_high = internal_period / 2zu,
+            .sig2_period = internal_period,
+            .sig2_high = internal_period / 2zu,
+            .phase_offset = internal_offset,
+            .gate_cnt = target_gate,
+            .select_internal = true,
+            .source_period = source_period,
+            .source_phase_offset = source_offset,
+            .external_sig_period = external_period,
+            .external_phase_offset = external_offset,
+        };
+
+        dut_context_t ctx{
+            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
+        };
+        ctx.set_base_name("Controller.input_select");
+        port_t port{ctx.dut()};
+
+        ctx.add_task(generate_clock(port.clock, clock_period));
+        ctx.add_task(generate_clock(port.dsp_clock, dsp_period));
+        ctx.add_task(generate_reset(port.reset, port.clock));
+
+        std::array<measurement_t, 2zu> measurements{};
+        const auto run{[&] -> task<void> {
+            measurements[0] = co_await measure_once(port, option);
+
+            // 切回外部输入：期望值改为外部引脚上驱动的信号
+            stimulus_t external{option};
+            external.select_internal = false;
+            external.sig1_period = external_period;
+            external.sig1_high = external_period / 2zu;
+            external.sig2_period = external_period;
+            external.sig2_high = external_period / 2zu;
+            external.phase_offset = external_offset;
+            measurements[1] = co_await measure_once(port, external);
+
+            co_await eval_finish();
+        }};
+        ctx.add_task(run());
+
+        ctx.loop_until_finish(20_ms);
+
+        // 片内源：测量结果与「周期 640ns、相位差 160ns」的理论值一致
+        REQUIRE(measurements[0].observed);
+        check_window(measurements[0].result, option);
+        check_phase(measurements[0].result, option);
+
+        // 外部输入：切回之后结果跟随外部信号，而不是片内源
+        stimulus_t external_expected{option};
+        external_expected.select_internal = false;
+        external_expected.sig1_period = external_period;
+        external_expected.sig1_high = external_period / 2zu;
+        external_expected.sig2_period = external_period;
+        external_expected.sig2_high = external_period / 2zu;
+        external_expected.phase_offset = external_offset;
+        REQUIRE(measurements[1].observed);
+        check_window(measurements[1].result, external_expected);
+        check_phase(measurements[1].result, external_expected);
+
+        // 两条通路的频率与相位读数都必须不同，否则「切换生效」这条结论就没有区分度
+        const auto internal_offset_cycles{measurements[0].result.phase_cnt / measurements[0].result.edge_cnt};
+        const auto external_offset_cycles{measurements[1].result.phase_cnt / measurements[1].result.edge_cnt};
+        CAPTURE(internal_offset_cycles);
+        CAPTURE(external_offset_cycles);
+        CHECK_NE(internal_offset_cycles, external_offset_cycles);
+        CHECK_NE(measurements[0].result.edge_cnt, measurements[1].result.edge_cnt);
     }
 }

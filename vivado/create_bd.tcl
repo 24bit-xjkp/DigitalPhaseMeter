@@ -11,14 +11,26 @@
 #
 # 前置条件：先运行 vivado/package_ip.tcl 生成 IP（build/vivado/ip/dpm_top）
 #
-# 结构（IP 只有一个 AXI4-Lite 从口，互联不再需要地址译码）：
+# 结构（两个 AXI4-Lite 从口：测量 IP 与片内信号源的 MMCM 动态重配置口）：
 #
-#   processing_system7_0 ──M_AXI_GP0(AXI3)──► axi_protocol_converter_0 ──M_AXI(AXI4-Lite)──► dpm_top_0/s_axi_lite
-#          │  FCLK_CLK0(50MHz) ──► proc_sys_reset_0 ─► 协议转换器与 IP 的主时钟/复位
-#          │                    └► clk_wiz_0(MMCM + Safe Clock Startup) ─► dpm_top_0/dspClock
+#   processing_system7_0 ──M_AXI_GP0(AXI3)──► axi_interconnect_0 ──M00_AXI(AXI4-Lite)──► dpm_top_0/s_axi_lite
+#          │                                        └──M01_AXI(AXI4-Lite)──► clk_wiz_src/s_axi（DRP）
+#          │  FCLK_CLK0(50MHz) ──► proc_sys_reset_0 ─► 互联与两个从口的主时钟/复位
+#          │                    ├► clk_wiz_0(MMCM + Safe Clock Startup) ─► dpm_top_0/dspClock
+#          │                    └► clk_wiz_src(MMCM + DRP) ─► dpm_top_0/srcSig1、srcSig2、srcLocked
 #          └◄── IRQ_F2P ◄── xlconcat_0 ◄── dpm_top_0/interrupt（IRQ_F2P[0]）
 #
 #   sig1 / sig2 作为 BD 外部端口引出，供顶层约束分配引脚
+#
+# 片内信号源（clk_wiz_src）：
+#   - 两路输出同频（初始 25MHz）、相位差 90°，**频率与相位差都由 PS 通过 DRP（AXI4-Lite）在线设定**：
+#     改 CLKOUT0/1 的分频与相位、CLKFBOUT 的倍频，使能动态重配置后写「Load」寄存器即可；
+#   - 两路输出送给 dpm_top_0，由 IP 在测量时钟域里采样边沿并做后分频（SIG_DIV）；
+#   - 地址段 0x43C1_0000，寄存器映射见 PG065（Clocking Wizard）的 Dynamic Reconfiguration 章节。
+#
+# 为什么互联改成 axi_interconnect（原先只有一个从口时用 axi_protocol_converter）：
+#   从口多于一个时互联要负责地址译码，axi_interconnect 会自动插入 auto_pc 完成
+#   AXI3(M_AXI_GP0) → AXI4-Lite 的协议转换，因此不再需要单独的协议转换器。
 #
 # 为什么 DSP 域时钟要过 MMCM，而不是直接用 PS 的 FCLK_CLK1：
 #   Zynq-7000 的 FCLK_CLK1 由 PS 的 IO PLL 分频得到，频率被限制在 250MHz 以内
@@ -32,11 +44,9 @@
 #   Safe Clock Startup（CONFIG.USE_SAFE_CLOCK_STARTUP，见下）本来就例化 BUFGCE 并
 #   自动等 MMCM 锁定，因此不需要外部再加一级门控。
 #
-# 为什么用协议转换器而不是 axi_interconnect：从口只剩一个，没有地址译码需求，
-# 只需要把 Zynq M_AXI_GP0 的 AXI3（ID 宽 12、最大突发 16）转成 IP 的 AXI4-Lite。
-# axi_protocol_converter 正是 auto_pc 用的那个 IP，且不会引入互联的额外面积与延迟。
-#
-# 地址分配：s_axi_lite 0x43C0_0000（4KB 寄存器区，控制/状态寄存器 + 只读结果寄存器）
+# 地址分配：
+#   dpm_top_0/s_axi_lite   0x43C0_0000（4KB：控制/状态寄存器 + 只读结果寄存器 + 输入选择/后分频）
+#   clk_wiz_src/s_axi      0x43C1_0000（4KB：片内信号源 MMCM 的动态重配置寄存器，映射见 PG065）
 
 set script_dir [file dirname [file normalize [info script]]]
 set root_dir [file normalize [file join $script_dir ..]]
@@ -62,6 +72,7 @@ cd $build_dir
 set bd_name "dpm_system"
 set ip_vlnv "xjkp.org:dpm:dpm_top:1.0"
 set lite_base "0x43C00000"
+set drp_base "0x43C10000"
 
 if {![file exists [file join $ip_repo dpm_top component.xml]]} {
     error "找不到打包好的 IP：$ip_repo/dpm_top，请先运行 vivado/package_ip.tcl"
@@ -99,18 +110,12 @@ set_property -dict $ps7_config [get_bd_cells processing_system7_0]
 # ---- 复位：把 PS 的 FCLK_RESET0_N 交给 proc_sys_reset 生成同步复位 ----
 create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 proc_sys_reset_0
 
-# ---- AXI3(PS M_AXI_GP0) → AXI4-Lite(IP) 的协议转换 ----
-# ID_WIDTH 取 PS 的 12 位，让转换器把 ID 一起接上（ID_WIDTH=0 时从口根本没有 ID 信号，
-# C_IGNORE_ID=1，PS 的 ID/BID/RID 会被悬空）；TRANSLATION_MODE=2 即转换到 AXI4-Lite，
-# 与 Vivado 自动插入的 auto_pc 配置一致（MI_PROTOCOL=AXI4LITE 时它也是唯一合法值）。
-create_bd_cell -type ip -vlnv xilinx.com:ip:axi_protocol_converter:2.1 axi_protocol_converter_0
-set_property -dict [list \
-    CONFIG.SI_PROTOCOL {AXI3} \
-    CONFIG.MI_PROTOCOL {AXI4LITE} \
-    CONFIG.DATA_WIDTH {32} \
-    CONFIG.ADDR_WIDTH {32} \
-    CONFIG.ID_WIDTH {12} \
-    CONFIG.TRANSLATION_MODE {2}] [get_bd_cells axi_protocol_converter_0]
+# ---- 互联：PS 的 M_AXI_GP0 分发给两个 AXI4-Lite 从口 ----
+# NUM_SI=1（PS 一个主口）、NUM_MI=2（测量 IP + 片内源的 MMCM 动态重配置口）。
+# 互联会自动插入 auto_pc 把 AXI3 转成 AXI4-Lite（ID 宽 12、TRANSLATION_MODE=2），
+# 与原先单独使用 axi_protocol_converter 时的配置一致。
+create_bd_cell -type ip -vlnv xilinx.com:ip:axi_interconnect:2.1 axi_interconnect_0
+set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {2}] [get_bd_cells axi_interconnect_0]
 
 # ---- DSP 域时钟 ----
 # 两条路：
@@ -149,6 +154,27 @@ if {$use_mmcm} {
         CONFIG.USE_RESET {true}] [get_bd_cells clk_wiz_0]
 }
 
+# ---- 片内信号源：MMCM + 动态重配置（DRP）----
+# 两路输出同频、相位差 90°（初始 25MHz：VCO 800MHz = 50MHz × 16，输出 = VCO / 32）。
+# 选 25MHz / D=32 的原因：MMCM 每个输出的相位寄存器覆盖 64 个 VCO 周期，相位范围
+# （以输出周期为单位）是 64 / D，D = 32 时正好 2 个输出周期，0～360° 都能表示；
+# 更低的输出频率（更小的 D 分频比）会把可表示的相位范围压缩到 180° 以下。
+# 需要更低频率时由 IP 侧的后分频（SIG_DIV，f_out = f_src / 2N）完成，相位差不受影响。
+create_bd_cell -type ip -vlnv xilinx.com:ip:clk_wiz:6.0 clk_wiz_src
+set_property -dict [list \
+    CONFIG.PRIMITIVE {MMCM} \
+    CONFIG.PRIM_SOURCE {Single_ended_clock_capable_pin} \
+    CONFIG.PRIM_IN_FREQ {50.000} \
+    CONFIG.CLKOUT1_REQUESTED_OUT_FREQ {25.000} \
+    CONFIG.CLKOUT1_REQUESTED_PHASE {0.000} \
+    CONFIG.CLKOUT2_USED {true} \
+    CONFIG.CLKOUT2_REQUESTED_OUT_FREQ {25.000} \
+    CONFIG.CLKOUT2_REQUESTED_PHASE {90.000} \
+    CONFIG.USE_DYN_RECONFIG {true} \
+    CONFIG.USE_LOCKED {true} \
+    CONFIG.USE_RESET {true} \
+    CONFIG.USE_SAFE_CLOCK_STARTUP {true}] [get_bd_cells clk_wiz_src]
+
 # ---- 自定义 IP ----
 create_bd_cell -type ip -vlnv $ip_vlnv dpm_top_0
 
@@ -164,8 +190,22 @@ create_bd_port -dir I sig2
 connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0] [get_bd_pins processing_system7_0/M_AXI_GP0_ACLK]
 connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0] [get_bd_pins proc_sys_reset_0/slowest_sync_clk]
 connect_bd_net [get_bd_pins processing_system7_0/FCLK_RESET0_N] [get_bd_pins proc_sys_reset_0/ext_reset_in]
-connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0] [get_bd_pins axi_protocol_converter_0/aclk]
-connect_bd_net [get_bd_pins proc_sys_reset_0/peripheral_aresetn] [get_bd_pins axi_protocol_converter_0/aresetn]
+connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0] [get_bd_pins axi_interconnect_0/ACLK]
+connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0] [get_bd_pins axi_interconnect_0/S00_ACLK]
+connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0] [get_bd_pins axi_interconnect_0/M00_ACLK]
+connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0] [get_bd_pins axi_interconnect_0/M01_ACLK]
+connect_bd_net [get_bd_pins proc_sys_reset_0/peripheral_aresetn] [get_bd_pins axi_interconnect_0/ARESETN]
+connect_bd_net [get_bd_pins proc_sys_reset_0/peripheral_aresetn] [get_bd_pins axi_interconnect_0/S00_ARESETN]
+connect_bd_net [get_bd_pins proc_sys_reset_0/peripheral_aresetn] [get_bd_pins axi_interconnect_0/M00_ARESETN]
+connect_bd_net [get_bd_pins proc_sys_reset_0/peripheral_aresetn] [get_bd_pins axi_interconnect_0/M01_ARESETN]
+# 片内源的 MMCM：参考时钟与 AXI 时钟都用 FCLK_CLK0，复位用同域的高有效复位
+connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0] [get_bd_pins clk_wiz_src/clk_in1]
+connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0] [get_bd_pins clk_wiz_src/s_axi_aclk]
+connect_bd_net [get_bd_pins proc_sys_reset_0/peripheral_aresetn] [get_bd_pins clk_wiz_src/s_axi_aresetn]
+# 两路源信号与锁定指示送给 IP
+connect_bd_net [get_bd_pins clk_wiz_src/clk_out1] [get_bd_pins dpm_top_0/srcSig1]
+connect_bd_net [get_bd_pins clk_wiz_src/clk_out2] [get_bd_pins dpm_top_0/srcSig2]
+connect_bd_net [get_bd_pins clk_wiz_src/locked] [get_bd_pins dpm_top_0/srcLocked]
 connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0] [get_bd_pins dpm_top_0/clock]
 connect_bd_net [get_bd_pins proc_sys_reset_0/peripheral_aresetn] [get_bd_pins dpm_top_0/resetn]
 
@@ -180,9 +220,10 @@ if {$use_mmcm} {
     connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK1] [get_bd_pins dpm_top_0/dspClock]
 }
 
-# ---- AXI 数据通路：PS → 协议转换器 → IP 唯一的从口 ----
-connect_bd_intf_net [get_bd_intf_pins processing_system7_0/M_AXI_GP0] [get_bd_intf_pins axi_protocol_converter_0/S_AXI]
-connect_bd_intf_net [get_bd_intf_pins axi_protocol_converter_0/M_AXI] [get_bd_intf_pins dpm_top_0/s_axi_lite]
+# ---- AXI 数据通路：PS → 互联 → 测量 IP 与片内源 MMCM 的动态重配置口 ----
+connect_bd_intf_net [get_bd_intf_pins processing_system7_0/M_AXI_GP0] [get_bd_intf_pins axi_interconnect_0/S00_AXI]
+connect_bd_intf_net [get_bd_intf_pins axi_interconnect_0/M00_AXI] [get_bd_intf_pins dpm_top_0/s_axi_lite]
+connect_bd_intf_net [get_bd_intf_pins axi_interconnect_0/M01_AXI] [get_bd_intf_pins clk_wiz_src/s_axi_lite]
 
 # ---- 中断 ----
 connect_bd_net [get_bd_pins dpm_top_0/interrupt] [get_bd_pins xlconcat_0/In0]
@@ -192,9 +233,11 @@ connect_bd_net [get_bd_pins xlconcat_0/dout] [get_bd_pins processing_system7_0/I
 connect_bd_net [get_bd_ports sig1] [get_bd_pins dpm_top_0/sig1]
 connect_bd_net [get_bd_ports sig2] [get_bd_pins dpm_top_0/sig2]
 
-# ---- 地址分配：只有一个 4KB 寄存器段 ----
+# ---- 地址分配：测量 IP 4KB + 片内源 MMCM 的动态重配置口 4KB ----
 assign_bd_address -quiet -target_address_space /processing_system7_0/Data \
     -offset $lite_base -range 4K [get_bd_addr_segs dpm_top_0/s_axi_lite/Reg] -force
+assign_bd_address -quiet -target_address_space /processing_system7_0/Data \
+    -offset $drp_base -range 4K [get_bd_addr_segs clk_wiz_src/s_axi_lite/Reg] -force
 
 regenerate_bd_layout
 validate_bd_design
