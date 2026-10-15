@@ -27,7 +27,10 @@ for _, file in ipairs(os.files("*.cpp")) do
         add_values("verilator.flags", flags)
 
         on_load(function (target)
-            local sv_dir = path.join(chisel_dir, name)
+            -- Verilator 侧只消费**仿真产物**（build/chisel/<Name>/sim）：Verilator 没有 XPM 模型，
+            -- 综合产物（.../syn）里的 xpm_cdc_sync_rst 会在编译期报模块缺失。
+            -- 两种产物分目录存放（见 Utils.scala 的 emitSystemVerilog），互不覆盖。
+            local sv_dir = path.join(chisel_dir, name, "sim")
             for file in io.lines(path.join(sv_dir, "filelist.f")) do
                 target:add("files", path.join(sv_dir, file), {})
             end

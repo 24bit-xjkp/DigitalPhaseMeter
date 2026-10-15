@@ -22,6 +22,9 @@ set build_dir [file normalize [file join $script_dir .. build vivado]]
 set proj_dir [file join $build_dir bd_proj]
 set xdc_file [file normalize [file join $script_dir constraints dpm_top.xdc]]
 set hook_bs [file normalize [file join $script_dir hook_write_bitstream.tcl]]
+# 同一套「屏蔽厂商 IP 固有告警」的过滤器（理由见 hook_filter_messages.tcl）。
+# 本脚本每轮都 reset_run impl_1，会把步骤属性清回默认值，因此每轮 reset 后重新挂一遍。
+set hook_filter [file normalize [file join $script_dir hook_filter_messages.tcl]]
 
 set attempts 6
 if {[llength $argv] >= 1 && [lindex $argv 0] ne ""} { set attempts [lindex $argv 0] }
@@ -84,6 +87,7 @@ for {set i 1} {$i <= $attempts} {incr i} {
 
     reset_run impl_1
     set_property STEPS.WRITE_BITSTREAM.TCL.PRE $hook_bs [get_runs impl_1]
+    set_property STEPS.INIT_DESIGN.TCL.PRE $hook_filter [get_runs impl_1]
     launch_runs impl_1 -to_step write_bitstream -jobs 8
     wait_on_run impl_1
     if {[get_property PROGRESS [get_runs impl_1]] ne "100%"} {

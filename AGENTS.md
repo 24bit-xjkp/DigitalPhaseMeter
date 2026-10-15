@@ -14,7 +14,7 @@
 ├── sim/                                # xsim 的 SystemVerilog 测试激励与运行脚本（AXI4 接口/顶层 IP）
 ├── vivado/                             # IP 打包、block design、综合实现脚本与顶层约束
 ├── script/                             # xmake 包定义（Lua）
-├── build/chisel/<Name>/                # 由 Chisel 生成的 SystemVerilog 与 filelist.f（构建产物，不入库）
+├── build/chisel/<Name>/<sim|syn>/      # 由 Chisel 生成的 SystemVerilog 与 filelist.f（构建产物，不入库）
 ├── build/vivado/                       # 打包出的 IP、BD 工程与综合实现产物（构建产物，不入库）
 ├── .agents/skills/                     # 项目级 skill（见下文"skill 优先"）
 └── xmake.lua                           # 顶层构建脚本
@@ -26,13 +26,13 @@
 
 按职责选择入口，三者不可互相替代：
 
-| 入口 | 职责 |
-| --- | --- |
-| `sbt` | 运行 Chisel，生成 SystemVerilog 到 `build/chisel/<Name>/` |
-| `xmake` | 构建 Verilator 测试目标、运行测试（测量通路） |
-| Verilator | 由 xmake 的目标规则调用，编译生成的 SystemVerilog |
-| `sim/run_xsim.sh` | 用 Vivado xsim 跑 `sim/` 下的 SystemVerilog 激励（AXI4 接口与顶层 IP） |
-| `vivado/` 下的 tcl | 打包 IP、创建 block design、综合实现与导出 XSA |
+| 入口               | 职责                                                                   |
+| ------------------ | ---------------------------------------------------------------------- |
+| `sbtn`             | 运行 Chisel，生成 SystemVerilog 到 `build/chisel/<Name>/<sim\|syn>/`   |
+| `xmake`            | 构建 Verilator 测试目标、运行测试（测量通路）                          |
+| Verilator          | 由 xmake 的目标规则调用，编译生成的 SystemVerilog                      |
+| `sim/run_xsim.sh`  | 用 Vivado xsim 跑 `sim/` 下的 SystemVerilog 激励（AXI4 接口与顶层 IP） |
+| `vivado/` 下的 tcl | 打包 IP、创建 block design、综合实现与导出 XSA                         |
 
 - 本项目使用 clang 工具链。gcc 在编译带 C++20 模块的测试代码时会产生编译器内部错误（ICE）——该结论沿用 `verilator_utils` 系列项目的记录，未在本仓库单独复现：不要用 gcc 配置、构建或做"可移植性验证"。
 - 各入口的具体命令、选项与已知陷阱写在对应 skill 中（见下表），本文件不重复。
@@ -43,13 +43,13 @@
 
 - **首选 skill**：加载本领域对应的 skill 并按其说明执行。本仓库领域与对应 skill：
 
-| 领域 | 先加载 |
-| --- | --- |
-| 编写/修改 Chisel RTL、生成 SystemVerilog（`sim` / `syn` 两种产物） | `dpm-chisel-rtl` |
-| 编写、运行、调试 Verilator C++ 测试 | `dpm-verilator-testing` |
-| 测量语义、理论值、容限与已知精度下界（写验证判据时） | `dpm-measurement-model` |
-| 打包 Vivado IP、改 PS↔PL 互联的 BD、写/跑 xsim 的 SV 激励、综合实现 | `dpm-vivado-ip` |
-| 提交前的格式化、静态检查与全量回归 | `dpm-pre-delivery-check` |
+| 领域                                                                | 先加载                   |
+| ------------------------------------------------------------------- | ------------------------ |
+| 编写/修改 Chisel RTL、生成 SystemVerilog（`sim` / `syn` 两种产物）  | `dpm-chisel-rtl`         |
+| 编写、运行、调试 Verilator C++ 测试                                 | `dpm-verilator-testing`  |
+| 测量语义、理论值、容限与已知精度下界（写验证判据时）                | `dpm-measurement-model`  |
+| 打包 Vivado IP、改 PS↔PL 互联的 BD、写/跑 xsim 的 SV 激励、综合实现 | `dpm-vivado-ip`          |
+| 提交前的格式化、静态检查与全量回归                                  | `dpm-pre-delivery-check` |
 
 - **备选一：网络搜索**。skill 未覆盖，或 skill 与项目/环境的实际行为不一致时，先查官方文档与 issue；就地可用的官方帮助（如 `xmake <command> --help`）属于同一类的快速形式。
 - **备选二：读源码**。网络搜索仍不明确时，再阅读实现代码：生成结果查 `build/chisel/`。

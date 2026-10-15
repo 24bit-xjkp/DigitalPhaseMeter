@@ -3,15 +3,15 @@
 # 用 Vivado 自带 xsim 仿真数字相位计顶层 IP（DigitalPhaseMeterTop）
 #
 # 流程：
-#   1. 用 sbt 生成综合产物 SystemVerilog（--type=syn：复位同步改用 xpm_cdc_sync_rst），
-#      产物在 build/chisel/DigitalPhaseMeterTop/；
+#   1. 用 sbtn 生成综合产物 SystemVerilog（--type=syn：复位同步改用 xpm_cdc_sync_rst），
+#      产物在 build/chisel/DigitalPhaseMeterTop/syn/；
 #   2. xvlog 编译 XPM 原语源码、生成的 RTL（按 filelist.f 顺序）与测试激励；
 #   3. xelab 细化测试顶层；
 #   4. xsim 运行，按测试激励打印的结果判定成败。
 #
 # 用法：
 #   sim/run_xsim.sh               # 生成 RTL 后编译并运行
-#   sim/run_xsim.sh --no-gen      # 跳过 sbt 生成，直接用现有 RTL
+#   sim/run_xsim.sh --no-gen      # 跳过 sbtn 生成，直接用现有 RTL
 #   sim/run_xsim.sh --gui         # 运行结束后用 xsim GUI 打开波形
 #   sim/run_xsim.sh --clean       # 先清理上次的仿真目录
 #
@@ -22,7 +22,7 @@ set -euo pipefail
 
 readonly ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly VIVADO_ROOT="${XILINX_VIVADO:-/home/luo/Vivado/2025.2/Vivado}"
-readonly RTL_DIR="${ROOT_DIR}/build/chisel/DigitalPhaseMeterTop"
+readonly RTL_DIR="${ROOT_DIR}/build/chisel/DigitalPhaseMeterTop/syn"
 readonly SIM_DIR="${ROOT_DIR}/build/xsim"
 readonly TB_FILE="tb_digital_phase_meter_top"
 readonly SNAPSHOT="${TB_FILE}_sim"

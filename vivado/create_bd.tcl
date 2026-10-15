@@ -269,8 +269,12 @@ if {$use_mmcm} {
     #     不需要外部约束。
     # 因此不再需要手写的 DpmClockGate.v：原先的链路是 MMCM → BUFG（clk_wiz 默认驱动）
     # → BUFGCE（薄封装模块），现在合成一级 MMCM → BUFGCE，少一级全局缓冲。
-    # locked 端口仍保留（USE_LOCKED=true）供调试观察，Safe Clock Startup 内部用的是
-    # MMCM 原语的 locked，不依赖这个端口，故 BD 里不再连接它。
+    # USE_LOCKED 取 false：锁定与否由 Safe Clock Startup 内部的 MMCM 原语 locked 决定，
+    # 这个端口没有消费者——本设计没有从 clk_wiz 出来的复位（clk_wiz 的 reset 与 AXI 域复位
+    # 都来自 proc_sys_reset_0），也没有暴露给 PS 的「DSP 时钟已锁定」状态位（可读的是片内
+    # 信号源那一路 MMCM 的 locked，即 SIG_STATUS 的 b2）。保留该端口只会让综合报一条
+    # [Synth 8-7071] port 'locked' ... is unconnected，因此关掉，从源头消掉这条告警。
+    # 若要回来看它的波形，把下面这行改成 {true} 并把通道接到 ILA 即可。
     create_bd_cell -type ip -vlnv xilinx.com:ip:clk_wiz:6.0 clk_wiz_0
     set_property -dict [list \
         CONFIG.PRIMITIVE {MMCM} \
@@ -284,9 +288,20 @@ if {$use_mmcm} {
         CONFIG.CLKOUT5_USED {false} \
         CONFIG.CLKOUT6_USED {false} \
         CONFIG.CLKOUT7_USED {false} \
-        CONFIG.USE_LOCKED {true} \
+        CONFIG.USE_LOCKED {false} \
         CONFIG.USE_SAFE_CLOCK_STARTUP {true} \
         CONFIG.USE_RESET {true}] [get_bd_cells clk_wiz_0]
+    # 回读校验：IP 属性写错值时 Vivado 不报错，只是静默不生效，因此显式确认
+    # USE_LOCKED 真的落到 false（期望 BD 里不再有 locked 引脚，综合也就不会报未连接端口）。
+    set cw_locked [get_property -quiet CONFIG.USE_LOCKED [get_bd_cells clk_wiz_0]]
+    set cw_pins [get_bd_pins -quiet clk_wiz_0/locked]
+    puts "CLK_WIZ_CHECK: USE_LOCKED='$cw_locked' locked_pin='$cw_pins'"
+    if {$cw_locked ne "false"} {
+        error "clk_wiz_0：USE_LOCKED 回读为 '$cw_locked'（期望 false）——该属性未生效"
+    }
+    if {$cw_pins ne ""} {
+        error "clk_wiz_0：仍存在 locked 引脚 '$cw_pins'——USE_LOCKED=false 未生效"
+    }
 }
 
 # ---- 片内信号源：裸 MMCM + 极简 DRP 控制器（方案 A）----

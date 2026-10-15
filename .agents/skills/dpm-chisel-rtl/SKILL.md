@@ -25,42 +25,56 @@ object EmitFoo extends Main {
 ```
 
 - `Main`（定义在 `Utils.scala`）提供 `emitSystemVerilog`：解析 `--type` 选项、创建输出目录、调用 `ChiselStage.emitSystemVerilogFile`。
-- 输出目录为 `build/chisel/<Name>/`，`<Name>` 由主类名剥离 `Emit` 前缀得到（`EmitFoo` → `Foo`）。需要与类名不同的目录名时显式传第二个参数。
+- 输出目录为 `build/chisel/<Name>/<sim|syn>/`（**按产物类型分子目录**），`<Name>` 由主类名剥离 `Emit` 前缀得到（`EmitFoo` → `Foo`）。需要与类名不同的目录名时显式传第二个参数。
 - 传给 firtool 的固定选项是 `-disable-all-randomization` 与 `-default-layer-specialization=enable`；`--split-verilog` 与 `--target-dir` 由 `emitSystemVerilog` 自动追加。
 - 参数合法性用 `assert` 校验（如 `assert(n >= 2 && n <= 10)`），与既有模块保持一致。
 - `build/chisel/` 是构建产物，**不入库**（`.gitignore` 已覆盖 `build`）。改 RTL 只能改 `.scala` 后重新生成，不要手工编辑生成的 `.sv`。
 
 ## 生成入口
 
-通过 sbt 的运行入口执行生成主类，参数直接跟在类名之后：
+通过 sbtn 的运行入口执行生成主类，参数直接跟在类名之后：
 
 ```bash
-sbt -batch "runMain DigitalPhaseMeter.EmitController"             # 仿真用，默认 --type=sim
-sbt -batch "runMain DigitalPhaseMeter.EmitController --type=syn"  # 综合用
+sbtn -batch "runMain DigitalPhaseMeter.EmitController"             # 仿真用，默认 --type=sim
+sbtn -batch "runMain DigitalPhaseMeter.EmitController --type=syn"  # 综合用
 ```
 
-**不要用 sbt 的 `--` 分隔符传递参数**（这是本仓库实测的陷阱）：
+**不要用 sbtn 的 `--` 分隔符传递参数**（这是本仓库实测的陷阱）：
 
 ```bash
-sbt -batch "runMain DigitalPhaseMeter.EmitController -- --type=syn"   # 错误
+sbtn -batch "runMain DigitalPhaseMeter.EmitController -- --type=syn"   # 错误
 ```
 
-sbt 会把字面量 `--` 作为第一个参数传给程序，`emitSystemVerilog` 只摘掉 `--type=...`，于是传给 `ChiselStage` 的参数列表变成 `-- --split-verilog --target-dir build/chisel/Controller`；混入的 `--` 让 `--target-dir` 不再生效，**SV 会被写进进程当前目录（仓库根）而不是 `build/chisel/<Name>/`**，目标目录只剩一个空目录。表现为"生成成功但测试看不到模块""仓库根目录多出一堆 `.sv` 和 `filelist.f`"。正确形式是把 `--type=...` 直接写在 `runMain` 之后。若已经产生这类散落文件，删掉仓库根下的 `*.sv` / `filelist.f` 后按正确形式重新生成。
+sbtn 会把字面量 `--` 作为第一个参数传给程序，`emitSystemVerilog` 只摘掉 `--type=...`，于是传给 `ChiselStage` 的参数列表变成 `-- --split-verilog --target-dir build/chisel/Controller/sim`；混入的 `--` 让 `--target-dir` 不再生效，**SV 会被写进进程当前目录（仓库根）而不是 `build/chisel/<Name>/<sim|syn>/`**，目标目录只剩一个空目录。表现为"生成成功但测试看不到模块""仓库根目录多出一堆 `.sv` 和 `filelist.f`"。正确形式是把 `--type=...` 直接写在 `runMain` 之后。若已经产生这类散落文件，删掉仓库根下的 `*.sv` / `filelist.f` 后按正确形式重新生成。
 
 ## sim 与 syn 两种产物
 
 `--type=sim`（默认）与 `--type=syn` 的差别通过 `Config.outType` 传播到 RTL，当前唯一的用户是 `SyncReset`：
 
-| 产物 | `SyncReset` | 用途 |
-| --- | --- | --- |
-| sim | `SyncResetSimulate`，纯 RTL 移位链 | Verilator 仿真与测试 |
-| syn | `xpm_cdc_sync_rst`（Vivado 原语 `ExtModule`） | xsim、综合、布局布线 |
+| 产物 | `SyncReset` | 用途 | 目录 |
+| --- | --- | --- | --- |
+| sim | `SyncResetSimulate`，纯 RTL 移位链 | Verilator 仿真与测试 | `build/chisel/<Name>/sim/` |
+| syn | `xpm_cdc_sync_rst`（Vivado 原语 `ExtModule`） | xsim、综合、布局布线 | `build/chisel/<Name>/syn/` |
 
-两个分支驱动的是同一个 `io`（见 `Xpm.scala`），因此接口一致、端口相同。Verilator 侧没有 XPM 模型（会报找不到 XPM 模块 / 未声明的 `glbl`），因此**不要用 `--type=syn` 覆盖 Verilator 测试用的生成结果**；AXI4 接口与顶层 IP 的仿真统一走 xsim，用 syn 产物，见 `dpm-vivado-ip`。
+两个分支驱动的是同一个 `io`（见 `Xpm.scala`），因此接口一致、端口相同。
+
+**两种产物必须分目录存放**（`emitSystemVerilog` 已按 `--type` 落到 `<sim|syn>` 子目录，不要改回去）。
+历史教训：两者曾共用 `build/chisel/<Name>/`，于是「先跑综合、再跑 Verilator 测试」时，Verilator
+读到的是被覆盖后的综合产物，而 Verilator 侧没有 XPM 模型，报
+
+```text
+%Error-MODMISSING: build/chisel/Controller/SyncReset.sv:8:3: Cannot find file containing module: 'xpm_cdc_sync_rst'
+```
+
+这类错误看起来像 RTL 有问题，实际只是产物互相覆盖；反过来先跑 xsim 再跑综合也会让 xsim 读到仿真产物
+（此时反而不会报错，更隐蔽）。分目录后两个流程可以任意交替，互不影响。
+
+消费方各自只读自己的那一份：Verilator 测试读 `<Name>/sim/`（`test/xmake.lua`），
+xsim 与 Vivado 流程读 `DigitalPhaseMeterTop/syn/`（`sim/run_xsim.sh`、`vivado/package_ip.tcl`）。
 
 ## 生成结果的消费方式
 
-`build/chisel/<Name>/` 下是 `--split-verilog` 拆出的多个 `.sv` 加一份 `filelist.f`。测试目标逐行读取 `filelist.f`（见 `test/xmake.lua` 的 `on_load`），因此：
+`build/chisel/<Name>/<sim|syn>/` 下是 `--split-verilog` 拆出的多个 `.sv` 加一份 `filelist.f`。测试目标逐行读取 `filelist.f`（见 `test/xmake.lua` 的 `on_load`），因此：
 
 - 不要手工维护源文件列表，也不要依赖目录 glob（源文件顺序由 firtool 决定）。
 - 新模块没有出现在 `filelist.f` 中，说明生成没有跑到，或产物目录不对（见上一节的 `--` 陷阱）。
@@ -146,7 +160,7 @@ sbt 会把字面量 `--` 作为第一个参数传给程序，`emitSystemVerilog`
   防御手段有两个：生成后 `grep` 一下顶层 SV 里目标模块还有没有那组端口；以及**寄存器堆到下游的
   通路必须有 xsim 顶层用例覆盖**（见 `dpm-vivado-ip`）。
 - **独立生成给 Verilator 单测的模块要能过 `-Wall`**：`test/xmake.lua` 用 `-Wall` 编译
-  `build/chisel/<Name>/`，警告即失败（`%Error: Exiting due to N warning(s)`）。两类常见告警都来自
+  `build/chisel/<Name>/sim/`，警告即失败（`%Error: Exiting due to N warning(s)`）。两类常见告警都来自
   「共享数据结构 + 只关心一部分」：
   - `UNUSEDSIGNAL: Signal is not used: 'io_config_srcSelect'`：模块接收了一个自己用不到的字段
     （输入选择位只在 `SignalInputMux` 用）。做法是给只关心部分字段的模块一个**窄 payload**

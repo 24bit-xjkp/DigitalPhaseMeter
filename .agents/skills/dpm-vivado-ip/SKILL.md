@@ -19,8 +19,8 @@ RTL 本身的写法见 `dpm-chisel-rtl`；测量结果的判据见 `dpm-measurem
 ## 交付物与执行顺序
 
 ```text
-sbt -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop --type=syn"      # 顶层 IP RTL
-sbt -batch "runMain DigitalPhaseMeter.EmitMmcmDrpController --type=syn"         # DRP 控制器 RTL
+sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop --type=syn"      # 顶层 IP RTL
+sbtn -batch "runMain DigitalPhaseMeter.EmitMmcmDrpController --type=syn"         # DRP 控制器 RTL
 vivado -mode batch -source vivado/package_ip.tcl        # 打包顶层 IP → build/vivado/ip/dpm_top
 vivado -mode batch -source vivado/package_src_ip.tcl    # 打包 DRP 控制器 → ip/dpm_src_drp
 vivado -mode batch -source vivado/create_bd.tcl         # BD → build/vivado/bd_proj（DSP 域默认 400MHz、PS 串口默认 uart1）
@@ -38,9 +38,10 @@ vivado -mode batch -source vivado/impl_multi.tcl 6      # 高速时钟：多次�
 
 `build/` 下全部是产物，不入库；入库的是 `.scala`、`test/`、`sim/`、`vivado/` 里的脚本与文档。
 
-**必须用 `--type=syn` 的产物**：BD、综合与 xsim 都消费 `build/chisel/DigitalPhaseMeterTop/`
+**必须用 `--type=syn` 的产物**：BD、综合与 xsim 都消费 `build/chisel/DigitalPhaseMeterTop/syn/`
 （其中复位同步链实例化 `xpm_cdc_sync_rst`）；`--type=sim` 的行为模型只用于 Verilator，
-Verilator 侧没有 XPM 模型。
+Verilator 侧没有 XPM 模型。两种产物按类型分目录存放（`build/chisel/<Name>/<sim|syn>/`），
+可以任意交替生成，详见 `dpm-chisel-rtl`。
 
 ## IP 打包（package_ip.tcl）
 
@@ -108,6 +109,8 @@ xsim <snapshot> -runall
 ```
 
 - `xelab` **没有** `--work` 选项；工作库用 `-L work` 或默认 `work`。
+- 被测 RTL 取**综合产物**目录 `build/chisel/DigitalPhaseMeterTop/syn/`（不是 `<Name>/` 根下，
+  也不是 `sim/` 子目录——后者是给 Verilator 的行为模型，没有 XPM 模块）。
 - 判定成败不要只看 xsim 退出码（`$fatal` 也可能返回 0），要在日志里找激励打印的通过标记，
   失败时再 grep 错误行。
 - 测试激励的写法约定：
@@ -295,10 +298,61 @@ run-to-run 波动，单次通过不算签核，见下文）；频率参数同时
 - 该器件 DSP48E1 的 FMAX（全寄存器）为 464.25MHz（DS187 Table 66），400MHz 用掉约 86%；
   `place` 前给 DSP 路径留 ≥500ps 余量（UG949）。
 
+## XDC 约束文件的写法（xdc 不是完整的 tcl）
+
+**xdc 里不允许任何流程控制命令**。写 `foreach` / `if` / `puts` 会报
+`[Designutils 20-1307] Command '...' is not supported in the xdc constraint file`（CRITICAL WARNING），
+实测在综合阶段就会命中，且会产生 `[runtcl-6] Synthesis results are not added to the cache`
+（让综合结果不进缓存）。因此「先判断时钟存不存在、再施加约束」这种写法在 xdc 里做不到。
+
+本仓库顶层约束用到的两个等价手段（`constraints/dpm_top.xdc`）：
+
+| 手法 | 作用 |
+| --- | --- |
+| `get_clocks -quiet <通配>` | 无匹配时安静返回空串，不报 `[Vivado 12-627] No clocks matched` |
+| `set_false_path -quiet` / `set_max_delay -quiet` | 对象为空时安静地不生效，不报 `[Vivado 12-4739] No valid object(s) found`（CRITICAL WARNING） |
+
+为什么必须这么写：**同一个 xdc 会被评估两次**——综合器启动时一次（此时 BD 还是黑盒，IP 生成的
+时钟一个都不存在），实现读网表时一次。用具体时钟名硬取对象，综合阶段必然失败；而失败还会带出
+整文件级的 `[Project 1-498] One or more constraints failed evaluation ...`（提示改用实现阶段再读）。
+带 `-quiet` 后综合阶段是「安静地不适用」、实现阶段正常生效——空对象上的约束本来就是空操作，
+效果与「先判断再施加」等同。顺带好处：把名字写成通配（如 `clkout*_raw`）后，IP 实例改名或回退
+旧方案时约束会自动跟上。
+
+## 综合 / 实现日志的告警清理
+
+目标：run 日志末尾打印 `N Infos, 0 Warnings, 0 Critical Warnings and 0 Errors encountered.`。
+分两类处理，详细清单与逐条理由见 `vivado/README.md` 的「告警清理」：
+
+1. **根因在本仓库的，改设计**：
+   - 顶层 xdc 里失效的旧时钟名（`*clk_wiz_src*`）与硬取对象 → 按上节改成「通配 + `-quiet`」；
+   - BD 里没用到的 IP 输出端口 → 关掉对应 `CONFIG`（如 `clk_wiz_0` 的 `USE_LOCKED {false}`）。
+     **IP 属性写错值是静默失效的**，所以要在 `create_bd.tcl` 里回读校验并 `error` 退出。
+2. **厂商 IP 固有、改不动的，显式屏蔽**：写进 `vivado/hook_filter_messages.tcl`，用
+   `set_msg_config -id "<ID>" -suppress`，每条写明理由。两类典型：
+   - `[Synth 8-7129]`：`xlconcat` 的 128 个 `In*` 端口是 **IP 内部 HDL 写死的**，与 BD 里
+     `NUM_PORTS` 无关（`NUM_PORTS` 只决定 `dout` 位宽与哪些 `In*` 被连接）——本设计只用 `In0`，
+     所以固定 100 条 `In16..In115` 未连接告警，改 BD 消不掉；
+   - `[Netlist 29-160]`（CRITICAL）：PS7 自带 xdc 给「未使能因而在网表里不存在」的 MIO/DDR 引脚
+     设属性，没有 board part 时必然出现约 100 条。
+   屏蔽不代表放过风险，所以：**只屏蔽厂商 IP 的、不屏蔽自研 IP 的**，并保留
+   `validate_bd_design`（0 ERROR / 0 CRITICAL WARNING）与 xsim 顶层用例作为接口漏连的守门人。
+
+### 三个必须记住的实测坑
+
+| 坑 | 现象 | 处理 |
+| --- | --- | --- |
+| **hook 必须挂在对的步骤上** | `STEPS.<步骤>.TCL.PRE`：综合的告警出在 `SYNTH_DESIGN`，实现的告警（`link_design`）出在 `INIT_DESIGN`，DRC 降级要挂 `WRITE_BITSTREAM` | 见 `build_bitstream.tcl` 的 `apply_run_hooks` |
+| **`reset_run` 会清掉步骤属性** | 先 `set_property STEPS.*.TCL.PRE` 再 `reset_run`，等于没设（hook 不生效）；`reset_run synth_1` 也会连带重置 `impl_1` 的步骤属性 | 顺序必须是「先决策 → 全部 `reset_run` → 再统一挂 hook」，见 `build_bitstream.tcl` |
+| **hook 脚本要登记进工程** | 只写 `TCL.PRE` 不 `add_files`，Vivado 报 `[Runs 36-537] File ... is not part of fileset utils_1, but has specified as a Tcl hook script` | `add_files -fileset utils_1 -norecurse <hook>` |
+| **`open_project` 内部的告警拦不住** | 96 条 `[Board 49-26]`（扫描 XilinxBoardStore 时报告「board 声明的 part 未安装」）在 `open_project` 内部打印，早于脚本任何语句 | `set_msg_config` 无效（实测）。绑定了 board part 的工程不会有；只能接受并说明 |
+
 ## 交付前
 
 - 报告里写清实际跑到哪一步：IP 打包通过、`validate_bd_design` 通过、xsim 用例数与结果、
   综合实现是否 100%、时序 WNS/WHS（高速域单独给出域内 WNS）、bitstream/XSA 是否生成。
+- 告警类改动要把**清理前后的条数**都给出，并说明哪些是改设计消掉的、哪些是屏蔽的（附理由文件）。
+  屏蔽类改动要顺带确认结果没变：`STATS.WNS` / `WHS` 与改动前一致、`check_timing` 的非零项不变。
 - 高速时钟类改动要给出**多次实现**的结果（见 `impl_multi.tcl`），单次通过不作为签核依据。
 - **改了 RTL 之后**：`package_ip.tcl` → `package_src_ip.tcl` → `create_bd.tcl` →
   `build_bitstream.tcl` 必须按顺序重跑；只重跑后面几步会用到旧的 IP 内容。

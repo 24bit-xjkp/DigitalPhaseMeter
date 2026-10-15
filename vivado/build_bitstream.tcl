@@ -49,6 +49,66 @@ if {![file exists $proj_file]} {
 
 open_project $proj_file
 
+# ---- 打开工程后才出现的两条告警：本工程刻意不绑开发板 ----
+# `open_project` 发生在主进程里、run 的 TCL.PRE hook 之前，所以 hook_filter_messages.tcl 管不到，
+# 这里补上。两条都源于「不绑定 board part」这一既定选择（引脚由 vivado/constraints/dpm_top.xdc 直接给出）：
+#   [Project 1-5713]    × 1：工程没有 board part，Vivado 把 BoardPart 属性置空。
+#   [Vivado 12-7122]    × 1：没有参考 checkpoint，自动增量编译不启用（本工程本来就每轮全跑）。
+#   [Constraints 18-550]× 1：随 clk_wiz 生成的 xdc 给「由 fabric（FCLK_CLK0）驱动、不是顶层引脚」
+#                       的输入网络设 IBUF_LOW_PWR——与 run 内那条同类，理由见 hook_filter_messages.tcl。
+#
+# 不在这里屏蔽 [Board 49-26]：那 96 条在 `open_project` **内部**就打印了，晚于本脚本的任何语句，
+# 因此 set_msg_config 对它无效（实测：过滤在 open_project 之后加载，96 条照旧）。
+# 它是 Vivado 扫描 XilinxBoardStore 时逐个报告「board 声明的 part 未安装」，与本设计无关；
+# 绑定了具体开发板的工程不会看到。见 vivado/README.md 的「告警清理」。
+foreach early_pattern {
+    {Project 1-5713}
+    {Vivado 12-7122}
+    {Constraints 18-550}
+} {
+    set_msg_config -id $early_pattern -suppress
+}
+puts "EARLY_FILTER_LOADED: 已屏蔽工程级告警（board part 未绑定、增量编译未启用、IBUF_LOW_PWR）"
+
+# ---- hook 文件（必须在下面第一次引用之前定义）----
+# 1) hook_write_bitstream.tcl：把「引脚未约束 / IO 标准未指定」两条 DRC 降级为警告，使
+#    bitstream 仍能生成（本仓库不绑定具体开发板）。降级必须放在 write_bitstream 步骤的
+#    pre-hook 里：run 在独立进程中执行 DRC，主进程里设置 SEVERITY 不生效。
+#    使用具体开发板时填好 vivado/constraints/dpm_top.xdc 里的引脚并去掉这个 hook。
+# 2) hook_filter_messages.tcl：用 set_msg_config 屏蔽「厂商 IP 固有」告警（xlconcat 写死的
+#    128 个输入端口、PS7 未使能的 DDR/MIO 端口、proc_sys_reset 无消费者的输出等）。
+#    逐条理由写在该文件里；它们挂在 run 步骤的 TCL.PRE 上：
+#      - SYNTH_DESIGN.TCL.PRE → 综合（8-7129 / 8-7071 / 8-7023 / 8-4446 都出在这一步）
+#      - INIT_DESIGN.TCL.PRE  → 实现（link_design 时出现的告警都归这一步）
+#    加进 utils_1 fileset，否则 Vivado 会抱怨 hook 脚本不属于工程（[Runs 36-537]）。
+#    两个 hook 都是本脚本挂上去的 TCL.PRE，因此都要登记。
+set hook_bs [file join $script_dir hook_write_bitstream.tcl]
+set hook_filter [file join $script_dir hook_filter_messages.tcl]
+foreach h [list $hook_bs $hook_filter] {
+    if {![file exists $h]} {
+        error "找不到 $h"
+    }
+    if {[llength [get_files -quiet -of_objects [get_filesets utils_1] $h]] == 0} {
+        add_files -fileset utils_1 -norecurse $h
+    }
+}
+
+# **apply_run_hooks 必须在所有 reset_run 之后调用**：reset_run 会把步骤属性恢复成策略默认值，
+# 先设后 reset 等于没设（实测如此）。调用点在下面「先决策、后 reset、再统一挂 hook」那一段。
+# 属性值没变就不写，避免让已完成的 run 过期（过期会导致下一次无法复用网表）。
+proc apply_run_hooks {hook_filter hook_bs} {
+    set changed 0
+    foreach {run step} [list synth_1 SYNTH_DESIGN impl_1 INIT_DESIGN impl_1 WRITE_BITSTREAM] {
+        set prop "STEPS.${step}.TCL.PRE"
+        set want [expr {$step eq "WRITE_BITSTREAM" ? $hook_bs : $hook_filter}]
+        if {[get_property $prop [get_runs $run]] ne $want} {
+            set_property $prop $want [get_runs $run]
+            incr changed
+        }
+    }
+    return $changed
+}
+
 # 加入顶层约束：**已经在工程里就不要动**。实测 `remove_files` 会把已完成的 run 立刻标记为
 # `Out-of-date`，于是每次运行都会白跑一遍综合/实现，`SYNTH_REUSED` / `IMPL_REUSED` 永远不生效。
 set xdc_norm [file normalize $xdc_file]
@@ -115,6 +175,9 @@ puts "synth_1 strategy = [get_property strategy [get_runs synth_1]]"
 puts "impl_1  strategy = [get_property strategy [get_runs impl_1]]"
 puts "synth retiming    = [get_property STEPS.SYNTH_DESIGN.ARGS.GLOBAL_RETIMING [get_runs synth_1]]"
 puts "synth directive   = [get_property STEPS.SYNTH_DESIGN.ARGS.DIRECTIVE [get_runs synth_1]]"
+# hook 文件位置（TCL.PRE 的实际挂载在 reset_run 之后由 apply_run_hooks 完成）
+puts "synth hook = $hook_filter"
+puts "impl  hook = $hook_filter (INIT_DESIGN) / $hook_bs (WRITE_BITSTREAM)"
 # 只读 ARGS.DIRECTIVE：STEPS.<步骤>.IS_ENABLED 在这些步骤上不是合法属性（读它会报 [Common 17-673]）
 foreach step {OPT_DESIGN PLACE_DESIGN PHYS_OPT_DESIGN ROUTE_DESIGN POST_ROUTE_PHYS_OPT_DESIGN} {
     puts "impl $step directive=[get_property -quiet STEPS.${step}.ARGS.DIRECTIVE [get_runs impl_1]]"
@@ -134,22 +197,24 @@ if {$force_rerun} {
     puts "STRATEGY_FORCE_RERUN: 综合/实现参数刚变化，已完成的 run 将重跑"
 }
 
-# 本仓库不绑定具体开发板：sig1/sig2 没有引脚位置与 IO 标准约束。
-# 把「引脚未约束 / IO 标准未指定」两条 DRC 降级为警告，使 bitstream 仍能生成
-# （时序与功能不受影响，只是这些引脚位置未指定）。降级必须放在 write_bitstream
-# 步骤的 pre-hook 里：run 在独立进程中执行 DRC，主进程里设置 SEVERITY 不生效。
-# 使用具体开发板时填好 vivado/constraints/dpm_top.xdc 里的引脚并去掉这个 hook。
-set hook_file [file join $script_dir hook_write_bitstream.tcl]
-if {![file exists $hook_file]} {
-    error "找不到 $hook_file"
+# ---- 先决定两个 run 是否复用，并把要重跑的 run 全部 reset 掉 ----
+# reset_run 会把该 run 所有步骤的属性恢复成策略默认值（包括我们挂的 TCL.PRE hook），
+# 因此 hook 必须在**所有** reset_run 之后统一挂一遍，不能夹在两次 reset 中间。
+# 决策只看 run 当前状态，不受 reset 影响，所以先决策、后 reset。
+set synth_reuse [expr {!$force_rerun && [string match "*Complete*" [get_property STATUS [get_runs synth_1]]]}]
+set impl_reuse [expr {!$force_rerun && [string match "*Complete*" [get_property STATUS [get_runs impl_1]]]}]
+if {!$synth_reuse} { reset_run synth_1 }
+if {!$impl_reuse} { reset_run impl_1 }
+set hook_changed [apply_run_hooks $hook_filter $hook_bs]
+puts "HOOK_APPLIED: changed=$hook_changed"
+foreach {run step} [list synth_1 SYNTH_DESIGN impl_1 INIT_DESIGN impl_1 WRITE_BITSTREAM] {
+    puts "HOOK_CHECK: $run STEPS.${step}.TCL.PRE = '[get_property -quiet STEPS.${step}.TCL.PRE [get_runs $run]]'"
 }
 
 # ---- 综合 ----
-# 已经完成过的 run 且策略没变时直接复用（例如只重跑 bitstream 步骤），否则重新启动
-if {!$force_rerun && [string match "*Complete*" [get_property STATUS [get_runs synth_1]]]} {
+if {$synth_reuse} {
     puts "SYNTH_REUSED"
 } else {
-    reset_run synth_1
     launch_runs synth_1 -jobs 8
     wait_on_run synth_1
 }
@@ -159,12 +224,9 @@ if {[get_property PROGRESS [get_runs synth_1]] ne "100%"} {
 puts "SYNTH_DONE"
 
 # ---- 实现（布局布线 + bitstream）----
-if {!$force_rerun && [string match "*Complete*" [get_property STATUS [get_runs impl_1]]]} {
+if {$impl_reuse} {
     puts "IMPL_REUSED"
 } else {
-    reset_run impl_1
-    # reset_run 之后再设置 pre-hook，确保它对本轮 write_bitstream 生效
-    set_property STEPS.WRITE_BITSTREAM.TCL.PRE $hook_file [get_runs impl_1]
     launch_runs impl_1 -to_step write_bitstream -jobs 8
     wait_on_run impl_1
 }

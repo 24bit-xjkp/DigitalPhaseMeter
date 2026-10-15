@@ -3,8 +3,8 @@
 # 用法（vivado 在 PATH 中，或写全路径）：
 #   vivado -mode batch -source vivado/package_src_ip.tcl
 #
-# 前置条件：先用 sbt 生成综合产物 SystemVerilog：
-#   sbt -batch "runMain DigitalPhaseMeter.EmitMmcmDrpController --type=syn"
+# 前置条件：先用 sbtn 生成综合产物 SystemVerilog：
+#   sbtn -batch "runMain DigitalPhaseMeter.EmitMmcmDrpController --type=syn"
 #
 # 产物：
 #   build/vivado/ip/dpm_src_drp/   IP 目录（component.xml + 导入的 RTL 源码）
@@ -27,7 +27,8 @@
 
 set script_dir [file dirname [file normalize [info script]]]
 set root_dir [file normalize [file join $script_dir ..]]
-set rtl_dir [file join $root_dir build chisel MmcmDrpController]
+# 综合产物（--type=syn）在 <Name>/syn/ 下（见 dpm-chisel-rtl 的 sim/syn 分目录约定）
+set rtl_dir [file join $root_dir build chisel MmcmDrpController syn]
 set build_dir [file join $root_dir build vivado]
 set ip_root [file join $build_dir ip]
 set proj_dir [file join $build_dir src_ip_proj]
@@ -42,7 +43,7 @@ set ip_name "dpm_src_drp"
 set ip_version "1.0"
 
 if {![file exists [file join $rtl_dir filelist.f]]} {
-    error "找不到 $rtl_dir/filelist.f，请先运行 sbt 生成入口（见文件头注释）"
+    error "找不到 $rtl_dir/filelist.f，请先运行 sbtn 生成入口（见文件头注释）"
 }
 
 # 读取 filelist.f（firtool 的拓扑顺序即编译顺序）

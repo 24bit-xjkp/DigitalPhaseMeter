@@ -53,10 +53,10 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
 
 测量核心之前有一个输入选择器，两条候选通路的时基与约束如下：
 
-| 通路       | 来源                                                    | 约束/时基                                                                     |
-| ---------- | ------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| 通路       | 来源                                                     | 约束/时基                                                                     |
+| ---------- | -------------------------------------------------------- | ----------------------------------------------------------------------------- |
 | 外部输入   | `sig1` → 引脚 **W18**、`sig2` → 引脚 **W19**（LVCMOS33） | 异步输入，`set_false_path`；在测量域经 `EdgeDetector` 的 ASYNC_REG 采样链同步 |
-| 片内信号源 | PL 内 MMCM（`dpm_mmcm_src`）的两路输出                    | 频率/相位差由 PS 写 MMCM 寄存器镜像（`dpm_src_drp`）设定；同样按异步输入采样    |
+| 片内信号源 | PL 内 MMCM（`dpm_mmcm_src`）的两路输出                   | 频率/相位差由 PS 写 MMCM 寄存器镜像（`dpm_src_drp`）设定；同样按异步输入采样  |
 
 ### 片内信号源：MMCM 的两路输出
 
@@ -154,9 +154,9 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
 | 0x1C | `LOST_COUNT`   | RO   | 结果未被读走即被覆盖的次数                                                                                                                                                                 |
 | 0x20 | `IRQ_STATUS`   | W1C  | [0] 中断挂起、[1] `resultValid`（写 1 表示结果已读走）、[2] 丢失计数：均写 1 清除                                                                                                          |
 | 0x24 | `VERSION`      | RO   | `0x4450_4D02`（"DPM2"）                                                                                                                                                                    |
-| 0x28 | `CAPS`         | RO   | [7:0] 每条结果字数 = 4；[15:8] 结果深度 = 1；[16] 数据通道为寄存器 = 1；[17] 带片内信号源与输入选择寄存器 = 1                                                                                |
-| 0x2C | `SIG_CTRL`     | RW   | [0] `enable`：片内源使能（0 时两路输出恒低）；[1] `srcSelect`：0 = 外部引脚输入、1 = 片内信号源。整体按 bit0 字节写入                                          |
-| 0x30 | `SIG_STATUS`   | RO   | [0] `enable`；[1] `srcSelect`；[2] `srcLocked`：片内源 MMCM 已锁定；[3] `sourceReady`：当前选择在配置上可用（选外部恒为 1，选片内源要求使能且 MMCM 已锁定） |
+| 0x28 | `CAPS`         | RO   | [7:0] 每条结果字数 = 4；[15:8] 结果深度 = 1；[16] 数据通道为寄存器 = 1；[17] 带片内信号源与输入选择寄存器 = 1                                                                              |
+| 0x2C | `SIG_CTRL`     | RW   | [0] `enable`：片内源使能（0 时两路输出恒低）；[1] `srcSelect`：0 = 外部引脚输入、1 = 片内信号源。整体按 bit0 字节写入                                                                      |
+| 0x30 | `SIG_STATUS`   | RO   | [0] `enable`；[1] `srcSelect`；[2] `srcLocked`：片内源 MMCM 已锁定；[3] `sourceReady`：当前选择在配置上可用（选外部恒为 1，选片内源要求使能且 MMCM 已锁定）                                |
 
 `CTRL` 是「普通读写位 + 写 1 触发位」的混合：`irqEnable` 每次写 `CTRL` 都按 bit1 整体更新，因此启动测量时要写 `CTRL = (1<<1) | (1<<0)`，以保持中断使能。
 
@@ -186,7 +186,7 @@ src/main/scala/DigitalPhaseMeter/   Chisel 源码，每个模块一个文件，�
 test/                               Verilator C++ 测试（测量通路），每个 <Name>.cpp 自动注册一个测试目标
 sim/                                Vivado xsim 的 SystemVerilog 测试激励与运行脚本（AXI4 接口/顶层 IP）
 vivado/                             Vivado IP 打包、block design、综合实现脚本与顶层约束
-build/chisel/<Name>/                Chisel 生成的 SystemVerilog 与 filelist.f（构建产物，不入库）
+build/chisel/<Name>/<sim|syn>/       Chisel 生成的 SystemVerilog 与 filelist.f（构建产物，不入库）
 ps/                                 PS 侧裸机 C 服务端（串口协议、AXI/DRP 驱动、startup/linker）
 host/                               PC 侧 Python 上位机（协议、CLI、Tk GUI、仿真后端）
 docs/                               协议、验证计划、验证报告、上板 bring-up
@@ -198,7 +198,7 @@ spec/                               金标准向量、独立仿真服务端、�
 
 | 依赖                                     | 用途                                            |
 | ---------------------------------------- | ----------------------------------------------- |
-| JDK + sbt                                | 由 Chisel 生成 SystemVerilog                    |
+| JDK + sbtn                               | 由 Chisel 生成 SystemVerilog                    |
 | xmake ≥ 3.1.1                            | 构建 Verilator 测试目标、运行测试               |
 | Verilator ≥ 5.050                        | 编译生成的 SystemVerilog（测量通路单元测试）    |
 | clang（支持 C++20 模块，本项目用 C++26） | 编译测试代码，**不支持 gcc**                    |
@@ -206,12 +206,12 @@ spec/                               金标准向量、独立仿真服务端、�
 
 ## 使用
 
-### 生成 SystemVerilog（产物在 `build/chisel/<Name>/`）
+### 生成 SystemVerilog（产物在 `build/chisel/<Name>/<sim|syn>/`）
 
 ```bash
-sbt -batch "runMain DigitalPhaseMeter.EmitController"                           # 仿真用
-sbt -batch "runMain DigitalPhaseMeter.EmitController --type=syn"                # 综合用，复位改用 XPM 原语
-sbt -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop --type=syn"   # 顶层 IP，供 xsim 与 Vivado
+sbtn -batch "runMain DigitalPhaseMeter.EmitController"                           # 仿真用
+sbtn -batch "runMain DigitalPhaseMeter.EmitController --type=syn"                # 综合用，复位改用 XPM 原语
+sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop --type=syn"   # 顶层 IP，供 xsim 与 Vivado
 ```
 
 `--type=syn` 与 `--type=sim` 的差别：`SyncReset` 从移位链换成 `xpm_cdc_sync_rst`（顶层已无 BRAM，产物里不再有 `xpm_memory_tdpram`）。
@@ -228,8 +228,8 @@ xmake run Controller                      # 单个测试目标
 ### xsim 仿真（AXI4 接口与顶层 IP）
 
 ```bash
-sim/run_xsim.sh                # 先用 sbt 生成综合产物 RTL，再编译并运行
-sim/run_xsim.sh --no-gen       # 跳过 sbt 生成
+sim/run_xsim.sh                # 先用 sbtn 生成综合产物 RTL，再编译并运行
+sim/run_xsim.sh --no-gen       # 跳过 sbtn 生成
 sim/run_xsim.sh --gui          # 运行结束后打开波形
 ```
 

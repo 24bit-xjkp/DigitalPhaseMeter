@@ -22,7 +22,7 @@ argument-hint: '本次要交付的改动'
 | C++ | `clang-format -i <改动的 .cpp>`（配置 `.clang-format`，`ColumnLimit = 130`、4 空格缩进） |
 | Scala | `scalafmt`（就地格式化）；`scalafmt --test` 只检查、不改文件 |
 
-`scalafmt --test` 会检查仓库内的全部 Scala 源文件（含 `build.sbt`），是提交前的最低要求。
+`scalafmt --test` 会检查仓库内的全部 Scala 源文件（含 `build.sbtn`），是提交前的最低要求。
 
 ## 2. 静态检查
 
@@ -69,6 +69,13 @@ sim/run_xsim.sh        # xsim：AXI4 接口与顶层 IP（SystemVerilog 激励�
 - 改了 `vivado/` 下的脚本时，至少重新执行对应脚本并确认没有 ERROR / CRITICAL WARNING
   （`validate_bd_design` 的告警不会让脚本退出码非零，必须看日志）。
 
+- **两种产物分目录存放，不会互相覆盖**：sim 在 `build/chisel/<Name>/sim/`、syn 在
+  `build/chisel/<Name>/syn/`（见 `dpm-chisel-rtl`）。因此 Verilator 测试与 xsim / Vivado 流水线
+  可以按任意顺序交替跑，各自只读自己那一份；反过来也可以——**如果改成共用目录，两个套件会互相
+  污染**（历史上出现过：先跑综合再跑 `xmake test`，Verilator 报
+  `Cannot find file containing module: 'xpm_cdc_sync_rst'`，看起来像 RTL 坏了）。
+  注意 `xmake test` **不会**替你生成 sim 产物：改了 RTL 仍要先跑生成入口。
+
 - 必须是**全量**：只跑单个目标或用例（`xmake run <Name> ...`）不能作为回归证据，它只用于定位问题。
 - 运行参数是用例级配置（`test/xmake.lua` 中 `add_tests` 的 `runargs`，本项目为 `+verilator+rand+reset+2` 与 `-fc`），只有 `xmake test` 会应用：`xmake run` 走的是 target 级 `runargs`，本项目没有设置。因此"寄存器初值随机"这类只在带 plusargs 时出现的行为，在 `xmake run` 下可能被掩盖——两个入口结果不一致时以 `xmake test` 为准。
 - 改动过 RTL 时，先重新生成 SystemVerilog 再跑测试（见 `dpm-chisel-rtl`）；只改了测试代码则不需要重新生成。
@@ -84,7 +91,7 @@ git status --short    # 确认没有把不该提交的东西带进来
 ```
 
 - 逐项确认 `git status --short` 里的文件都是本次改动**有意**产生的；哪些目录属于构建产物、不要提交，见仓库根目录 `AGENTS.md` 的"修改边界"。
-- 特别注意仓库根目录有没有散落生成的 `.sv` / `filelist.f`：用 sbt 生成 SystemVerilog 时若参数形式写错，产物会落到仓库根而不是 `build/chisel/<Name>/`（见 `dpm-chisel-rtl`）。
+- 特别注意仓库根目录有没有散落生成的 `.sv` / `filelist.f`：用 sbtn 生成 SystemVerilog 时若参数形式写错，产物会落到仓库根而不是 `build/chisel/<Name>/`（见 `dpm-chisel-rtl`）。
 
 ## 5. 报告
 

@@ -16,29 +16,50 @@
 #     旧方案（clk_wiz_src，IP 内部 BUFGCE）→ `clk_out1_dpm_system_clk_wiz_src_0_0` 之类；
 #     新方案（裸 MMCM 薄封装，BUFGCE 在自定义模块里）→ 工具按**网表里的网络名**
 #     命名，实测是 `clkout0_raw` / `clkout1_raw`（即 MMCM 的 CLKOUT0/CLKOUT1 网络）。
-#   为兼容两种命名，下面同时列出两组名字。
+#   为兼容两种命名，下面不写死具体时钟名，改用通配匹配（见「片内信号源」一段）。
 #
 # 本文件补充五类约束：被测信号、片内信号源时钟、慢↔快时钟域的握手通路、MMCM 锁定、板级引脚。
 
 # ---- 被测信号（外部输入）----
 # sig1/sig2 是外部送入的异步信号：在 PL 内先经 EdgeDetector 的 ASYNC_REG 同步链采样，
-# 因此作为异步输入处理，不做建立/保持时间检查。片内信号源（SignalSource）由 DSP 域时钟
-# 直接驱动、与外部输入共用同一条采样链，不需要额外约束。
-set_false_path -from [get_ports {sig1 sig2}]
+# 因此作为异步输入处理，不做建立/保持时间检查。片内信号源（dpm_mmcm_src_0 的两路 MMCM
+# 输出）从 BD 里直接进 IP，与外部输入共用同一条采样链，同样按异步输入处理。
+set_false_path -quiet -from [get_ports -quiet {sig1 sig2}]
 
 # ---- 片内信号源：两路 MMCM 输出 ----
 # 频率与相位差都由 MMCM 的动态重配置设定，软件可以在线改动，因此源时钟与测量时钟之间
 # 没有固定的相位关系：IP 只用边沿检测链采样它们，不做建立/保持检查。
-# 新方案：MMCM 输出的网络名（实测）
-set_false_path -from [get_clocks clkout0_raw] -to [get_clocks *clk_wiz_0*]
-set_false_path -from [get_clocks clkout1_raw] -to [get_clocks *clk_wiz_0*]
-# 旧方案（clk_wiz_src）的时钟名，保留以免回退时漏约束
-set_false_path -from [get_clocks *clk_wiz_src*] -to [get_clocks *clk_wiz_0*]
+#
+# 【为什么必须用「通配符 + -quiet」这种写法】本文件被评估两次：综合器启动时一次，实现读
+# 网表时一次。综合阶段 BD 还是黑盒（Black Box），MMCM/clk_wiz 都还没展开，本文件用到的
+# 时钟一个都不存在；此时若直接写 `get_clocks <具体名字>`，约束评估会失败并告警：
+#   综合    [Vivado 12-627] No clocks matched '...'（逐条）
+#           [Project 1-498] One or more constraints failed evaluation ...（整文件级，提示
+#                           改用实现阶段再读）
+#   实现    [Vivado 12-4739] CRITICAL WARNING: set_false_path: No valid object(s) found ...
+# 而这些时钟名本来也只有实现期才有（片内源是裸 MMCM 薄封装的网表网络名 clkout0_raw /
+# clkout1_raw，见上方「时钟拓扑补充」；DSP 域时钟名带 IP 实例路径前缀
+# clk_out1_dpm_system_clk_wiz_0_0）。
+#
+# xdc 不是完整的 tcl——**不支持任何流程控制命令**，写 `foreach` / `if` 会报
+# [Designutils 20-1307] Command '...' is not supported in the xdc constraint file
+# （CRITICAL WARNING，实测）。所以不能用「先判断再施加」，只能靠两个开关等效实现：
+#   1) 取时钟对象用「通配符 + -quiet」：通配符一次匹配一组时钟（如 clkout*_raw 同时命中
+#      clkout0_raw 与 clkout1_raw），-quiet 让「一个都没匹配上」时安静地返回空串（无 12-627）；
+#   2) 约束命令本身也带 -quiet：对象为空时安静地不生效（无 12-4739）。
+# 于是综合阶段这些约束是「安静地不适用」，实现阶段（时钟已由 IP 生成）正常生效；空对象上的
+# 约束本来就是空操作，两种写法效果等同。
+# 顺带一点：匹配改用通配后，回退到旧的 clk_wiz 方案时（时钟名变成
+# clk_out1_dpm_system_clk_wiz_src_0_0 之类）这些约束会自动跟上，不必再改本文件。
+
+# MMCM 输出 → DSP 域测量时钟：源时钟异步，不做建立/保持检查
+set_false_path -quiet -from [get_clocks -quiet clkout*_raw] \
+    -to [get_clocks -quiet *clk_out1_dpm_system_clk_wiz_0_0*]
+
 # MMCM 的 locked 是准静态电平，经 3 级同步链进主时钟域（与其它跨域电平同样按「一个慢时钟
-# 周期内到达」约束）
-set_max_delay -datapath_only -from [get_clocks clkout0_raw] -to [get_clocks clk_fpga_0] 20.000
-set_max_delay -datapath_only -from [get_clocks clkout1_raw] -to [get_clocks clk_fpga_0] 20.000
-set_max_delay -datapath_only -from [get_clocks *clk_wiz_src*] -to [get_clocks clk_fpga_0] 20.000
+# 周期内到达」约束）。-datapath_only 只量数据路径，上限取一个慢时钟周期 20ns。
+set_max_delay -quiet -datapath_only -from [get_clocks -quiet clkout*_raw] \
+    -to [get_clocks -quiet clk_fpga_0] 20.000
 
 # ---- 两个时钟域之间的握手通路（双向）----
 # 跨域信号有三类，都是「电平翻转 + 同步器」结构：
@@ -61,10 +82,12 @@ set_max_delay -datapath_only -from [get_clocks *clk_wiz_src*] -to [get_clocks cl
 #   -datapath_only 只量数据路径本身（去掉工具算错的跨时钟相位余量），上限取一个慢时钟
 #   周期 20ns。两个方向都要写：只约束一个方向会让另一个方向的路径被挤成新的最差路径
 #   （实测：只写慢→快时，快→慢反而从 +0.055ns 掉到 -0.258ns）。
-set_max_delay -datapath_only -from [get_clocks clk_fpga_0] \
-    -to [get_clocks clk_out1_dpm_system_clk_wiz_0_0] 20.000
-set_max_delay -datapath_only -from [get_clocks clk_out1_dpm_system_clk_wiz_0_0] \
-    -to [get_clocks clk_fpga_0] 20.000
+# 这两条同样按上面的写法带上通配与 -quiet：慢域时钟用 clk_fpga_0，DSP 域时钟名带 IP
+# 实例路径前缀，写成通配以便 IP 实例改名或回退方案后仍然生效。
+set_max_delay -quiet -datapath_only -from [get_clocks -quiet clk_fpga_0] \
+    -to [get_clocks -quiet *clk_out1_dpm_system_clk_wiz_0_0*] 20.000
+set_max_delay -quiet -datapath_only -from [get_clocks -quiet *clk_out1_dpm_system_clk_wiz_0_0*] \
+    -to [get_clocks -quiet clk_fpga_0] 20.000
 
 # ---- 板级引脚 ----
 # 外部被测信号输入：sig1 → W18、sig2 → W19，LVCMOS33。

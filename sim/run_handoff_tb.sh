@@ -7,8 +7,8 @@
 # 由激励写 DRP 设定频率（当前 bitstream 下相位不可改，见 docs/verify-drp.md），
 # 再用 dpm_top 自己的 AXI 寄存器口读回测量结果，验证「真实 MMCM 输出 → 测量通路」这条链路。
 #
-# 被测 RTL：build/chisel/DigitalPhaseMeterTop/（综合产物，含 xpm_cdc_sync_rst）
-#     · 若目录不存在，先跑：sbt -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop --type=syn"
+# 被测 RTL：build/chisel/DigitalPhaseMeterTop/syn/（综合产物，含 xpm_cdc_sync_rst）
+#     · 若目录不存在，先跑：sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop --type=syn"
 # 片内源 IP：build/vivado/bd_proj/.../ip/dpm_system_clk_wiz_src_0（BD 生成物）
 #     · 若目录不存在，先跑：vivado -mode batch -source vivado/create_bd.tcl
 # DSP 域时钟：BD 里的 clk_wiz_0（复用同一份生成源，400MHz）
@@ -20,7 +20,7 @@
 # 用法：
 #   sim/run_handoff_tb.sh                # 完整联调（7 个冻结频点）
 #   sim/run_handoff_tb.sh --clean        # 先清 build/xsim_handoff
-#   sim/run_handoff_tb.sh --no-gen       # 不重新生成 dpm_top RTL（跳过 sbt）
+#   sim/run_handoff_tb.sh --no-gen       # 不重新生成 dpm_top RTL（跳过 sbtn）
 #
 # 环境变量：XILINX_VIVADO 默认 /home/luo/Vivado/2025.2/Vivado
 
@@ -30,8 +30,8 @@ readonly ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly VIVADO_ROOT="${XILINX_VIVADO:-/home/luo/Vivado/2025.2/Vivado}"
 readonly BD_GEN_DIR="${ROOT_DIR}/build/vivado/bd_proj/dpm_bd.gen/sources_1/bd/dpm_system/ip"
 readonly SRC_IP_DIR="${BD_GEN_DIR}/dpm_system_clk_wiz_src_0"
-readonly DSP_IP_DIR="${BD_GEN_DIR}/dpm_system_clk_wiz_0_0"   # DSP 域时钟用的 clk_wiz（无 DRP）
-readonly TOP_RTL_DIR="${ROOT_DIR}/build/chisel/DigitalPhaseMeterTop"
+readonly DSP_IP_DIR="${BD_GEN_DIR}/dpm_system_clk_wiz_0_0" # DSP 域时钟用的 clk_wiz（无 DRP）
+readonly TOP_RTL_DIR="${ROOT_DIR}/build/chisel/DigitalPhaseMeterTop/syn"
 readonly TB_NAME="tb_handoff_src_measure"
 readonly SIM_ROOT="${ROOT_DIR}/build/xsim_handoff"
 readonly RAW_LOG_DIR="${ROOT_DIR}/spec/golden"
@@ -61,16 +61,22 @@ for arg in "$@"; do
 done
 
 for tool in "${XVLOG}" "${XVHDL}" "${XELAB}" "${XSIM}"; do
-    [[ -x "${tool}" ]] || { echo "找不到 ${tool}，请设置 XILINX_VIVADO" >&2; exit 1; }
+    [[ -x "${tool}" ]] || {
+        echo "找不到 ${tool}，请设置 XILINX_VIVADO" >&2
+        exit 1
+    }
 done
 
 if [[ ${do_gen} -eq 1 && ! -d "${TOP_RTL_DIR}" ]]; then
     echo "== 生成 dpm_top 综合产物 RTL =="
-    (cd "${ROOT_DIR}" && sbt -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop --type=syn")
+    (cd "${ROOT_DIR}" && sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop --type=syn")
 fi
 
 for d in "${TOP_RTL_DIR}" "${SRC_IP_DIR}" "${DSP_IP_DIR}"; do
-    [[ -d "${d}" ]] || { echo "缺少目录：${d}（先跑 create_bd.tcl / sbt）" >&2; exit 1; }
+    [[ -d "${d}" ]] || {
+        echo "缺少目录：${d}（先跑 create_bd.tcl / sbtn）" >&2
+        exit 1
+    }
 done
 
 readonly RUN_DIR="${SIM_ROOT}/run"
@@ -99,7 +105,10 @@ vhdl_files=(
     "${SRC_IP_DIR}/dpm_system_clk_wiz_src_0_axi_clk_config.vhd"
 )
 for f in "${vhdl_files[@]}"; do
-    [[ -f "${f}" ]] || { echo "缺少 VHDL 源：${f}" >&2; exit 1; }
+    [[ -f "${f}" ]] || {
+        echo "缺少 VHDL 源：${f}" >&2
+        exit 1
+    }
 done
 echo "== 编译片内源 clk_wiz 的 VHDL 源（${#vhdl_files[@]} 个；DSP 域 clk_wiz 无 DRP，纯 Verilog）=="
 "${XVHDL}" --work work "${vhdl_files[@]}"

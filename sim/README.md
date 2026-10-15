@@ -12,16 +12,18 @@ AXI4 接口与顶层 IP 的验证用 **Vivado 自带 xsim + SystemVerilog 测试
 ## 运行
 
 ```bash
-sim/run_xsim.sh              # 先用 sbt 生成 --type=syn 产物，再编译运行
-sim/run_xsim.sh --no-gen     # 跳过 sbt 生成（RTL 已是最新时）
+sim/run_xsim.sh              # 先用 sbtn 生成 --type=syn 产物，再编译运行
+sim/run_xsim.sh --no-gen     # 跳过 sbtn 生成（RTL 已是最新时）
 sim/run_xsim.sh --gui        # 运行结束后用 xsim GUI 打开波形
 sim/run_xsim.sh --clean      # 先清理 build/xsim
 XILINX_VIVADO=/path/to/Vivado sim/run_xsim.sh    # 指定 Vivado 安装路径
 ```
 
-脚本用 **综合产物**（`build/chisel/DigitalPhaseMeterTop`，其中复位同步链实例化
+脚本用 **综合产物**（`build/chisel/DigitalPhaseMeterTop/syn`，其中复位同步链实例化
 `xpm_cdc_sync_rst`）仿真，因此仿真的就是会被综合的那份 RTL；产物与日志落在 `build/xsim/`
 （不入库）。判定依据是日志里出现 `==== 测试通过`，同时打印 xsim 的退出码。
+补充：仿真产物与综合产物分目录存放（`build/chisel/<Name>/sim` 与 `.../syn`），
+两者内容不同且不能共用目录——Verilator 侧没有 XPM 模型，见 `dpm-chisel-rtl`。
 
 ## 覆盖内容
 

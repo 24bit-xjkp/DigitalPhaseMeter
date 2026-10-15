@@ -39,6 +39,10 @@ trait Main extends App {
 
     /** 生成SystemVerilog源文件
       *
+      * 产物目录为 `build/chisel/<name>/<type>`，**两种产物必须分开存放**：`--type=sim` 与 `--type=syn` 生成的 SystemVerilog 内容不同（当前唯一差异是
+      * `SyncReset`， 仿真用纯 RTL 移位链 `SyncResetSimulate`、综合用 `xpm_cdc_sync_rst` 原语），放同一个目录时后跑的那次会覆盖前一次，于是「跑完综合再跑 Verilator
+      * 测试」会因为 Verilator 侧没有 XPM 模型而报 `Cannot find file containing module: 'xpm_cdc_sync_rst'`（本项目实测）。
+      *
       * @param genModule
       *   返回RawModule的回调函数
       * @param name
@@ -48,7 +52,6 @@ trait Main extends App {
         genModule: => RawModule,
         name: String = this.getClass.getSimpleName.stripSuffix("$").stripPrefix("Emit")
     ): Unit = {
-        val outputDir = Paths.get("build", "chisel", name)
         var commandArgs = args.to(ArrayBuffer)
         val typeStr = extractOption(commandArgs, "type").getOrElse("sim")
         typeStr match {
@@ -56,6 +59,7 @@ trait Main extends App {
             case "syn" => Config._outType = Some(Config.OutType.synthesize)
             case other => sys.error(s"--type选项未知取值: $other")
         }
+        val outputDir = Paths.get("build", "chisel", name, typeStr)
         val chiselArgs = commandArgs.toArray.concat(
             Array("--split-verilog", "--target-dir", outputDir.toString())
         )
