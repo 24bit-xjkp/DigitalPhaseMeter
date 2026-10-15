@@ -7,8 +7,9 @@
 # 由激励写 DRP 设定频率（当前 bitstream 下相位不可改，见 docs/verify-drp.md），
 # 再用 dpm_top 自己的 AXI 寄存器口读回测量结果，验证「真实 MMCM 输出 → 测量通路」这条链路。
 #
-# 被测 RTL：build/chisel/DigitalPhaseMeterTop/syn/（综合产物，含 xpm_cdc_sync_rst）
-#     · 若目录不存在，先跑：sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop --type=syn"
+# 被测 RTL：build/chisel/DigitalPhaseMeterTop/（单一产物：复位同步是纯 RTL 的 ResetSynchronizer，
+#     产物里没有 XPM 原语，xsim 与 Verilator 共用同一份）
+#     · 若目录不存在，先跑：sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop"
 # 片内源 IP：build/vivado/bd_proj/.../ip/dpm_system_clk_wiz_src_0（BD 生成物）
 #     · 若目录不存在，先跑：vivado -mode batch -source vivado/create_bd.tcl
 # DSP 域时钟：BD 里的 clk_wiz_0（复用同一份生成源，400MHz）
@@ -31,7 +32,7 @@ readonly VIVADO_ROOT="${XILINX_VIVADO:-/home/luo/Vivado/2025.2/Vivado}"
 readonly BD_GEN_DIR="${ROOT_DIR}/build/vivado/bd_proj/dpm_bd.gen/sources_1/bd/dpm_system/ip"
 readonly SRC_IP_DIR="${BD_GEN_DIR}/dpm_system_clk_wiz_src_0"
 readonly DSP_IP_DIR="${BD_GEN_DIR}/dpm_system_clk_wiz_0_0" # DSP 域时钟用的 clk_wiz（无 DRP）
-readonly TOP_RTL_DIR="${ROOT_DIR}/build/chisel/DigitalPhaseMeterTop/syn"
+readonly TOP_RTL_DIR="${ROOT_DIR}/build/chisel/DigitalPhaseMeterTop"
 readonly TB_NAME="tb_handoff_src_measure"
 readonly SIM_ROOT="${ROOT_DIR}/build/xsim_handoff"
 readonly RAW_LOG_DIR="${ROOT_DIR}/spec/golden"
@@ -41,7 +42,6 @@ readonly XVHDL="${VIVADO_ROOT}/bin/xvhdl"
 readonly XELAB="${VIVADO_ROOT}/bin/xelab"
 readonly XSIM="${VIVADO_ROOT}/bin/xsim"
 readonly GLBL="${VIVADO_ROOT}/data/verilog/src/glbl.v"
-readonly XPM_CDC="${VIVADO_ROOT}/data/ip/xpm/xpm_cdc/hdl/xpm_cdc.sv"
 readonly CLK_WIZ_INC="${VIVADO_ROOT}/data/ip/xilinx/clk_wiz_v6_0"
 
 do_gen=1
@@ -68,8 +68,8 @@ for tool in "${XVLOG}" "${XVHDL}" "${XELAB}" "${XSIM}"; do
 done
 
 if [[ ${do_gen} -eq 1 && ! -d "${TOP_RTL_DIR}" ]]; then
-    echo "== 生成 dpm_top 综合产物 RTL =="
-    (cd "${ROOT_DIR}" && sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop --type=syn")
+    echo "== 生成 dpm_top RTL =="
+    (cd "${ROOT_DIR}" && sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop")
 fi
 
 for d in "${TOP_RTL_DIR}" "${SRC_IP_DIR}" "${DSP_IP_DIR}"; do
@@ -113,17 +113,17 @@ done
 echo "== 编译片内源 clk_wiz 的 VHDL 源（${#vhdl_files[@]} 个；DSP 域 clk_wiz 无 DRP，纯 Verilog）=="
 "${XVHDL}" --work work "${vhdl_files[@]}"
 
-echo "== 编译 clk_wiz Verilog 源 + XPM + glbl =="
+echo "== 编译 clk_wiz Verilog 源 + glbl =="
+# glbl 是 unisim 原语（MMCM）仿真所需；生成的 dpm_top 已不含 XPM，不需要再编 xpm_cdc.sv
 "${XVLOG}" --sv --work work -i "${CLK_WIZ_INC}" \
     "${SRC_IP_DIR}/dpm_system_clk_wiz_src_0_clk_wiz.v" \
     "${SRC_IP_DIR}/dpm_system_clk_wiz_src_0_mmcm_pll_drp.v" \
     "${SRC_IP_DIR}/dpm_system_clk_wiz_src_0.v" \
     "${DSP_IP_DIR}/dpm_system_clk_wiz_0_0_clk_wiz.v" \
     "${DSP_IP_DIR}/dpm_system_clk_wiz_0_0.v" \
-    "${XPM_CDC}" \
     "${GLBL}"
 
-echo "== 编译 dpm_top 综合产物 RTL（按 filelist.f 顺序）=="
+echo "== 编译 dpm_top 生成产物 RTL（按 filelist.f 顺序）=="
 top_files=()
 while IFS= read -r line; do
     [[ -z "${line}" ]] && continue

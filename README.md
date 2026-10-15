@@ -29,12 +29,13 @@ MMCM 重配置逻辑，实测两路输出恒相差 90°——详见 [`docs/verif
 
 ```text
 DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高速时钟）
-├── ResetSynchronizer        主复位同步：resetn 异步置位、与主时钟同步释放
-│                            主时钟域模块都在 withClockAndReset(clock, mainReset) 里例化
+├── ResetSynchronizer        每个时钟域各一个：低有效 resetn 异步置位、与该域时钟同步释放
+│                            mainReset 给主时钟域（模块都在 withClockAndReset(clock, mainReset) 里例化），
+│                            DSP 域那一个在 Controller 内部（从 mainReset 再同步到 dspClock）
 ├── Axi4LiteSlave            AXI4-Lite 从口 → 内部读写命令总线（控制/状态/结果寄存器）
 ├── ControlRegs              控制/状态寄存器堆（含片内源使能与输入选择）+ 结果锁存 + 中断
 ├── Controller               低速域 FSM：闸门计数、与 PhaseMeter 握手、锁存结果
-│   ├── SyncReset            高速域复位同步链（仿真为移位链，综合为 xpm_cdc_sync_rst）
+│   ├── ResetSynchronizer    DSP 域复位：从主复位同步得到（异步置位、与 dspClock 同步释放）
 │   ├── CdcConfigBus         使能/选择配置整字跨时钟域（翻转握手 + 应答，不丢连续配置）
 │   ├── SignalInputMux       高速域输入选择：外部引脚输入 ↔ 片内源（纯组合二选一）
 │   └── PhaseMeter           高速域测量核心
@@ -131,9 +132,10 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
 因此测量核心的高速时钟改由 **PL 内的 MMCM** 从 `FCLK_CLK0`(50MHz) 倍频得到。「MMCM 锁定前不来时钟」
 由 **clk_wiz 自带的 Safe Clock Startup** 保证：它把 MMCM 输出经内部的 `BUFGCE` 放行，CE 由 8 bit
 移位寄存器连续采到 8 拍 `locked` 后才拉高（无毛刺，不需要外部门控模块）。实测在
-`xc7z010clg400-1`（−1 速度等级）上 400MHz 时序收敛：**WNS = +0.358ns、WHS = +0.062ns，0 个失败端点**
-（DSP 域内 WNS = +0.358ns / WHS = +0.157ns；6 次独立实现全部为正，最差 +0.191ns），详见
-[`vivado/README.md`](vivado/README.md#dsp-域时钟的安全启动clk_wiz-safe-clock-startup)。
+`xc7z010clg400-1`（−1 速度等级）上 400MHz 时序收敛：**WNS = +0.192ns、WHS = +0.050ns，0 个失败端点**
+（复位极性修复后的最新一轮，官方策略 `Performance_Retiming`，3 次独立实现数值全同；同一设计的早期
+版本实测过 +0.358ns / +0.062ns 一档，余量随 RTL 与实现策略的修订变化），详见
+[`vivado/README.md`](vivado/README.md#复位极性修复后的一轮复跑与两种实现策略对比)。
 相位分辨率因此从 200MHz 下的 5ns 提升到 2.5ns。
 
 - **所有数据都走 AXI4-Lite 寄存器（GPIO 式）**：一次测量的结果只有 4 个字，PL 侧直接把最新结果锁存在只读寄存器里，PS 收到中断后连续读 4 个寄存器即可拿到一条完整结果。因此 IP 内部没有任何片内存储，对外也只有一个 AXI 从口——数据量小的时候，寄存器比 BRAM + 突发口简单得多。
@@ -186,7 +188,7 @@ src/main/scala/DigitalPhaseMeter/   Chisel 源码，每个模块一个文件，�
 test/                               Verilator C++ 测试（测量通路），每个 <Name>.cpp 自动注册一个测试目标
 sim/                                Vivado xsim 的 SystemVerilog 测试激励与运行脚本（AXI4 接口/顶层 IP）
 vivado/                             Vivado IP 打包、block design、综合实现脚本与顶层约束
-build/chisel/<Name>/<sim|syn>/       Chisel 生成的 SystemVerilog 与 filelist.f（构建产物，不入库）
+build/chisel/<Name>/                Chisel 生成的 SystemVerilog 与 filelist.f（构建产物，不入库）
 ps/                                 PS 侧裸机 C 服务端（串口协议、AXI/DRP 驱动、startup/linker）
 host/                               PC 侧 Python 上位机（协议、CLI、Tk GUI、仿真后端）
 docs/                               协议、验证计划、验证报告、上板 bring-up
@@ -206,15 +208,14 @@ spec/                               金标准向量、独立仿真服务端、�
 
 ## 使用
 
-### 生成 SystemVerilog（产物在 `build/chisel/<Name>/<sim|syn>/`）
+### 生成 SystemVerilog（产物在 `build/chisel/<Name>/`）
 
 ```bash
-sbtn -batch "runMain DigitalPhaseMeter.EmitController"                           # 仿真用
-sbtn -batch "runMain DigitalPhaseMeter.EmitController --type=syn"                # 综合用，复位改用 XPM 原语
-sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop --type=syn"   # 顶层 IP，供 xsim 与 Vivado
+sbtn -batch "runMain DigitalPhaseMeter.EmitController"                    # 测量通路，供 Verilator 测试
+sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop"          # 顶层 IP，供 xsim 与 Vivado
 ```
 
-`--type=syn` 与 `--type=sim` 的差别：`SyncReset` 从移位链换成 `xpm_cdc_sync_rst`（顶层已无 BRAM，产物里不再有 `xpm_memory_tdpram`）。
+每个模块只生成**一份**产物：复位同步由纯 RTL 的 `ResetSynchronizer` 实现（异步置位、与各域时钟同步释放），Verilator、xsim 与综合共用同一份 RTL，没有 `--type=sim|syn` 的差别。改完 RTL 要先跑生成入口再跑测试——`xmake test` 与 `sim/run_xsim.sh` 都不会替你生成。
 
 ### Verilator 单元测试（测量通路）
 
@@ -223,12 +224,12 @@ xmake test -v                             # 全部测试
 xmake run Controller                      # 单个测试目标
 ```
 
-覆盖 `Controller` 的复位行为、闸门计数、相位计数、测量窗口跟随 `targetGate` 以及连续测量的一致性；`EdgeDetector` 有独立的时序测试。
+覆盖 `Controller` 的复位行为（DSP 域复位由模块内部的 `ResetSynchronizer` 从主复位同步得到，测试只驱动主复位）、闸门计数、相位计数、测量窗口跟随 `targetGate` 以及连续测量的一致性；`EdgeDetector` 有独立的时序测试；`ResetSynchronizer` 有独立的复位时序测试（异步置位、恰好 `resetDepth` 拍同步释放）；`MmcmDrpController` 覆盖 AXI/DRP 寄存器语义。
 
 ### xsim 仿真（AXI4 接口与顶层 IP）
 
 ```bash
-sim/run_xsim.sh                # 先用 sbtn 生成综合产物 RTL，再编译并运行
+sim/run_xsim.sh                # 先用 sbtn 生成 RTL，再编译并运行
 sim/run_xsim.sh --no-gen       # 跳过 sbtn 生成
 sim/run_xsim.sh --gui          # 运行结束后打开波形
 ```

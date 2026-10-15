@@ -108,6 +108,28 @@ DUT 新增输入端口后，`port_t` 里没写的端口在 Verilator 里保持 0
 继续跑「默认配置」那条分支。给 DUT 加端口时，`port_t` 与各用例里的初始化要显式补上新端口；
 真正验证新通路的用例必须显式驱动它们（例如 `Controller` 的 `io_config_valid` / `io_config_bits_*`）。
 
+**复位端口尤其要注意**：模块用成员端口（不在 `io` 里）显式声明复位时（如 `CdcConfigBus.dstReset`），
+漏驱动不会报错，只会让该域寄存器**从不复位**、拿到 `--x-assign unique` 的随机初值，表现为用例时好时坏。
+做法是在 `port_t` 里加 `bit_slice<CData> dst_reset{dut.dstReset, boolean}`，并在每个用例里与主复位一起驱动：
+
+```cpp
+ctx.add_task(generate_reset(port.reset, port.clock));
+ctx.add_task(generate_reset(port.dst_reset, port.dst_clock));   // 目的域自己的复位
+```
+
+手写复位序列的用例（直接 `port.reset = 1/0`）要同样成对设置目的域复位。
+
+**域内同步产生的复位不要额外驱动**：`Controller` 的 DSP 域复位由模块内部的 `ResetSynchronizer` 从主复位
+同步得到，`port_t` 里只有 `reset`（主复位），测试不必（也无法）单独驱动它——但**主复位撤销后 DSP 域还要
+等 `resetDepth`（默认 4）拍 `dspClock` 才退出复位**，测试的等待时间要覆盖这段延迟。
+这类"模块自己产生复位"的结构一旦极性接反（见 `dpm-chisel-rtl` 的极性陷阱），表现是所有用例超时；
+反过来，只要测试全绿就说明该域的复位确实被撤销了——这是行为测试相对静态检查的价值所在。
+
+**逐目标的 Verilator 检查豁免**写在 `test/xmake.lua` 的 `extra_verilator_options` 里，并必须写清为什么
+（当前两条：`MmcmDrpController` 的 `UNUSEDSIGNAL` 是 AXI4-Lite 接口固有未使用位；`Controller` 的
+`SYNCASYNCNET` 是"同一根 `reset` 既做同步复位又做同步链异步端"这一复位同步器固有结构）。豁免只针对
+单个检查，其余 `-Wall` 检查全部保留，不要用 `-Wno-fatal` 之类的整体开关。
+
 ### 7. 波形与仿真结束
 
 - 激励最后用 `wait_stimulate` 多等几个周期再 `eval_finish()`，避免波形被截断。

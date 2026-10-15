@@ -67,7 +67,10 @@ namespace
     /// 高速时钟网格上的采样量化
     constexpr std::uint64_t phase_cnt_per_edge_tolerance{1zu};
 
-    /// DUT 端口包装：Controller 有低速 clock 与高速 dspClock 两个时钟输入
+    /// DUT 端口包装：Controller 有低速 clock 与高速 dspClock 两个时钟输入。
+    /// DSP 域的复位由 Controller 内部的 ResetSynchronizer 从 reset 同步得到（异步置位、
+    /// 与 dspClock 同步释放），所以测试只驱动 reset；释放后 DSP 域还要等 reset_depth 拍
+    /// 才退出复位，测试的等待时间要覆盖这段延迟。
     struct port_t
     {
         bit_slice<CData> clock;
@@ -369,7 +372,7 @@ TEST_SUITE("Controller")
                 co_await verify_at(port.clock, [&] { CHECK_EQ(port.io_out_valid, 0u); });
             }
 
-            // 撤销复位后仍应保持空闲，直到收到测量请求
+            // 撤销复位后仍应保持空闲，直到收到测量请求（DSP 域的复位由 reset 同步释放）
             port.reset = 0;
             for(auto cycle{0zu}; cycle != 20zu; ++cycle)
             {

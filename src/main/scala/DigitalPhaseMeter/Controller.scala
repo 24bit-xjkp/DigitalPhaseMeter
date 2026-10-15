@@ -48,6 +48,10 @@ class ControllerOutPayload(
   * 写它的 DRP 寄存器）。 它们与外部输入一样由 `PhaseMeter` 的异步采样链在测量时钟域采样，因此切换不改变测量通路的 延迟，相位差只是被量化到 1 个测量时钟周期（即相位计本身的分辨率）。使能无效时片内源输出 恒低（用
   * `enable` 把它门掉）。
   *
+  * 时钟与复位：闸门计数 FSM 与结果锁存工作在隐式 `clock` / `reset`（低速域，主复位是高有效），`PhaseMeter` / `SignalInputMux` 与 `CdcConfigBus` 的目的域例化在
+  * `withClockAndReset(dspClock, dspReset)` 里。高速域的 `dspReset` 由本模块内部的 `ResetSynchronizer` 从主复位同步得到（异步置位、与 `dspClock`
+  * 同步释放，同步链带 `ASYNC_REG`），因此复位释放与消费它的时钟同域。注意该模块的复位输入是**低有效**的（顶层接 PS 的 `resetn`），主复位是高有效，接入前必须取反。
+  *
   * @param gateCntWidth
   *   闸门计数器宽度
   * @param edgeCntWidth
@@ -74,14 +78,19 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
     private val outValid = RegInit(false.B)
     io.out.valid := outValid
 
+    // 高速域复位：由本模块自己的复位同步链产生（异步置位、与 dspClock 同步释放）。
+    // ResetSynchronizer 的输入是**低有效**复位（顶层接 PS 的 resetn），而隐式 reset 是高有效主复位，
+    // 必须取反后接入；直接传 reset.asBool 会让 dsp 域在系统复位撤销后被永久按在复位里。
+    val dspReset = ResetSynchronizer(dspClock, !reset.asBool)
+
     // 配置跨时钟域：目的域在收到新配置前一直保持旧值（复位后为全 0，即选外部输入）
     private val cdcConfig = Module(new CdcConfigBus(new SignalConfigPayload))
     cdcConfig.dstClock := dspClock
+    cdcConfig.dstReset := dspReset
     cdcConfig.io.in.valid := io.config.valid
     cdcConfig.io.in.bits := io.config.bits
     io.config.ready := cdcConfig.io.in.ready
 
-    private val dspReset = withClock(dspClock) { SyncReset() }
     val phaseMeter = withClockAndReset(dspClock, dspReset) { Module(new PhaseMeter(edgeCntWidth, phaseCntWidth)) }
     private val signalInputMux = withClockAndReset(dspClock, dspReset) { Module(new SignalInputMux) }
 

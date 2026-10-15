@@ -27,10 +27,11 @@ IP 对外只有**一个 AXI 从口**：`s_axi_lite`（AXI4-Lite，4KB 寄存器�
 
 ## 前提
 
-1. 先用 sbtn 生成综合产物 SystemVerilog（XPM 原语版本）：
+1. 先用 sbtn 生成 SystemVerilog（每个模块一份产物，仿真与综合共用；复位同步是纯 RTL 的
+   `ResetSynchronizer`，产物里没有 XPM 原语）：
 
    ```bash
-   sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop --type=syn"
+   sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop"
    ```
 
 2. Vivado 在 PATH 中（本项目在 **Vivado 2025.2** 上验证）。脚本默认器件为 `xc7z010clg400-1`，
@@ -277,9 +278,10 @@ dpm_top_0 内部：外部 sig1/sig2 与片内源（MMCM 的两路输出）经 Si
 - **place/route 有可观的 run-to-run 差异**：同一网表、同一策略实测 WNS 在 +0.006 与 −0.202ns
   之间摇摆。因此「跑一次通过」不能算签核，需要多次独立布局布线取余量最好的一次——
   `vivado/impl_multi.tcl` 就是做这件事的实验脚本（6 次全部为正、最差 +0.236ns）。
-- IP 的 `resetn` 接 `proc_sys_reset_0/peripheral_aresetn`（低有效），
-  顶层内部再用 `ResetSynchronizer` 生成与主时钟同步的高有效复位；
-  `dspClock` 域的复位由 `Controller` 内部的 `SyncReset` 得到，不需要外部提供。
+- IP 的 `resetn` 接 `proc_sys_reset_0/peripheral_aresetn`（低有效）。复位同步按**每个时钟域各一个**
+  `ResetSynchronizer` 生成高有效复位：主时钟域那个在顶层（`mainReset`，与主时钟同步），DSP 域那个在
+  `Controller` 内部（从 `mainReset` 再同步到 `dspClock`；该模块的输入是**低有效**复位，接入前要取反）。
+  复位释放与消费它的时钟同域，都不需要外部提供第二个复位端口。
 - 中断是**高电平**信号，经 `xlconcat` 接到 `IRQ_F2P[0]`；PS 侧中断服务程序写 `IRQ_STATUS` 清除。
 
 ## 地址映射
@@ -395,11 +397,14 @@ void dpm_irq_handler(void)
    [`constraints/dpm_top.xdc`](constraints/dpm_top.xdc) 中给出（`sig1 → W18`、`sig2 → W19`，
    LVCMOS33），换板卡时按实际供电与引脚改这两行。片内信号源由 DSP 域时钟直接驱动，与测量核心
    同源，因此没有额外的输入约束。
-4. **复位与时钟基础设施不是数据通路**：`resetn` 经 `ResetSynchronizer` 同步，DSP 域的
-   `dspReset` 由 `SyncReset`（综合化为 `xpm_cdc_sync_rst`）从主复位同步得到；MMCM 的
+4. **复位与时钟基础设施不是跨域数据通路**：`resetn` 经**每个时钟域各一个** `ResetSynchronizer`
+   分别同步到主时钟（`mainReset`）与 `dspClock`（DSP 域那个例化在 `Controller` 内部，输入取反接入），
+   消费端在本域内把它当同步复位用，
+   因此复位分配是**同域**通路，不产生时钟对之间的路径；MMCM 的
    `locked` 只驱动 clk_wiz 内部 Safe Clock Startup 的移位寄存器与 `BUFGCE` 的 CE
-   （`clk_wiz_0/locked` 端口在 BD 里未连接）。这些都不是需要 max_delay/false_path 的数据通路，
-   `check_timing` 也确认没有遗漏的端点。
+   （`clk_wiz_0/locked` 端口在 BD 里未连接）。这些都不是需要 max_delay/false_path 的数据通路。
+   复位重构后的布线复核（见下文「复位重构后的一轮复跑」）：`check_timing` 仍为 12 项全零，
+   两条复位同步链的触发器都带 `ASYNC_REG` 且被放进同一个 slice，最差时序路径与复位无关。
 
 > 复核方式：`check_timing -verbose -file <rpt>` 看 12 项是否全零，再用
 > `report_timing_summary` 的 Intra/Inter Clock Table 逐个时钟对确认余量；
@@ -481,6 +486,83 @@ void dpm_irq_handler(void)
 | XSA                                              | `build/vivado/dpm_system.xsa`（含 bitstream）；`python3 ps/tools/check_bd_uart.py build/vivado/dpm_system.xsa` 报 `PS_UART: UART1 base=0xE0000000 io=MIO 48 .. 49 baud=115200`                                                                                                                                                                                                                                  |
 | 日志告警（清理前）                               | 0 ERROR；综合 133 条 WARNING、实现 106 条 WARNING（其中 100 条是 CRITICAL）。构成：100 × `[Synth 8-7129]`（xlconcat 写死的 128 个 `In*` 端口）、25 × `[Synth 8-7071]`（PS7 DDR/MIO 等未连接端口）、100 × `[Netlist 29-160]`（PS7 自带 XDC 在没有 board part 时设不上 MIO 引脚属性）、3 × `[Synth 8-7023]`、2 × `[Vivado 12-4739]`（顶层 XDC 里失效的 `*clk_wiz_src*` 兜底约束）、3 × `[Synth 8-4446/8-7023]` 等 |
 | **日志告警（清理后）**                           | **综合 `58 Infos, 0 Warnings, 0 Critical Warnings and 0 Errors`；实现 `148 Infos, 0 Warnings, 0 Critical Warnings and 0 Errors`**。改名/改 BD 能消的已改（顶层 XDC 的时钟约束写法、`clk_wiz_0` 的 `USE_LOCKED`），厂商 IP 固有的按类屏蔽并写明理由（见「告警清理」）。唯一仍在 `open_project` 里打印的是 96 条 `[Board 49-26]` 板卡库扫描告警，它在脚本任何语句之前就输出，`set_msg_config` 拦不到              |
+
+### 复位重构后的一轮复跑（每域一个 `ResetSynchronizer` + `ASYNC_REG`）
+
+改动内容：顶层为**每个时钟域各例化一个** `ResetSynchronizer`（此前 DSP 域复位由 `Controller` 内部的
+`SyncReset` 即 `xpm_cdc_sync_rst` 产生），复位同步链的寄存器统一由 `MyShiftRegisters` 加
+`(* ASYNC_REG = "TRUE" *)`，生成产物里不再有 XPM 原语。按
+`package_ip.tcl` → `package_src_ip.tcl` → `create_bd.tcl` → `build_bitstream.tcl` 完整重跑：
+
+| 步骤                                             | 结果                                                                                                                                                                                                                     |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `package_ip.tcl` / `package_src_ip.tcl`          | 通过（`ipx::check_integrity: Integrity check passed`），0 ERROR / 0 CRITICAL WARNING；IP 对外 5 个 bus interface 与两段地址块不变                                                                                          |
+| `create_bd.tcl`                                  | 通过（`BD_DONE: dpm_system`），0 ERROR / 0 CRITICAL WARNING                                                                                                                                                               |
+| `build_bitstream.tcl`（官方策略那一次）          | `STRATEGY_CHANGED: 4` → `SYNTH_DONE` / `IMPL_DONE` / `XSA_DONE`、`write_bitstream completed successfully`；0 ERROR / 0 CRITICAL WARNING                                                                                  |
+| 时序（官方策略那一次）                           | **WNS +0.011ns / WHS +0.050ns**，TNS = THS = 0，**0 个失败端点**；最差路径在 DSP 域内部（`controller/phaseMeter/stateReg_reg[2]` → `.../edgeCnt_dspCounter/cnt_reg/CARRYIN`），**与复位同步器无关**                  |
+| 6 次独立实现（`impl_multi.tcl 6`）               | 全部为正、0 个失败端点；同一条 place directive 多次尝试给出完全相同的数值（不是随机波动），明细见下表                                                                                                                     |
+| `ASYNC_REG` 落位（官方策略那次的布线后网表）     | `get_cells -hier -filter {ASYNC_REG == 1}` 共 **71** 个触发器带该属性；每条同步链的触发器被放进**同一个 slice**（`dpm_top` 的 `dspReset` 4 级链在 `SLICE_X11Y46`、`mainReset` 在 `SLICE_X11Y53`，`dpm_src_drp` 的在 `SLICE_X13Y52`），属性确实在实现阶段生效             |
+| `check_timing`（同上）                           | 12 项全零；唯一非零项仍是 sig1/sig2 的「有 `set_false_path` 但无 input delay」MEDIUM 提示                                                                                                                                 |
+| `report_methodology`（同上）                     | TIMING-4 ×1、TIMING-27 ×1（clk_wiz 自带 XDC 在 `clk_in1` 上建 primary clock）、TIMING-28 ×7（顶层 XDC 按名字引用 MMCM 派生时钟）、TIMING-47 ×2（`clkout*_raw` ↔ `clk_fpga_0` 的 `set_max_delay -datapath_only`），全部 `Related violations: <none>`，均来自既有写法 |
+
+多次实现的明细（同一份综合网表，逐次 `reset_run impl_1` 后 place/route）：
+
+| 尝试 | place directive        | route directive    | WNS(ns) | WHS(ns) | 失败端点 |
+| ---- | ---------------------- | ------------------ | ------- | ------- | -------- |
+| 1    | Explore                | AggressiveExplore  | +0.087  | +0.013  | 0        |
+| 2    | AggressiveExplore      | AggressiveExplore  | +0.087  | +0.013  | 0        |
+| 3    | ExtraTimingOpt         | AggressiveExplore  | +0.079  | +0.012  | 0        |
+| 4    | ExtraPostPlacementOpt  | AggressiveExplore  | +0.011  | +0.050  | 0        |
+| 5    | Explore                | Explore            | +0.087  | +0.013  | 0        |
+| 6    | AggressiveExplore      | Explore            | +0.087  | +0.013  | 0        |
+
+**余量结论（需要留意）**：这次重构后，官方策略（`Performance_Retiming`，其 place 预设是
+`ExtraPostPlacementOpt`）的余量只剩 **+0.011ns**，而改动前同一策略那一轮是 +0.281ns。差别是否由
+复位改动带来**没有单独做 A/B**（综合开了 `GLOBAL_RETIMING`，重定时决策本身也会换网表），但同一条
+place directive 的数值可复现、不是随机波动。可用的对策有两个：把 `impl_1` 的
+`STEPS.PLACE_DESIGN.ARGS.DIRECTIVE` 从 `ExtraPostPlacementOpt` 换成 `Explore` / `AggressiveExplore`
+（同网表实测 +0.087ns，约 8 倍余量），或先查清 DSP 域那条 `stateReg → DspCounter` 路径。
+
+> 状态说明：跑完 `impl_multi.tcl` 后，`impl_1` 里留下的是余量最好的那次尝试（+0.087ns），而
+> `build/vivado/dpm_system.xsa` 是官方策略那次（+0.011ns）导出的——要恢复「签核用官方策略」的状态，
+> 重跑一次 `build_bitstream.tcl` 即可（它会检测到策略不一致并强制重跑）。本次运行产生的
+> `multi_a*_timing.rpt` / `best_timing.rpt` / `impl_multi_results.csv` 已按仓库惯例清理（可重新生成）。
+
+### 复位极性修复后的一轮复跑与两种实现策略对比
+
+> **先看这条**：上一节那些数字（官方策略 **+0.011ns**、`impl_multi` 的 **+0.079~+0.087ns**）是在
+> **复位极性接反**的网表上测出来的，**结论已作废**。`ResetSynchronizer` 的输入是**低有效**复位
+> （顶层接 PS 的 `resetn`），而 `Controller` 内部拿到的是高有效主复位：写成
+> `ResetSynchronizer(dspClock, reset.asBool)` 极性正好相反——主复位撤销（拉低）的那一刻同步链被
+> **异步置位**，DSP 域被永久按在复位里。生成 RTL、综合、实现、时序报告全部正常，只有行为仿真能抓到：
+> 按新的 `Controller` 结构更新测试后，6 个用例**全部超时**（测量永不返回），波形里 `dspReset` 在
+> 主复位拉低的同一拍被置位后再不释放。修复后按完整流水线重跑：
+
+| 检查                   | 实际运行                                                       | 结果                                                                                                                                                                                          |
+| ---------------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 修复内容               | `Controller.dspReset`                                          | `ResetSynchronizer(dspClock, !reset.asBool)`（取反接入，附注释说明极性）                                                                                                                       |
+| Verilator 全量回归     | `xmake test -v`                                                | **100% passed，4/4 目标**：Controller 6 用例/547 断言、EdgeDetector 1/13、MmcmDrpController 4/85、ResetSynchronizer 1/17（合计 12 用例/662 断言）                                             |
+| xsim 顶层              | `sim/run_xsim.sh --clean`                                      | `==== 测试通过：DigitalPhaseMeterTop 寄存器数据通道 ====`（AXI 通路与片内源切换都覆盖）                                                                                                        |
+| 完整流水线             | `package_ip.tcl` → `package_src_ip.tcl` → `create_bd.tcl` → `build_bitstream.tcl` | `PKG_TOP_OK` / `PKG_SRC_OK` / `BD_DONE` / `SYNTH_DONE` / `IMPL_DONE` / `XSA_DONE`，0 ERROR / 0 CRITICAL WARNING；bitstream 与 `dpm_system.xsa` 已按修复后的网表重新生成                          |
+| 时序（官方策略）       | `Performance_Retiming` 布线后报告                              | **WNS +0.192ns / WHS +0.050ns**，TNS = THS = 0，0 个失败端点；最差路径是 `phaseMeter/pulseSig2_edgeDetector/…/pipeline_1_reg` → `phaseMeter/stateReg_reg[1]/D`（数据 2.197ns，2 级 LUT）        |
+| 资源 / 功耗（同上）    | `report_utilization` / `report_power`                          | LUT 948 / FF 1487 / DSP 2 / BRAM 0 / BUFGCTRL 6；总功耗 **1.886 W**（vectorless）                                                                                                             |
+
+两种实现策略对比（**同一份综合网表**，`synth` 参数两边完全相同——`PerformanceOptimized` +
+`GLOBAL_RETIMING on` + `MAX_DSP 2`；每个策略 3 次独立 place/route，由同一个会话内流程复刻
+`impl_1` 的 init_design 后跑，官方那次与工程里 `build_bitstream.tcl` 的结果一致，可交叉验证）：
+
+| 实现策略                                     | 步骤 directive                                                                                                     | WNS                    | WHS      | 最差路径                                                     | 资源 / 功耗                 |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ---------------------- | -------- | ------------------------------------------------------------ | --------------------------- |
+| `Performance_Retiming`（官方，本仓库采用）   | opt `Default` / place `ExtraPostPlacementOpt` / phys_opt `AlternateFlowWithRetiming` / route `Explore`             | **+0.192ns**（3 次全同） | +0.050ns | `pulseSig2_edgeDetector` 采样链 → `stateReg[1]/D`（2.197ns） | 948 / 1487 / 2 DSP / 1.886 W |
+| `Performance_ExplorePostRoutePhysOpt`（`impl_multi.tcl` 留下的实验策略） | opt `Explore` / place `Explore` / phys_opt `AggressiveExplore` / route `Explore -tns_cleanup` / post-route phys_opt `AggressiveExplore` | +0.135ns（3 次全同）   | +0.050ns | `stateReg[2]` → `edgeCnt_dspCounter/cnt_reg/CARRYIN`（2.016ns） | 同上                        |
+
+**结论**：极性修复后**官方策略反而更好**（+0.192ns vs +0.135ns，余量多约 42%），因此
+**不需要改 `build_bitstream.tcl` 里的策略**；上一节「把 place directive 换成 Explore/AggressiveExplore
+能拿 +0.087ns」的建议建立在极性接反的网表上，同样作废。6 次尝试的时序报告内容逐行一致，说明这份
+网表在当前 Vivado 版本下 place/route 没有 run-to-run 差异（与更早「同网表同策略 WNS 在 +0.006 与
+−0.202 之间摇摆」的记录不同）——多次实现仍是签核前的稳妥做法，但不再是必须。
+上一节关于 `ASYNC_REG` 落位的结论（每条同步链的 4 个触发器被放进同一个 slice）只取决于属性，
+与极性无关，仍然成立。
 
 ### 上一版（clk_wiz_src 方案）的实测记录
 

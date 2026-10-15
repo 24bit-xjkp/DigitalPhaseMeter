@@ -19,12 +19,12 @@ RTL 本身的写法见 `dpm-chisel-rtl`；测量结果的判据见 `dpm-measurem
 ## 交付物与执行顺序
 
 ```text
-sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop --type=syn"      # 顶层 IP RTL
-sbtn -batch "runMain DigitalPhaseMeter.EmitMmcmDrpController --type=syn"         # DRP 控制器 RTL
+sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop"    # 顶层 IP RTL
+sbtn -batch "runMain DigitalPhaseMeter.EmitMmcmDrpController"       # DRP 控制器 RTL
 vivado -mode batch -source vivado/package_ip.tcl        # 打包顶层 IP → build/vivado/ip/dpm_top
 vivado -mode batch -source vivado/package_src_ip.tcl    # 打包 DRP 控制器 → ip/dpm_src_drp
 vivado -mode batch -source vivado/create_bd.tcl         # BD → build/vivado/bd_proj（DSP 域默认 400MHz、PS 串口默认 uart1）
-sim/run_xsim.sh                                         # xsim 仿真（综合产物 + XPM）
+sim/run_xsim.sh                                         # xsim 仿真（同一份生成产物）
 vivado -mode batch -source vivado/build_bitstream.tcl   # 写高速时钟策略 → 综合/实现/bitstream/XSA
 vivado -mode batch -source vivado/impl_multi.tcl 6      # 高速时钟：多次实现取余量最好的一次
 ```
@@ -38,10 +38,10 @@ vivado -mode batch -source vivado/impl_multi.tcl 6      # 高速时钟：多次�
 
 `build/` 下全部是产物，不入库；入库的是 `.scala`、`test/`、`sim/`、`vivado/` 里的脚本与文档。
 
-**必须用 `--type=syn` 的产物**：BD、综合与 xsim 都消费 `build/chisel/DigitalPhaseMeterTop/syn/`
-（其中复位同步链实例化 `xpm_cdc_sync_rst`）；`--type=sim` 的行为模型只用于 Verilator，
-Verilator 侧没有 XPM 模型。两种产物按类型分目录存放（`build/chisel/<Name>/<sim|syn>/`），
-可以任意交替生成，详见 `dpm-chisel-rtl`。
+**每个模块只有一份产物**：BD、综合与 xsim 都消费 `build/chisel/<Name>/`（顶层是
+`build/chisel/DigitalPhaseMeterTop/`，`package_ip.tcl` 的 `rtl_dir` 就指这里）。复位同步是纯 RTL 的
+`ResetSynchronizer`（异步置位、与各域时钟同步释放），产物里没有 XPM 原语，因此 Verilator 与
+xsim / Vivado 编译的是同一份文件，可以任意交替生成，详见 `dpm-chisel-rtl`。
 
 ## IP 打包（package_ip.tcl）
 
@@ -100,17 +100,19 @@ Verilator 侧没有 XPM 模型。两种产物按类型分目录存放（`build/c
 命令行三段式，`run_xsim.sh` 已经封装：
 
 ```bash
-xvlog --sv --work work "$XILINX_VIVADO/data/ip/xpm/xpm_cdc/hdl/xpm_cdc.sv" \
-                       "$XILINX_VIVADO/data/verilog/src/glbl.v"
 xvlog --sv --work work -f <补全成绝对路径的 filelist.f>
 xvlog --sv --work work sim/tb_*.sv
-xelab --debug typical --timescale 1ns/1ps <tb_top> glbl -s <snapshot>
+xelab --debug typical --timescale 1ns/1ps <tb_top> -s <snapshot>
 xsim <snapshot> -runall
 ```
 
 - `xelab` **没有** `--work` 选项；工作库用 `-L work` 或默认 `work`。
-- 被测 RTL 取**综合产物**目录 `build/chisel/DigitalPhaseMeterTop/syn/`（不是 `<Name>/` 根下，
-  也不是 `sim/` 子目录——后者是给 Verilator 的行为模型，没有 XPM 模块）。
+- 被测 RTL 取生成产物目录 `build/chisel/DigitalPhaseMeterTop/`（每个模块只有一份产物）。
+- **只有用到厂商原语时才需要额外编译源码库**：`xpm_cdc.sv`（XPM 原语）与 `glbl.v`
+  （XPM / unisim 需要的全局复位模型）曾经是必需的——复位同步用 `xpm_cdc_sync_rst` 时
+  `xvlog` 要带上 `$XILINX_VIVADO/data/ip/xpm/xpm_cdc/hdl/xpm_cdc.sv`、`xelab` 要把 `glbl`
+  一起作为顶层。复位重构成纯 RTL 的 `ResetSynchronizer` 之后，`run_xsim.sh` 两项都不再需要；
+  但仿真真实 MMCM 的 `run_handoff_tb.sh` 仍要 `glbl.v`（unisim）。
 - 判定成败不要只看 xsim 退出码（`$fatal` 也可能返回 0），要在日志里找激励打印的通过标记，
   失败时再 grep 错误行。
 - 测试激励的写法约定：
@@ -280,6 +282,7 @@ run-to-run 波动，单次通过不算签核，见下文）；频率参数同时
 | 坑 | 现象 | 处理 |
 | --- | --- | --- |
 | **place/route 有 run-to-run 差异** | 同一网表、同一策略，WNS 在 +0.006 与 −0.202ns 之间摇摆 | 「跑一次通过」不能算签核；用 `vivado/impl_multi.tcl` 多次独立实现取余量最好的一次，报告里给出多次结果 |
+| **余量对 place directive 敏感，且同一条 directive 是可复现的** | 同一份网表（复位重构后）逐次换 directive：`ExtraPostPlacementOpt`（`Performance_Retiming` 的 place 预设）只有 **+0.011ns**，而 `Explore` / `AggressiveExplore` / `ExtraTimingOpt` 稳定在 **+0.079 ～ +0.087ns**；同一条 directive 的多次尝试给出**完全相同**的 WNS/WHS | 余量薄时先把 place directive 当变量扫一遍（`impl_multi.tcl`），不要默认是随机波动——换 directive 是零 RTL 代价的余量来源；报告里要写清用的哪条 |
 | **过约束只能用来逼工具，不能用来签核** | `set_clock_uncertainty` 0.15ns 过约束 → 清掉后 WNS −0.070ns；0.20ns → −0.083ns；0.25/0.30ns 反而退化到 −0.330ns（目标过紧，工具选到更差的解） | 过约束下跑完 place/route 后，用 `reset_clock_uncertainty -setup` 清掉、重新出报告，用**清掉后**的 WNS 作为结论；本设计最终不用过约束 |
 | **控制脚寄存器化要成对做** | 只把边沿脉冲延迟一拍送 FSM：FSM 输出（握手翻转信号）也跟着晚一拍，改变与慢速域的握手时序 → Verilator 相位读数超容限（phaseCnt/edgeCnt 由 10.0 变成 14.24） | 时序优化只动不影响协议时序的通路（如计数器控制脚 `clear`/`enable` 的状态译码寄存）；两个使能要**同时**延迟，保持相对时序 |
 | **同一工程不能并发跑两个 Vivado** | 每次 `launch_runs` 按当前工程步骤参数重写 `*.runs/<run>/<top>.tcl`，后启动的进程覆盖先生效的配置。实测先设 `Performance_Retiming`、另一仍在跑的脚本改回 `ExplorePostRoutePhysOpt`，同一次改动报出 +0.077ns（与 +0.270ns 差 0.19ns） | 改策略/跑实现前确认没有其它 Vivado 在跑；跑完用 `dpm_bd.runs/<run>/runme.log` 的 `Command:` 行核对实际 directive |

@@ -9,8 +9,15 @@ local chisel_dir = path.join(os.scriptdir(), "..", "build", "chisel")
 -- 带有 awprot / arprot / wstrb 与 32 位写数据，但 MMCM 的配置寄存器只有 16 位、
 -- 且本设计不做保护级检查，因此这些位天然不被消费。这些是**接口固有的未使用位**，
 -- 不是 RTL 缺陷，所以对该目标关掉 UNUSEDSIGNAL（其余 -Wall 检查全部保留）。
+--
+-- Controller 的高速域复位由模块内部的 ResetSynchronizer 从隐式 reset（高有效主复位）
+-- 异步置位得到：同一根 reset 网线既做本模块寄存器的同步复位，又做同步链触发器的异步复位，
+-- Verilator 的 -Wall 因此报 SYNCASYNCNET。这是复位同步器的固有结构——异步端按定义与本地
+-- 时钟无关（链的 ASYNC_REG 打包负责把释放沿的亚稳态风险压到可接受范围），不是缺陷，所以
+-- 只对该目标关掉这一条检查（其余 -Wall 检查全部保留）。
 local extra_verilator_options = {
-    ["MmcmDrpController"] = { "-Wno-UNUSEDSIGNAL" }
+    ["MmcmDrpController"] = { "-Wno-UNUSEDSIGNAL" },
+    ["Controller"] = { "-Wno-SYNCASYNCNET" }
 }
 
 for _, file in ipairs(os.files("*.cpp")) do
@@ -27,10 +34,10 @@ for _, file in ipairs(os.files("*.cpp")) do
         add_values("verilator.flags", flags)
 
         on_load(function (target)
-            -- Verilator 侧只消费**仿真产物**（build/chisel/<Name>/sim）：Verilator 没有 XPM 模型，
-            -- 综合产物（.../syn）里的 xpm_cdc_sync_rst 会在编译期报模块缺失。
-            -- 两种产物分目录存放（见 Utils.scala 的 emitSystemVerilog），互不覆盖。
-            local sv_dir = path.join(chisel_dir, name, "sim")
+            -- 每个模块只生成**一份**产物（build/chisel/<Name>，见 Utils.scala 的 emitSystemVerilog）：
+            -- 复位同步改成纯 RTL 的 ResetSynchronizer 后，仿真与综合（xsim / Vivado）共用同一份 RTL，
+            -- 不再有 sim / syn 两种产物，Verilator 侧也就不会再遇到 XPM 原语缺失的问题。
+            local sv_dir = path.join(chisel_dir, name)
             for file in io.lines(path.join(sv_dir, "filelist.f")) do
                 target:add("files", path.join(sv_dir, file), {})
             end

@@ -1,6 +1,7 @@
 // 数字相位计顶层 IP 的 SystemVerilog 测试激励（Vivado xsim）
 //
-// 被测对象是 DigitalPhaseMeterTop（综合产物，XPM 原语版本）。数据通道是 GPIO 式的寄存器：
+// 被测对象是 DigitalPhaseMeterTop（Chisel 生成产物，每个模块只有一份：复位同步是纯 RTL 的
+// ResetSynchronizer，不再是 XPM 原语）。数据通道是 GPIO 式的寄存器：
 // 一次测量的结果只有 4 个字，锁存在 ControlRegs 的只读寄存器里，PS 收到中断后读走即可，
 // IP 内部没有 BRAM，对外也只有 s_axi_lite 一个 AXI4-Lite 从口。覆盖：
 //   - 主时钟同步复位的异步置位/同步释放：复位期间无中断、AXI 从口不接受任何传输、寄存器为默认值；

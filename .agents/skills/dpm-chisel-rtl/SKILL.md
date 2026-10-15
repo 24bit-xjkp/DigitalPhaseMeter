@@ -1,6 +1,6 @@
 ---
 name: dpm-chisel-rtl
-description: 'Use when: 在本仓库（DigitalPhaseMeter）新增、修改或重构 Chisel RTL（src/main/scala/DigitalPhaseMeter/*.scala），或需要生成、更新供 Verilator 测试与综合使用的 SystemVerilog。覆盖模块与 Emit 主类写法、生成入口的正确调用形式、sim/syn 两种产物、filelist.f 的消费方式，以及 Chisel 信号名到 SV 端口名的映射。'
+description: 'Use when: 在本仓库（DigitalPhaseMeter）新增、修改或重构 Chisel RTL（src/main/scala/DigitalPhaseMeter/*.scala），或需要生成、更新供 Verilator 测试与综合使用的 SystemVerilog。覆盖模块与 Emit 主类写法、生成入口的正确调用形式、产物目录（每个模块一份，仿真与综合共用）、filelist.f 的消费方式、时钟域与复位分配约定，以及 Chisel 信号名到 SV 端口名的映射。'
 argument-hint: '要新增或修改的 RTL 模块（如 Controller、PhaseMeter）'
 ---
 
@@ -24,8 +24,8 @@ object EmitFoo extends Main {
 }
 ```
 
-- `Main`（定义在 `Utils.scala`）提供 `emitSystemVerilog`：解析 `--type` 选项、创建输出目录、调用 `ChiselStage.emitSystemVerilogFile`。
-- 输出目录为 `build/chisel/<Name>/<sim|syn>/`（**按产物类型分子目录**），`<Name>` 由主类名剥离 `Emit` 前缀得到（`EmitFoo` → `Foo`）。需要与类名不同的目录名时显式传第二个参数。
+- `Main`（定义在 `Utils.scala`）提供 `emitSystemVerilog`：创建输出目录、调用 `ChiselStage.emitSystemVerilogFile`；程序收到的参数原样转交给 `ChiselStage`（不再有 `--type` 之类被 `Main` 摘掉的选项，见下文）。
+- 输出目录为 `build/chisel/<Name>/`（**每个模块只有一份产物**），`<Name>` 由主类名剥离 `Emit` 前缀得到（`EmitFoo` → `Foo`）。需要与类名不同的目录名时显式传第二个参数。
 - 传给 firtool 的固定选项是 `-disable-all-randomization` 与 `-default-layer-specialization=enable`；`--split-verilog` 与 `--target-dir` 由 `emitSystemVerilog` 自动追加。
 - 参数合法性用 `assert` 校验（如 `assert(n >= 2 && n <= 10)`），与既有模块保持一致。
 - `build/chisel/` 是构建产物，**不入库**（`.gitignore` 已覆盖 `build`）。改 RTL 只能改 `.scala` 后重新生成，不要手工编辑生成的 `.sv`。
@@ -35,50 +35,62 @@ object EmitFoo extends Main {
 通过 sbtn 的运行入口执行生成主类，参数直接跟在类名之后：
 
 ```bash
-sbtn -batch "runMain DigitalPhaseMeter.EmitController"             # 仿真用，默认 --type=sim
-sbtn -batch "runMain DigitalPhaseMeter.EmitController --type=syn"  # 综合用
+sbtn -batch "runMain DigitalPhaseMeter.EmitController"
 ```
 
-**不要用 sbtn 的 `--` 分隔符传递参数**（这是本仓库实测的陷阱）：
+两个实测陷阱：
 
-```bash
-sbtn -batch "runMain DigitalPhaseMeter.EmitController -- --type=syn"   # 错误
-```
+- **一次只跑一个生成主类**。`sbtn -batch` 的多个参数会被拼成**同一条**命令，于是
+  `sbtn -batch "runMain ...EmitA" "runMain ...EmitB"` 只会生成 A（B 那一串变成 A 的参数，
+  实测被 `ChiselStage` 忽略、不报错），表现是"以为重新生成了，实际只有第一个模块是新的"。
+  批量生成用 shell 循环：`for m in Controller DigitalPhaseMeterTop; do sbtn -batch "runMain DigitalPhaseMeter.Emit$m"; done`。
+- **不要用 `--` 分隔符传递参数**：
 
-sbtn 会把字面量 `--` 作为第一个参数传给程序，`emitSystemVerilog` 只摘掉 `--type=...`，于是传给 `ChiselStage` 的参数列表变成 `-- --split-verilog --target-dir build/chisel/Controller/sim`；混入的 `--` 让 `--target-dir` 不再生效，**SV 会被写进进程当前目录（仓库根）而不是 `build/chisel/<Name>/<sim|syn>/`**，目标目录只剩一个空目录。表现为"生成成功但测试看不到模块""仓库根目录多出一堆 `.sv` 和 `filelist.f`"。正确形式是把 `--type=...` 直接写在 `runMain` 之后。若已经产生这类散落文件，删掉仓库根下的 `*.sv` / `filelist.f` 后按正确形式重新生成。
+  ```bash
+  sbtn -batch "runMain DigitalPhaseMeter.EmitController --"   # 错误
+  ```
 
-## sim 与 syn 两种产物
+  sbtn 会把字面量 `--` 作为第一个参数传给程序，`emitSystemVerilog` 原样转交给 `ChiselStage` 的参数列表就变成
+  `-- --split-verilog --target-dir build/chisel/Controller`；混入的 `--` 让 `--target-dir` 不再生效，
+  **SV 会被写进进程当前目录（仓库根）而不是 `build/chisel/<Name>/`**，目标目录只剩一个空目录。
+  表现为"生成成功但测试看不到模块""仓库根目录多出一堆 `.sv` 和 `filelist.f`"。生成入口当前没有任何
+  自定义参数，写成 `runMain <主类>` 即可；若确实要传 `ChiselStage` 的参数，直接跟在类名之后。
+  已经产生散落文件时，删掉仓库根下的 `*.sv` / `filelist.f` 后按正确形式重新生成。
 
-`--type=sim`（默认）与 `--type=syn` 的差别通过 `Config.outType` 传播到 RTL，当前唯一的用户是 `SyncReset`：
+## 产物目录：每个模块一份
 
-| 产物 | `SyncReset` | 用途 | 目录 |
-| --- | --- | --- | --- |
-| sim | `SyncResetSimulate`，纯 RTL 移位链 | Verilator 仿真与测试 | `build/chisel/<Name>/sim/` |
-| syn | `xpm_cdc_sync_rst`（Vivado 原语 `ExtModule`） | xsim、综合、布局布线 | `build/chisel/<Name>/syn/` |
+`emitSystemVerilog` 对每个模块只生成**一份**产物，仿真与综合消费同一份 RTL：
+复位同步由纯 RTL 的 `ResetSynchronizer`（`ResetSynchronizer.scala`）实现，产物里没有 XPM 原语，
+Verilator 与 xsim / Vivado 都能直接编译。
 
-两个分支驱动的是同一个 `io`（见 `Xpm.scala`），因此接口一致、端口相同。
+| 消费方 | 读的目录 | 入口 |
+| --- | --- | --- |
+| Verilator 单元测试 | `build/chisel/<Name>/` | `test/xmake.lua` 的 `on_load`（逐行读 `filelist.f`） |
+| xsim 顶层仿真 | `build/chisel/DigitalPhaseMeterTop/` | `sim/run_xsim.sh`、`sim/run_handoff_tb.sh` |
+| IP 打包 / 综合实现 | `build/chisel/<Name>/` | `vivado/package_ip.tcl`、`vivado/package_src_ip.tcl` |
 
-**两种产物必须分目录存放**（`emitSystemVerilog` 已按 `--type` 落到 `<sim|syn>` 子目录，不要改回去）。
-历史教训：两者曾共用 `build/chisel/<Name>/`，于是「先跑综合、再跑 Verilator 测试」时，Verilator
-读到的是被覆盖后的综合产物，而 Verilator 侧没有 XPM 模型，报
+历史教训（不要在重构里退回旧写法）：曾经按 `--type=sim|syn` 生成两套产物并分目录存放，
+因为 `SyncReset` 在仿真侧是移位链、综合侧是 `xpm_cdc_sync_rst` 原语；两套产物一旦共用目录，
+「先跑综合、再跑 Verilator 测试」就会让 Verilator 读到综合产物并报模块缺失：
 
 ```text
 %Error-MODMISSING: build/chisel/Controller/SyncReset.sv:8:3: Cannot find file containing module: 'xpm_cdc_sync_rst'
 ```
 
-这类错误看起来像 RTL 有问题，实际只是产物互相覆盖；反过来先跑 xsim 再跑综合也会让 xsim 读到仿真产物
-（此时反而不会报错，更隐蔽）。分目录后两个流程可以任意交替，互不影响。
-
-消费方各自只读自己的那一份：Verilator 测试读 `<Name>/sim/`（`test/xmake.lua`），
-xsim 与 Vivado 流程读 `DigitalPhaseMeterTop/syn/`（`sim/run_xsim.sh`、`vivado/package_ip.tcl`）。
+看起来像 RTL 有问题，实际只是产物互相覆盖。现在把复位同步改成一份纯 RTL 实现
+（`Config.outType` / `--type` / `Xpm.scala` 都已删除），这类问题从根上消失；**新增厂商原语前要先
+确认 Verilator 与 xsim 两侧都拿得到它的模型**，否则「一份产物」的前提就不成立了。
 
 ## 生成结果的消费方式
 
-`build/chisel/<Name>/<sim|syn>/` 下是 `--split-verilog` 拆出的多个 `.sv` 加一份 `filelist.f`。测试目标逐行读取 `filelist.f`（见 `test/xmake.lua` 的 `on_load`），因此：
+`build/chisel/<Name>/` 下是 `--split-verilog` 拆出的多个 `.sv` 加一份 `filelist.f`。测试目标逐行读取 `filelist.f`（见 `test/xmake.lua` 的 `on_load`），因此：
 
 - 不要手工维护源文件列表，也不要依赖目录 glob（源文件顺序由 firtool 决定）。
 - 新模块没有出现在 `filelist.f` 中，说明生成没有跑到，或产物目录不对（见上一节的 `--` 陷阱）。
 - 文件顺序即 firtool 的拓扑顺序，`filelist.f` 就是权威列表。
+- 目录里可能残留上一次生成、这次已被删除（或改名）的模块 `.sv`（例如 `Xpm.scala` 删除后留下的
+  `SyncReset.sv`）：消费方都按 `filelist.f` 取文件，残留文件不参与编译，但排查"读到了旧模块"时
+  先清掉整个 `build/chisel/` 再重新生成最省事。
 
 ## 端口命名：从 Chisel 到测试
 
@@ -89,6 +101,7 @@ xsim 与 Vivado 流程读 `DigitalPhaseMeterTop/syn/`（`sim/run_xsim.sh`、`viv
 | `val clock = IO(Input(Clock()))` | `clock` |
 | `val reset = IO(Input(Bool()))` | `reset` |
 | `val dspClock = IO(Input(Clock()))` | `dspClock` |
+| `val dstReset = IO(Input(Bool()))`（模块显式声明的复位端口，不在 `io` 里） | `dstReset` |
 | `io.sig.sig1`（`Bundle` 嵌套） | `io_sig_sig1` |
 | `io.in` 为 `Flipped(ValidIO(...))` | `io_in_valid`、`io_in_bits_targetGate` |
 | `io.out` 为 `ValidIO(...)` | `io_out_valid`、`io_out_bits_gateCnt` |
@@ -112,9 +125,18 @@ xsim 与 Vivado 流程读 `DigitalPhaseMeterTop/syn/`（`sim/run_xsim.sh`、`viv
   主机发请求、从口收下地址，但 `rvalid` 被复位压住，主机永久挂起。
 - **Bundle 构造参数不要叫 `width`**：与 Chisel `Aggregate.width` 冲突（要求 `override`），
   用 `dataWidth` 之类的名字。子类复用父 Bundle 的参数时要写 `override val`。
-- **`ExtModule` 的端口不走 `io`**：像 `Xpm.scala` 那样把端口直接声明成类的成员，
-  例化后写 `ram.douta` 而不是 `ram.io.douta`。未连接的 XPM 输入端口没有 Verilog 默认值，
-  必须显式驱动（`sleep`、`regcea/regceb`、`injectsbiterr*` 等）。
+- **显式复位端口也是普通端口，测试不驱动就等于该域不复位**：`CdcConfigBus.dstReset` 是模块成员端口
+  （不在 `io` 里），生成 `dstReset`。Verilator 里未驱动的输入保持 0，于是该时钟域的寄存器**永远不进入复位**、
+  只拿到 `--x-assign unique` 的随机初值——测试可能时好时坏。给模块加复位端口时，`test/<Name>.cpp`
+  的 `port_t` 与每个用例的复位序列都要同步补上（见 `dpm-verilator-testing`）。
+- **`ResetSynchronizer` 的输入是低有效复位**（顶层直接接 PS 的 `resetn`）。在模块内部用它从**高有效**的
+  隐式 `reset` 生成本域复位时必须取反：`ResetSynchronizer(dspClock, !reset.asBool)`。写成
+  `reset.asBool` 极性正好反了——RTL 能生成、能综合、时序也正常，但该域的寄存器会在**系统复位撤销后**
+  被永久按在复位里。实测表现：Verilator 的 `Controller` 用例全部超时（测量永远不返回），波形里
+  `dspReset` 在主复位拉低的那一刻被异步置位后一直为 1。这类错误只能靠行为测试抓到。
+- **`ExtModule` 的端口不走 `io`**（本仓库目前没有 `ExtModule` 实例，`Xpm.scala` 已随复位重构删除；
+  将来引入厂商原语时会用到）：把端口直接声明成类的成员，例化后写 `ram.douta` 而不是 `ram.io.douta`。
+  未连接的厂商原语输入端口没有 Verilog 默认值，必须显式驱动。
 - **顶层里「同一套 bundle、方向约定相同」的两个端口不能直接 `:=` 或 `<>`**：
   前者对输出方向不成立，后者要求方向相反。`DigitalPhaseMeterTop` 用
   `DataMirror.directionOf` 按字段方向逐字段连接（`connectTopPort` / `connectComplementary`），
@@ -160,7 +182,7 @@ xsim 与 Vivado 流程读 `DigitalPhaseMeterTop/syn/`（`sim/run_xsim.sh`、`viv
   防御手段有两个：生成后 `grep` 一下顶层 SV 里目标模块还有没有那组端口；以及**寄存器堆到下游的
   通路必须有 xsim 顶层用例覆盖**（见 `dpm-vivado-ip`）。
 - **独立生成给 Verilator 单测的模块要能过 `-Wall`**：`test/xmake.lua` 用 `-Wall` 编译
-  `build/chisel/<Name>/sim/`，警告即失败（`%Error: Exiting due to N warning(s)`）。两类常见告警都来自
+  `build/chisel/<Name>/`，警告即失败（`%Error: Exiting due to N warning(s)`）。两类常见告警都来自
   「共享数据结构 + 只关心一部分」：
   - `UNUSEDSIGNAL: Signal is not used: 'io_config_srcSelect'`：模块接收了一个自己用不到的字段
     （输入选择位只在 `SignalInputMux` 用）。做法是给只关心部分字段的模块一个**窄 payload**
@@ -170,11 +192,28 @@ xsim 与 Vivado 流程读 `DigitalPhaseMeterTop/syn/`（`sim/run_xsim.sh`、`viv
     半个周期」改成两个独立累加器（`phase1` / `phase2`，初值 `-phaseWord`），而不是
     `phase - phaseWord` 后再取最高位；实在需要中间 wire 时，把它写进寄存器。
 
-## 时钟域
+## 时钟域与复位分配
 
 `Controller` 同时使用两个时钟：低速 `clock` 域（FSM、闸门计数）与高速 `dspClock` 域（测量核心）。新增逻辑时先确定它属于哪个域：
 
-- 高速域模块用 `withClockAndReset(dspClock, dspReset) { ... }` 例化，`dspReset` 来自 `SyncReset()`；不要在高速域直接使用低速域的 `reset`。
+- 高速域模块用 `withClockAndReset(dspClock, dspReset) { ... }` 例化；`dspReset` 由 `Controller` 内部的 `ResetSynchronizer` 从主复位同步得到，不要在高速域直接使用低速域的 `reset`。
+- **每个时钟域一个复位同步器，复位释放必须与消费它的时钟同域**：顶层例化主时钟域那个（`mainReset`，与 `clock` 同步，接 PS 的低有效 `resetn`）；**DSP 域那个在 `Controller` 内部**（与 `dspClock` 同步，从高有效的 `mainReset` 取反接入，见上面的极性陷阱），其输出同时给 `PhaseMeter`、`SignalInputMux` 与 `CdcConfigBus.dstReset`。原因是两个时钟都源自 MMCM、相位关系不固定，而
+  `withClockAndReset(clk, boolReset)` 生成的复位在消费端是**同步复位**（`always @(posedge clk) if (reset)`）：
+  拿主时钟域的复位去释放高速域寄存器，会让释放沿落在 `dspClock` 的建立/保持窗口里。**曾经踩过**——
+  把 `dspReset` 也接到 `clock` 域的同步器上（照抄上一行），生成 RTL 表面完全正常，实际是跨域释放。
+  另有一条实测结论：DSP 域复位**由谁产生**会影响 `dspClock` 域复位分配网络的布局，进而影响 400MHz
+  余量（同一份实现流程下，链的异步端接 `resetn` 与接同步后的 `mainReset` 差 0.1～0.2ns）。
+- `ResetSynchronizer` 是 `RawModule`，自己显式声明 `clock` / `resetn` / `reset`；复位链直接复用
+  `MyShiftRegister(false.B, n, true.B)`（`ShiftRegister.scala`），并且例化在
+  `withClockAndReset(clock, (!resetn).asAsyncReset)` 里，因此链上寄存器是**异步复位**的：置位立即生效，
+  释放与传入的时钟对齐（n 级）。消费端把它当普通 `Bool` 同步复位用即可，不需要 `AsyncReset` 类型。
+- **同步链的寄存器要带 `ASYNC_REG`**：`MyShiftRegisters` 构造时就
+  `addAttribute(pipeline, """ASYNC_REG = "TRUE"""")`，生成的 SV 是每个 `pipeline_i` 前的
+  `(* ASYNC_REG = "TRUE" *)`；复位同步链与 `EdgeDetector` 的采样链都复用它，不要在别处另写裸移位链。
+  这个属性只在**综合/实现期**起作用（工具据此把链上触发器放近、按异步输入处理），Verilator 与 xsim
+  完全看不见——所以"属性还在不在"只能靠生成后 grep 生成的 SV，或综合后查
+  `get_property ASYNC_REG [get_cells -hier -filter {ASYNC_REG == 1}]`（本项目实测：OOC 综合后 4 个
+  链触发器都是 `ASYNC_REG=1`）。行为本身由 `test/ResetSynchronizer.cpp` 覆盖（异步置位 + 恰好 n 拍释放）。
 - 跨域的控制信号沿用现有的握手约定（`Controller` 用 `request` / `response` 的 valid-ready 加 `EdgeDetector` 做脉冲展宽），不要新增裸的跨域电平信号。
 - **多 bit 配置不要逐位同步**：`CdcConfigBus`（`Cdc.scala`）用「数据先稳定 → 翻转请求 → 目的域锁存并回应答」的
   整字握手，源域收到应答才放行下一笔，因此连续快速配置既不丢中间值、目的域也不会读到中间态。

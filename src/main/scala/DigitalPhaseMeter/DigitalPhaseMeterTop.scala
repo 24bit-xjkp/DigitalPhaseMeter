@@ -27,9 +27,10 @@ import chisel3.reflect.DataMirror
   *   - **片内信号源**：PL 内 MMCM（`clk_wiz`，动态可重配置）以主时钟为参考产生**两路同频、相位差可调**的 时钟，频率由 MMCM 的 M/D 分频、相位差由每个输出的相位寄存器通过 DRP
   *     设定；两路时钟在测量时钟域里 被采样成边沿脉冲，再由 `SourceDivider` 数边沿分频出 1kHz～40MHz 的方波（分频比 N 由 `SIG_DIV` 给出）。
   *
-  * 时钟与复位：`clock` 是主时钟（低速域，PS 的 FCLK_CLK0，50MHz），`resetn` 是 PS 送来的低有效 异步复位。顶层用 `ResetSynchronizer` 生成与 `clock` 同步的高有效复位
-  * `mainReset`，主时钟域的 所有模块都在 `withClockAndReset(clock, mainReset)` 里例化；高速域（`dspClock`）的复位由 `Controller` 内部的 `SyncReset`
-  * 从主复位同步得到。
+  * 时钟与复位：`clock` 是主时钟（低速域，PS 的 FCLK_CLK0，50MHz），`resetn` 是 PS 送来的低有效 异步复位。**每个时钟域各例化一个
+  * `ResetSynchronizer`**（异步置位、与各自时钟同步释放）：`mainReset` 与 `clock` 同步，主时钟域的所有模块都在 `withClockAndReset(clock, mainReset)`
+  * 里例化；`dspReset` 与 `dspClock` 同步，由 `Controller` 交给高速域的 `PhaseMeter`、 `SignalInputMux` 与 `CdcConfigBus`
+  * 的目的域。复位释放必须与**消费它的时钟**同域：两个时钟都源自 MMCM、相位关系不 固定，拿主时钟域的复位去释放高速域的寄存器会在释放沿上违反建立/保持时间。
   *
   * 本模块用 RawModule：顶层必须显式声明时钟与复位，不能依赖隐式复位。
   *
@@ -73,7 +74,8 @@ class DigitalPhaseMeterTop(
     // 测量完成中断，高有效电平
     val interrupt = IO(Output(Bool()))
 
-    // 主时钟域的复位：异步置位、同步释放
+    // 各时钟域一个复位同步器：异步置位、与**各自域的时钟**同步释放。
+    // 复位释放与消费它的时钟同域，跨域释放会在释放沿上违反建立/保持时间（两个时钟相位关系不固定）
     private val mainReset = ResetSynchronizer(clock, resetn, resetDepth)
 
     withClockAndReset(clock, mainReset) {

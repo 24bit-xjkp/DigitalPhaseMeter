@@ -57,24 +57,24 @@ const auto& result{after_reset.value()};  // NOLINT(bugprone-unchecked-optional-
 按改动范围选择回归入口，改了 AXI4 接口或顶层就要两条都跑：
 
 ```bash
-xmake test -v          # Verilator：测量通路（Controller / EdgeDetector）
+xmake test -v          # Verilator：测量通路与复位同步（Controller / EdgeDetector / ResetSynchronizer / MmcmDrpController）
 sim/run_xsim.sh        # xsim：AXI4 接口与顶层 IP（SystemVerilog 激励，详见 dpm-vivado-ip）
 ```
 
-- 改了 `Axi*.scala`、`ControlRegs.scala`、`Bram.scala`、`DigitalPhaseMeterTop.scala` 时，
-  **必须**重新生成 syn 产物并跑 `sim/run_xsim.sh`（脚本默认会先跑生成入口）；
-  Verilator 侧没有 XPM 模型，覆盖不到这部分。
+- 改了 `Axi*.scala`、`ControlRegs.scala`、`DigitalPhaseMeterTop.scala` 时，
+  **必须**跑 `sim/run_xsim.sh`（脚本默认会先跑生成入口）：这些通路只有 xsim 覆盖得到。
 - 只改了测量通路（`Controller` / `PhaseMeter` / `EdgeDetector` / `DspCounter`）时，
-  重新生成 sim 产物后跑 `xmake test -v` 即可；但顶层的端口或行为变了也要顺带跑 xsim。
+  重新生成产物后跑 `xmake test -v` 即可；但顶层的端口或行为变了也要顺带跑 xsim。
 - 改了 `vivado/` 下的脚本时，至少重新执行对应脚本并确认没有 ERROR / CRITICAL WARNING
   （`validate_bd_design` 的告警不会让脚本退出码非零，必须看日志）。
 
-- **两种产物分目录存放，不会互相覆盖**：sim 在 `build/chisel/<Name>/sim/`、syn 在
-  `build/chisel/<Name>/syn/`（见 `dpm-chisel-rtl`）。因此 Verilator 测试与 xsim / Vivado 流水线
-  可以按任意顺序交替跑，各自只读自己那一份；反过来也可以——**如果改成共用目录，两个套件会互相
-  污染**（历史上出现过：先跑综合再跑 `xmake test`，Verilator 报
-  `Cannot find file containing module: 'xpm_cdc_sync_rst'`，看起来像 RTL 坏了）。
-  注意 `xmake test` **不会**替你生成 sim 产物：改了 RTL 仍要先跑生成入口。
+- **每个模块只有一份产物**：`build/chisel/<Name>/`（见 `dpm-chisel-rtl`）。Verilator、xsim 与
+  Vivado 消费的是同一份 RTL（复位同步是纯 RTL 的 `ResetSynchronizer`，没有 XPM 原语），因此各
+  流水线可以按任意顺序交替跑。历史上曾经按 `--type=sim|syn` 生成两套产物，共用目录时先跑综合
+  再跑 `xmake test` 会让 Verilator 读到综合产物并报
+  `Cannot find file containing module: 'xpm_cdc_sync_rst'`，看起来像 RTL 坏了——**新增厂商原语前
+  先确认两侧都有它的仿真模型**，否则要重新引入双产物。注意 `xmake test` **不会**替你生成产物：
+  改了 RTL 仍要先跑生成入口。
 
 - 必须是**全量**：只跑单个目标或用例（`xmake run <Name> ...`）不能作为回归证据，它只用于定位问题。
 - 运行参数是用例级配置（`test/xmake.lua` 中 `add_tests` 的 `runargs`，本项目为 `+verilator+rand+reset+2` 与 `-fc`），只有 `xmake test` 会应用：`xmake run` 走的是 target 级 `runargs`，本项目没有设置。因此"寄存器初值随机"这类只在带 plusargs 时出现的行为，在 `xmake run` 下可能被掩盖——两个入口结果不一致时以 `xmake test` 为准。

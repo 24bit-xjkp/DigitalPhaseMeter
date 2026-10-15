@@ -1,7 +1,8 @@
 # sim/：Vivado xsim 仿真
 
 AXI4 接口与顶层 IP 的验证用 **Vivado 自带 xsim + SystemVerilog 测试激励**，
-不再为此写 Verilator C++ 测试；测量通路（`Controller` / `EdgeDetector`）的 Verilator
+不再为此写 Verilator C++ 测试；测量通路与复位同步（`Controller` / `EdgeDetector` /
+`ResetSynchronizer` / `MmcmDrpController`）的 Verilator
 单元测试仍然保留在 `test/` 下（`xmake test -v`）。
 
 | 文件                            | 说明                                                             |
@@ -12,18 +13,17 @@ AXI4 接口与顶层 IP 的验证用 **Vivado 自带 xsim + SystemVerilog 测试
 ## 运行
 
 ```bash
-sim/run_xsim.sh              # 先用 sbtn 生成 --type=syn 产物，再编译运行
+sim/run_xsim.sh              # 先用 sbtn 生成 RTL，再编译运行
 sim/run_xsim.sh --no-gen     # 跳过 sbtn 生成（RTL 已是最新时）
 sim/run_xsim.sh --gui        # 运行结束后用 xsim GUI 打开波形
 sim/run_xsim.sh --clean      # 先清理 build/xsim
 XILINX_VIVADO=/path/to/Vivado sim/run_xsim.sh    # 指定 Vivado 安装路径
 ```
 
-脚本用 **综合产物**（`build/chisel/DigitalPhaseMeterTop/syn`，其中复位同步链实例化
-`xpm_cdc_sync_rst`）仿真，因此仿真的就是会被综合的那份 RTL；产物与日志落在 `build/xsim/`
-（不入库）。判定依据是日志里出现 `==== 测试通过`，同时打印 xsim 的退出码。
-补充：仿真产物与综合产物分目录存放（`build/chisel/<Name>/sim` 与 `.../syn`），
-两者内容不同且不能共用目录——Verilator 侧没有 XPM 模型，见 `dpm-chisel-rtl`。
+脚本用 `build/chisel/DigitalPhaseMeterTop/` 下的生成产物仿真：每个模块只有**一份**产物
+（复位同步是纯 RTL 的 `ResetSynchronizer`，异步置位、与各域时钟同步释放），Verilator、xsim
+与综合消费的就是同一份 RTL，产物里没有 XPM 原语。产物与日志落在 `build/xsim/`（不入库）。
+判定依据是日志里出现 `==== 测试通过`，同时打印 xsim 的退出码。
 
 ## 覆盖内容
 
@@ -57,8 +57,10 @@ XILINX_VIVADO=/path/to/Vivado sim/run_xsim.sh    # 指定 Vivado 安装路径
 - **非 ASCII 字符串会被破坏**：xsim 会把经过 `string` 类型参数或字符串拼接传递的
   多字节字符（中文）破坏成 `0xff` 字节。因此本激励里**静态提示**（`$display` 的字面量）
   用中文，而所有**作为任务参数/`$sformatf` 结果传递的字符串**（检查名、错误消息）用 ASCII。
-- **XPM 需要 `glbl`**：实例化了 XPM 原语的设计在 xsim 下必须额外编译
-  `$XILINX_VIVADO/data/verilog/src/glbl.v`，并在 `xelab` 时把 `glbl` 一起作为顶层。
+- **XPM / unisim 需要 `glbl`**：实例化了 XPM 原语或 unisim（MMCM 等）的设计在 xsim 下必须额外编译
+  `$XILINX_VIVADO/data/verilog/src/glbl.v`，并在 `xelab` 时把 `glbl` 一起作为顶层。生成产物现在
+  只用纯 RTL 的 `ResetSynchronizer`，因此 `run_xsim.sh` 既不需要 `xpm_cdc.sv` 也不需要 `glbl`
+  （本激励不含任何厂商原语）；`run_handoff_tb.sh` 要仿真真实 MMCM，仍然带 `glbl`。
 - **timescale 必须一致**：生成的 RTL 没有 `` `timescale``，而激励有，
   `xelab` 需要显式给 `--timescale 1ns/1ps`，否则报
   `Module ... doesn't have a timescale but at least one module in design has a timescale`。

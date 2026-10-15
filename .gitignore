@@ -13,6 +13,7 @@ build
 xsim.dir
 *.jou
 *.log
+*.rpt
 # Python 侧（host/ 上位机与 spec/ 工具）的字节码缓存
 __pycache__/
 *.pyc

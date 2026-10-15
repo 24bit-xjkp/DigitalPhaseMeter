@@ -52,14 +52,16 @@ object CdcLevel {
   *   2. 目的域用 `EdgeDetector`（3 级 ASYNC_REG 同步链 + 双边沿检测）采到翻转后锁存整字， 再翻转 `ack` 应答；
   *   3. 源域采到应答后才放行下一笔，因此 `dataReg` 在整笔传输期间保持不变， 连续快速配置也不会丢中间值（最多把中间态合并掉）。
   *
-  * 源域用隐式 `clock` / `reset`，目的域用 `dstClock`；目的域复位由内部 `SyncReset` 从源域复位 同步得到。目的域配置寄存器按 0 复位，即配置的默认值（全 0 = 频率字
-  * 0、片内源失能、选外部输入）。
+  * 源域用隐式 `clock` / `reset`，目的域用 `dstClock` / `dstReset`：目的域复位由**调用方**给出 （顶层为每个时钟域各例化一个
+  * `ResetSynchronizer`，与目的域时钟同步释放），本模块不再自己生成复位。目的域配置寄存器按 0 复位，即配置的默认值（全 0 = 频率字 0、片内源失能、选外部输入）。
   *
   * @param gen
   *   配置负载类型（不含方向），目的域以 0 作为复位值
   */
 class CdcConfigBus[T <: Data](gen: T) extends Module {
     val dstClock = IO(Input(Clock()))
+    // 目的域复位，由调用方提供：必须与 dstClock 同步释放（内部目的域寄存器用它做同步复位）
+    val dstReset = IO(Input(Bool()))
     val io = IO(new Bundle {
         // 源时钟域的配置写入
         val in = Flipped(DecoupledIO(gen.cloneType))
@@ -75,7 +77,6 @@ class CdcConfigBus[T <: Data](gen: T) extends Module {
     private val busyReg = RegInit(false.B)
 
     // ---- 目的时钟域：同步到请求翻转后锁存配置并应答 ----
-    private val dstReset = withClock(dstClock) { SyncReset() }
     private val (configReg, validReg, ackReg) = withClockAndReset(dstClock, dstReset) {
         val config = RegInit(0.U.asTypeOf(gen.cloneType))
         val valid = RegInit(false.B)
