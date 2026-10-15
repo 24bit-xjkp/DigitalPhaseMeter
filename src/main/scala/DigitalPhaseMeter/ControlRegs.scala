@@ -35,9 +35,9 @@ import chisel3.util._
   *     判断是否漏读。
   *   - 中断是电平：`irqPending && irqEnable`。软件写 `IRQ_STATUS` 的 b0 清中断挂起位，写 b1 表示结果已读走（清 resultValid）， 写 b2 清丢失计数。
   *   - 同一个周期里「软件清标志」与「新结果到达」竞争时按新结果优先处理：结果寄存器与 `resultValid` 保持新结果，中断不会被误清。
-  *   - 片内信号源与输入选择的配置（SIG_FREQ / SIG_PHASE / SIG_CTRL）要跨到高速测量域，走 `io.config` 的 整字握手：写这些寄存器的那一拍把新值组装成一份配置快照，交给
-  *     `Controller` 里的跨时钟域总线送过去。 快照未送走前 `io.wr.ready` 保持低（AXI 写被挂起），因此软件连写两笔配置不会丢掉前一笔； `SIG_STATUS.configPending`
-  *     给出同一信息，软件可以轮询它确认配置已经到达测量域。
+  *   - 片内信号源使能与输入选择（`SIG_CTRL`）就在这里生效：`io.sigEnable` / `io.srcSelect`
+  *     直接驱动主时钟域的组合输入选择（`SignalInputMux`），同一拍生效、不跨时钟域，因此写通道始终 `ready`；切换的效果由 `SIG_STATUS.sourceReady` 反映（选片内源要求使能有效且
+  *     MMCM 已锁定）。
   *   - 配置在测量进行中同样会立即生效（切换信号源会让本次结果无效），因此应在 `STATUS.busy = 0` 时配置。
   *
   * @param addrWidth
@@ -106,8 +106,9 @@ class ControlRegs(
         val interrupt = Output(Bool())
         // MMCM 锁定状态（异步输入，寄存器堆内部同步后供状态位使用）
         val srcLocked = Input(Bool())
-        // 片内信号源后分频与输入选择配置，接 Controller 的 config（整字跨到高速域）
-        val config = DecoupledIO(new SignalConfigPayload)
+        // 片内信号源使能与输入选择（主时钟域电平），接主时钟域的 `SignalInputMux`
+        val sigEnable = Output(Bool())
+        val srcSelect = Output(Bool())
     })
 
     // ---- 寄存器 ----
@@ -125,20 +126,16 @@ class ControlRegs(
     private val resultEdge = RegInit(0.U(dataWidth.W))
     private val resultPhase = RegInit(0.U(dataWidth.W))
     private val resultSeq = RegInit(0.U(dataWidth.W))
-    // 片内信号源与输入选择：软件侧寄存器
+    // 片内信号源与输入选择：软件侧寄存器，直接驱动主时钟域的组合输入选择
     private val sigEnable = RegInit(false.B)
     private val srcSelect = RegInit(false.B)
     // MMCM 的 locked 异步于主时钟，先同步成主时钟域的电平再进状态位
     private val srcLocked = CdcLevel(io.srcLocked)
-    // 待送出的配置快照与「快照尚未组装」「配置尚未送到测量域」标志
-    private val configSnapshot = Reg(new SignalConfigPayload)
-    private val configDirty = RegInit(false.B)
-    private val configPending = RegInit(false.B)
 
     // ---- 写通道：解析控制寄存器的写 ----
     private val startPulse = WireDefault(false.B)
-    // 上一笔配置还没送走就挂起后续写命令：读通道不受影响，软件可轮询 SIG_STATUS
-    io.wr.ready := !configDirty && !configPending
+    // 写通道不挂起任何命令：配置与输入选择同在本域生效，不需要等跨时钟域送达
+    io.wr.ready := true.B
     when(io.wr.fire) {
         switch(io.wr.bits.addr(indexWidth + 1, 2)) {
             is(RegIndex.ctrl.U) {
@@ -162,22 +159,14 @@ class ControlRegs(
                 when(io.wr.bits.strb(0)) {
                     sigEnable := io.wr.bits.data(0)
                     srcSelect := io.wr.bits.data(1)
-                    configDirty := true.B
                 }
             }
         }
     }
 
-    // ---- 配置快照：在寄存器更新后的下一拍整字组装，整份一起跨到测量域 ----
-    when(configDirty) {
-        configSnapshot.enable := sigEnable
-        configSnapshot.srcSelect := srcSelect
-        configPending := true.B
-        configDirty := false.B
-    }
-    io.config.valid := configPending
-    io.config.bits := configSnapshot
-    when(io.config.fire) { configPending := false.B }
+    // ---- 输入选择输出：直接驱动主时钟域的组合门控与二选一，同拍生效 ----
+    io.sigEnable := sigEnable
+    io.srcSelect := srcSelect
 
     // ---- 与 Controller 的握手：空闲时给出实时目标闸门，启动的那一拍锁存 ----
     io.request.valid := startPulse && !busy

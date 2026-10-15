@@ -125,10 +125,10 @@ Verilator 与 xsim / Vivado 都能直接编译。
   主机发请求、从口收下地址，但 `rvalid` 被复位压住，主机永久挂起。
 - **Bundle 构造参数不要叫 `width`**：与 Chisel `Aggregate.width` 冲突（要求 `override`），
   用 `dataWidth` 之类的名字。子类复用父 Bundle 的参数时要写 `override val`。
-- **显式复位端口也是普通端口，测试不驱动就等于该域不复位**：`CdcConfigBus.dstReset` 是模块成员端口
-  （不在 `io` 里），生成 `dstReset`。Verilator 里未驱动的输入保持 0，于是该时钟域的寄存器**永远不进入复位**、
-  只拿到 `--x-assign unique` 的随机初值——测试可能时好时坏。给模块加复位端口时，`test/<Name>.cpp`
-  的 `port_t` 与每个用例的复位序列都要同步补上（见 `dpm-verilator-testing`）。
+- **显式复位端口也是普通端口，测试不驱动就等于该域不复位**：模块自己声明的复位端口（不在 `io` 里，
+  例如 `RawModule` 里显式写的 `resetn`）会生成同名端口。Verilator 里未驱动的输入保持 0，于是该时钟域的
+  寄存器**永远不进入复位**、只拿到 `--x-assign unique` 的随机初值——测试可能时好时坏。给模块加复位
+  端口时，`test/<Name>.cpp` 的 `port_t` 与每个用例的复位序列都要同步补上（见 `dpm-verilator-testing`）。
 - **`ResetSynchronizer` 的输入是低有效复位**（顶层直接接 PS 的 `resetn`）。在模块内部用它从**高有效**的
   隐式 `reset` 生成本域复位时必须取反：`ResetSynchronizer(dspClock, !reset.asBool)`。写成
   `reset.asBool` 极性正好反了——RTL 能生成、能综合、时序也正常，但该域的寄存器会在**系统复位撤销后**
@@ -173,20 +173,21 @@ Verilator 与 xsim / Vivado 都能直接编译。
   最终结论更彻底：这个分频器整体被删掉了——把「产生低频信号」的职责交回 MMCM（只改 MMCM 的输出
   范围），高速域不再新增任何逻辑，时序一次通过。见 `dpm-vivado-ip` 的「不要在 IP 里对 MMCM 输出
   再做数字分频」。
-- **寄存器堆往下游的输出必须真的被消费，否则整条通路会被 firtool 删掉**：本仓库在 `ControlRegs` 里
+- **寄存器堆往下游的输出必须真的被消费，否则整条通路会被 firtool 删掉**：本仓库曾在 `ControlRegs` 里
   用 `WireDefault(false.B)` 声明了一个「本拍写了配置」的标志，却在三个 `is(...)` 分支里只给它赋值、
-  忘了用它置 `configDirty`。结果 `configPending` 恒为 0 → `io.config.valid` 恒 0 → firtool 把
-  **跨时钟域总线、目的域配置寄存器、以及 `Controller` 上那一组 `io_config_*` 端口全部优化掉**，
-  顶层实例化里连端口都不剩。表现很有迷惑性：寄存器读写回读完全正常（`SIG_CTRL` 读回 3），
-  但下游一直用默认配置（选择位恒 0）；而只测 `Controller`、绕过寄存器堆的 Verilator 单测**全绿**。
+  忘了用它置「配置待送出」标志。结果下游 `io.config.valid` 恒 0 → firtool 把**整条下游通路与端口
+  全部优化掉**，顶层实例化里连端口都不剩。表现很有迷惑性：寄存器读写回读完全正常（`SIG_CTRL` 读回 3），
+  但下游一直用默认配置（选择位恒 0）；而只测下游模块、绕过寄存器堆的 Verilator 单测**全绿**。
   防御手段有两个：生成后 `grep` 一下顶层 SV 里目标模块还有没有那组端口；以及**寄存器堆到下游的
   通路必须有 xsim 顶层用例覆盖**（见 `dpm-vivado-ip`）。
 - **独立生成给 Verilator 单测的模块要能过 `-Wall`**：`test/xmake.lua` 用 `-Wall` 编译
   `build/chisel/<Name>/`，警告即失败（`%Error: Exiting due to N warning(s)`）。两类常见告警都来自
   「共享数据结构 + 只关心一部分」：
-  - `UNUSEDSIGNAL: Signal is not used: 'io_config_srcSelect'`：模块接收了一个自己用不到的字段
-    （输入选择位只在 `SignalInputMux` 用）。做法是给只关心部分字段的模块一个**窄 payload**
-    （`SignalSourceConfigPayload`），宽 payload（`SignalConfigPayload`）只留给跨时钟域整字传递。
+  - `UNUSEDSIGNAL`：两类来源。一是**接口固有未使用位**（`MmcmDrpController` 的 AXI4-Lite
+    `awprot` / `wstrb` 高字节等，本设计不用保护级与 >16 位数据）；二是**声明了域端口但纯组合**——
+    `SignalInputMux` 是 `RawModule`，显式声明了 `clock` / `resetn` 作域标记却不消费它们。
+    两者都不是 RTL 缺陷，做法是在 `test/xmake.lua` 的逐目标豁免里关掉这一条并写清原因，
+    不要用 `-Wno-fatal` 之类的整体开关。
   - `Bits of signal are not used: '_phaseShifted_T'[30:0]`：只用中间信号的最高位，其余位成了
     「未使用信号」。寄存器（`Reg`）的部分位不被使用不会告警，**`wire` 会**。做法是把「相位差值比较
     半个周期」改成两个独立累加器（`phase1` / `phase2`，初值 `-phaseWord`），而不是
@@ -197,7 +198,7 @@ Verilator 与 xsim / Vivado 都能直接编译。
 `Controller` 同时使用两个时钟：低速 `clock` 域（FSM、闸门计数）与高速 `dspClock` 域（测量核心）。新增逻辑时先确定它属于哪个域：
 
 - 高速域模块用 `withClockAndReset(dspClock, dspReset) { ... }` 例化；`dspReset` 由 `Controller` 内部的 `ResetSynchronizer` 从主复位同步得到，不要在高速域直接使用低速域的 `reset`。
-- **每个时钟域一个复位同步器，复位释放必须与消费它的时钟同域**：顶层例化主时钟域那个（`mainReset`，与 `clock` 同步，接 PS 的低有效 `resetn`）；**DSP 域那个在 `Controller` 内部**（与 `dspClock` 同步，从高有效的 `mainReset` 取反接入，见上面的极性陷阱），其输出同时给 `PhaseMeter`、`SignalInputMux` 与 `CdcConfigBus.dstReset`。原因是两个时钟都源自 MMCM、相位关系不固定，而
+- **每个时钟域一个复位同步器，复位释放必须与消费它的时钟同域**：顶层例化主时钟域那个（`mainReset`，与 `clock` 同步，接 PS 的低有效 `resetn`）；**DSP 域那个在 `Controller` 内部**（与 `dspClock` 同步，从高有效的 `mainReset` 取反接入，见上面的极性陷阱），其输出给 `PhaseMeter`。原因是两个时钟都源自 MMCM、相位关系不固定，而
   `withClockAndReset(clk, boolReset)` 生成的复位在消费端是**同步复位**（`always @(posedge clk) if (reset)`）：
   拿主时钟域的复位去释放高速域寄存器，会让释放沿落在 `dspClock` 的建立/保持窗口里。**曾经踩过**——
   把 `dspReset` 也接到 `clock` 域的同步器上（照抄上一行），生成 RTL 表面完全正常，实际是跨域释放。
@@ -215,11 +216,18 @@ Verilator 与 xsim / Vivado 都能直接编译。
   `get_property ASYNC_REG [get_cells -hier -filter {ASYNC_REG == 1}]`（本项目实测：OOC 综合后 4 个
   链触发器都是 `ASYNC_REG=1`）。行为本身由 `test/ResetSynchronizer.cpp` 覆盖（异步置位 + 恰好 n 拍释放）。
 - 跨域的控制信号沿用现有的握手约定（`Controller` 用 `request` / `response` 的 valid-ready 加 `EdgeDetector` 做脉冲展宽），不要新增裸的跨域电平信号。
-- **多 bit 配置不要逐位同步**：`CdcConfigBus`（`Cdc.scala`）用「数据先稳定 → 翻转请求 → 目的域锁存并回应答」的
-  整字握手，源域收到应答才放行下一笔，因此连续快速配置既不丢中间值、目的域也不会读到中间态。
-  两个易错点：目的域配置寄存器要 `RegInit(0.U.asTypeOf(gen))` 给一个确定的复位默认值（否则 Verilator
-  的随机初值会让选择位随机）；源域的「应答」与「发起」两个 `when` 的先后顺序决定同拍冲突时谁赢
-  （Chisel 后写优先），这里让「发起」写在后面。跨域通路由 `dpm-vivado-ip` 里那条双向 max_delay 覆盖。
+- **软件写的配置位不要跨域**：`SIG_CTRL` 的使能/选择位与「输入门控 + 二选一」都放在主时钟域
+  （和写它的寄存器堆同域，见 `SignalInputMux`），因此写寄存器与切换同拍生效，不需要任何跨域通路。
+  历史教训是反面教材：这些位一度经「多 bit 配置总线」握手送到 DSP 域，代价是源域要等应答、
+  写通道要挂起、还要处理「数据必须在搬运窗口内稳定」的时序约束，而收益只是「两位同时生效」——
+  软件本来就只在 `STATUS.busy = 0` 时切换，中间态最多让一次测量作废，不会给出貌似合理的错值。
+  **判断标准**：当一个跨域方案是为了消掉「目的域可能读到中间态」时，先问中间态本身有没有危害；
+  没有危害就不要建通路，把两侧逻辑放进同一个域更简单。
+- 真正需要跨域的信号分两类，各有现成写法：**事件/脉冲**用 `CdcToggleHandShake`
+  （「电平翻转 + 同步链」，`EdgeDetector(both)` 收）；**准静态电平**用 `CdcLevel`
+  （3 级 `ASYNC_REG` 移位链，例如 MMCM 的 `locked`）。两者都不要另写裸电平跨域。
+- 跨域模块的目的域复位**由调用方给**（如 DSP 域复位由 `Controller` 产生、传给它例化的高速域模块），
+  不要在模块内部用 `Module.reset` 重新派生一份——复位释放必须与消费它的时钟同域。
 - 不要为了仿真方便改变寄存器的复位方式；测试侧通过复位序列获得确定初值（见 `dpm-verilator-testing`）。
 
 ## 格式与检查

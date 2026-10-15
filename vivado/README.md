@@ -229,8 +229,9 @@ processing_system7_0 ──M_AXI_GP0(AXI3, ID 12)──► axi_interconnect_0 �
 sig1 / sig2：BD 外部端口 → dpm_top_0（顶层 XDC 里约束到引脚 W18 / W19，LVCMOS33）
 PS 串口：PS7 的 UART（默认 UART1 = MIO48/49，`create_bd.tcl -uart` 可换成 UART0 = MIO14/15 或 none）
 
-dpm_top_0 内部：外部 sig1/sig2 与片内源（MMCM 的两路输出）经 SignalInputMux 二选一；
-使能与选择位从 s_axi_lite 的寄存器区经 CdcConfigBus 跨到 DSP 域。
+dpm_top_0 内部：外部 sig1/sig2 与片内源（MMCM 的两路输出）经 SignalInputMux 二选一，
+门控与选择都在主时钟域（s_axi_lite 寄存器区所在的域）完成，只有选择结果作为异步被测信号
+进测量域的采样链；使能/选择位与寄存器堆同域，因此写 SIG_CTRL 与切换同拍生效。
 ```
 
 要点：

@@ -5,32 +5,31 @@ import chisel3.reflect.DataMirror
 
 /** 数字相位计顶层
   *
-  * 把 PS 侧的 AXI4-Lite 从口、控制/结果寄存器堆、测量控制器与中断连成一个 Vivado IP：
+  * 把 PS 侧的 AXI4-Lite 从口、控制/结果寄存器堆、输入选择、测量控制器与中断连成一个 Vivado IP：
   *
   * {{{
   *   s_axi_lite ──► Axi4LiteSlave ──► ControlRegs ──► Controller ──► PhaseMeter（dspClock 域）
-  *                                        ▲              │             ▲
-  *                                        │              │             │ 输入选择
-  *                                        └──────────────┘      SignalInputMux
-  *                                          结果（4 个只读寄存器）   ▲        ▲
-  *                                                                  │        │
-  *              MMCM（clk_wiz，动态可重配置）───────────────────────┘   sig1/sig2
-  *                 │ 频率/相位差由 DRP 设定                              （外部引脚）
-  *                 └─► 参考时钟取自主时钟 clock
+  *                                        ▲              ▲
+  *                                        │              │ sig1/sig2（异步被测信号）
+  *                                        │         SignalInputMux（主时钟域，门控 + 二选一）
+  *                                        │              ▲        ▲
+  *                                        └──────────────┘        │
+  *                                          结果（4 个只读寄存器）  │
+  *                                     srcSig1/srcSig2（MMCM 两路输出）  sig1/sig2（外部引脚）
   * }}}
   *
   * 数据通道就是寄存器本身（GPIO 式）：一次测量的结果只有 4 个字，`ControlRegs` 直接把最新结果锁存进 只读寄存器，PS 收到中断后读走即可，因此 IP 内部没有 BRAM，也只有一个 AXI4-Lite 从口。
   *
-  * 信号输入有两条来源，由 `SIG_CTRL.srcSelect` 在 PL 内切换：
+  * 信号输入有两条来源，由 `SIG_CTRL` 在 PL 内切换（使能门控与二选一都在主时钟域，见 `SignalInputMux`）：
   *
   *   - **外部输入**：`sig1` / `sig2` 两个引脚（本仓库默认约束到 W18 / W19，LVCMOS33），异步信号由 测量核心的采样链同步；
-  *   - **片内信号源**：PL 内 MMCM（`clk_wiz`，动态可重配置）以主时钟为参考产生**两路同频、相位差可调**的 时钟，频率由 MMCM 的 M/D 分频、相位差由每个输出的相位寄存器通过 DRP
-  *     设定；两路时钟在测量时钟域里 被采样成边沿脉冲，再由 `SourceDivider` 数边沿分频出 1kHz～40MHz 的方波（分频比 N 由 `SIG_DIV` 给出）。
+  *   - **片内信号源**：PL 内 MMCM（`dpm_mmcm_src`，动态可重配置）以主时钟为参考产生**两路同频、相位差可调**的 时钟，频率与相位差都由 MMCM 的配置寄存器通过 DRP
+  *     设定；两路时钟对测量域同样是异步输入，与外部引脚 共用同一条采样链。
   *
   * 时钟与复位：`clock` 是主时钟（低速域，PS 的 FCLK_CLK0，50MHz），`resetn` 是 PS 送来的低有效 异步复位。**每个时钟域各例化一个
-  * `ResetSynchronizer`**（异步置位、与各自时钟同步释放）：`mainReset` 与 `clock` 同步，主时钟域的所有模块都在 `withClockAndReset(clock, mainReset)`
-  * 里例化；`dspReset` 与 `dspClock` 同步，由 `Controller` 交给高速域的 `PhaseMeter`、 `SignalInputMux` 与 `CdcConfigBus`
-  * 的目的域。复位释放必须与**消费它的时钟**同域：两个时钟都源自 MMCM、相位关系不 固定，拿主时钟域的复位去释放高速域的寄存器会在释放沿上违反建立/保持时间。
+  * `ResetSynchronizer`**（异步置位、与各自时钟同步释放）：`mainReset` 与 `clock` 同步，主时钟域的所有模块（含 `SignalInputMux`）都在
+  * `withClockAndReset(clock, mainReset)` 里例化；`dspReset` 与 `dspClock` 同步，由 `Controller` 交给高速域的
+  * `PhaseMeter`。复位释放必须与**消费它的时钟**同域：两个时钟都源自 MMCM、相位关系不 固定，拿主时钟域的复位去释放高速域的寄存器会在释放沿上违反建立/保持时间。
   *
   * 本模块用 RawModule：顶层必须显式声明时钟与复位，不能依赖隐式复位。
   *
@@ -61,7 +60,7 @@ class DigitalPhaseMeterTop(
     val resetn = IO(Input(Bool()))
     // 高速测量时钟
     val dspClock = IO(Input(Clock()))
-    // 外部被测信号输入（异步），sig1 为参考信号；片内信号源在 Controller 内部与它二选一
+    // 外部被测信号输入（异步），sig1 为参考信号
     val sig1 = IO(Input(Bool()))
     val sig2 = IO(Input(Bool()))
     // 片内信号源：PL 内 MMCM 产生的两路同频、相位差可调的时钟（异步于测量时钟域）
@@ -82,17 +81,25 @@ class DigitalPhaseMeterTop(
         val controller =
             Module(new Controller(gateCntWidth, edgeCntWidth, phaseCntWidth))
         controller.dspClock := dspClock
-        // 外部输入（引脚 W18/W19），片内信号源与输入选择在 Controller 内部
-        controller.io.sig.sig1 := sig1
-        controller.io.sig.sig2 := sig2
-        controller.io.sourceSig1 := srcSig1
-        controller.io.sourceSig2 := srcSig2
 
         val controlRegs = Module(
             new ControlRegs(addrWidth, dataWidth, gateCntWidth, edgeCntWidth, phaseCntWidth)
         )
         // MMCM 的 locked 异步于主时钟，同步后再进状态寄存器
         controlRegs.io.srcLocked := srcLocked
+
+        // 输入选择在主时钟域完成（门控 + 二选一），输出作为异步被测信号进控制器；
+        // 使能与选择位取自同一域的寄存器堆，因此写寄存器与切换同拍生效，不需要跨时钟域
+        val signalInputMux = Module(new SignalInputMux)
+        signalInputMux.io.sig1External := sig1
+        signalInputMux.io.sig2External := sig2
+        signalInputMux.io.sig1Internal := srcSig1
+        signalInputMux.io.sig2Internal := srcSig2
+        signalInputMux.io.enable := controlRegs.io.sigEnable
+        signalInputMux.io.selectInternal := controlRegs.io.srcSelect
+        controller.io.sig.sig1 := signalInputMux.io.sig1
+        controller.io.sig.sig2 := signalInputMux.io.sig2
+
         val axiLiteSlave = Module(new Axi4LiteSlave(addrWidth, dataWidth))
 
         // AXI4-Lite 从口 ↔ 寄存器堆
@@ -101,11 +108,9 @@ class DigitalPhaseMeterTop(
         controlRegs.io.rd :<>= axiLiteSlave.io.rd
         axiLiteSlave.io.rdData := controlRegs.io.rdData
 
-        // 寄存器堆 ↔ 控制器
+        // 寄存器堆 ↔ 控制器（测量请求/结果）
         controller.io.in := controlRegs.io.request
         controlRegs.io.response := controller.io.out
-        // 片内信号源与输入选择配置：整字跨到测量域
-        controller.io.config :<>= controlRegs.io.config
 
         interrupt := controlRegs.io.interrupt
     }

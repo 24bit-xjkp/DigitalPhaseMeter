@@ -34,10 +34,9 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
 │                            DSP 域那一个在 Controller 内部（从 mainReset 再同步到 dspClock）
 ├── Axi4LiteSlave            AXI4-Lite 从口 → 内部读写命令总线（控制/状态/结果寄存器）
 ├── ControlRegs              控制/状态寄存器堆（含片内源使能与输入选择）+ 结果锁存 + 中断
+├── SignalInputMux           主时钟域输入选择：片内源使能门控 + 外部输入二选一（纯组合）
 ├── Controller               低速域 FSM：闸门计数、与 PhaseMeter 握手、锁存结果
 │   ├── ResetSynchronizer    DSP 域复位：从主复位同步得到（异步置位、与 dspClock 同步释放）
-│   ├── CdcConfigBus         使能/选择配置整字跨时钟域（翻转握手 + 应答，不丢连续配置）
-│   ├── SignalInputMux       高速域输入选择：外部引脚输入 ↔ 片内源（纯组合二选一）
 │   └── PhaseMeter           高速域测量核心
 │       ├── EdgeDetector ×4  3 级流水的边沿检测（sig1、sig2 与两类握手脉冲）
 │       └── DspCounter   ×2  use_dsp 计数器，分别累计 edgeCnt / phaseCnt
@@ -52,12 +51,15 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
 
 ## 信号输入：外部引脚与片内信号源
 
-测量核心之前有一个输入选择器，两条候选通路的时基与约束如下：
+测量核心之前有一个输入选择器（`SignalInputMux`，主时钟域，纯组合），两条候选通路的时基与约束如下：
 
 | 通路       | 来源                                                     | 约束/时基                                                                     |
 | ---------- | -------------------------------------------------------- | ----------------------------------------------------------------------------- |
 | 外部输入   | `sig1` → 引脚 **W18**、`sig2` → 引脚 **W19**（LVCMOS33） | 异步输入，`set_false_path`；在测量域经 `EdgeDetector` 的 ASYNC_REG 采样链同步 |
 | 片内信号源 | PL 内 MMCM（`dpm_mmcm_src`）的两路输出                   | 频率/相位差由 PS 写 MMCM 寄存器镜像（`dpm_src_drp`）设定；同样按异步输入采样  |
+
+两条通路共用同一条采样链：选择器本身在主时钟域，它的**输出**才进测量域，对测量域是一条异步被测信号
+（与外部引脚同一待遇）。使能与选择位来自同一域的 `SIG_CTRL`，因此不需要任何跨时钟域配置通路。
 
 ### 片内信号源：MMCM 的两路输出
 
@@ -99,8 +101,8 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
 
 1. （可选）写 MMCM 寄存器镜像（`0x08..0x24`）设定片内源的频率与相位差，写 `0x28` LOAD 后等 `locked`；
 2. 写 `SIG_CTRL = (1<<0) | (1<<1)`：使能片内源并把它接到测量核心（`1<<0` = enable，`1<<1` = srcSelect）；
-3. 读 `SIG_STATUS` 确认 `srcLocked = 1`、`sourceReady = 1`；AXI 写会在配置跨到测量域后才完成，
-   因此写返回即表示配置已生效；
+3. 读 `SIG_STATUS` 确认 `srcLocked = 1`、`sourceReady = 1`。使能门控与二选一都在主时钟域、
+   与写 `SIG_CTRL` 的寄存器堆同域，因此**写这一笔的同时切换就已经生效**：AXI 写返回时配置必然已经生效；
 4. 按常规流程启动测量。切回外部输入写 `SIG_CTRL = 0` 即可。
 
 注意：

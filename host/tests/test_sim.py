@@ -154,27 +154,27 @@ class RegisterSemanticsTests(unittest.TestCase):
         fpga.write(F.REG_CTRL, 0)
         self.assertEqual(fpga.read(F.REG_CTRL), 0)
 
-    def test_source_ready_follows_config_pending(self) -> None:
+    def test_source_ready_follows_sig_ctrl_without_cdc(self) -> None:
+        """SIG_CTRL 与输入选择同域：写完即可用，没有跨时钟域送达延迟。"""
         fpga, clock = new_fpga()
         fpga.write(F.REG_SIG_CTRL, P.SIGST_SELECT | P.SIGST_ENABLE)
-        fpga.poll()
-        self.assertTrue(fpga.config_pending)
-        self.assertFalse(fpga.source_ready)  # 配置快照未送达 → 0
-        self.assertFalse(fpga.read(F.REG_SIG_STATUS) & P.SIGST_READY)
+        clock.advance(0.01)
+        fpga.poll()  # 输入选择跟随（与实际 RTL 同域，只差一拍及可配的写服务延迟）
+        self.assertTrue(fpga.source_ready)  # 已使能且 MMCM 已锁定
+        self.assertEqual(fpga.read(F.REG_SIG_STATUS) & P.SIGST_READY, P.SIGST_READY)
+
+        # 只选片内源、关掉使能 → 不可用（判据本身不变）
+        fpga.write(F.REG_SIG_CTRL, P.SIGST_SELECT)
         clock.advance(0.01)
         fpga.poll()
-        self.assertTrue(fpga.source_ready)
-        self.assertEqual(fpga.read(F.REG_SIG_STATUS) & P.SIGST_READY, P.SIGST_READY)
+        self.assertFalse(fpga.source_ready)
+        self.assertEqual(fpga.read(F.REG_SIG_STATUS) & P.SIGST_READY, 0)
 
     def test_external_source_ready_always(self) -> None:
         fpga, clock = new_fpga()
         fpga.write(F.REG_SIG_CTRL, 0)  # 选外部
-        self.assertFalse(fpga.source_ready)  # 配置快照未送达前仍为 0
         clock.advance(0.01)
-        fpga.poll()  # 组装快照 → configPending
-        clock.advance(0.01)
-        fpga.poll()  # 快照送达测量域
-        self.assertFalse(fpga.config_pending)
+        fpga.poll()  # 输入选择跟随
         self.assertTrue(fpga.source_ready)  # 选外部恒可用
 
     def test_measurement_never_completes_without_source(self) -> None:

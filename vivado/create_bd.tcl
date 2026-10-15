@@ -40,7 +40,8 @@
 # 片内信号源（方案 A：裸 MMCM + 极简 DRP 控制器）：
 #   - 两路输出同频（初始 25MHz）、相位差 90°，**频率与相位差都由 PS 写成 MMCM 的
 #     16 位寄存器值**，再由 dpm_src_drp_0 逐条写进 MMCM 的 DRP 口；
-#   - 两路输出送给 dpm_top_0，由 IP 在测量时钟域里采样边沿并做后分频（SIG_DIV）；
+#   - 两路输出送给 dpm_top_0，由 IP 当成异步被测信号采样成边沿（已不在 IP 内做数字分频，
+#     见 vivado/README.md 的「不要在 IP 里对 MMCM 输出再做数字分频」）；
 #   - 地址段 0x43C1_0000，寄存器映射见 vivado/package_src_ip.tcl 的说明与
 #     build/analysis/golden/mmcm_encode.py（编码参考实现）。
 #

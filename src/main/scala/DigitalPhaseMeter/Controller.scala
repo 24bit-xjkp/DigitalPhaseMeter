@@ -37,20 +37,20 @@ class ControllerOutPayload(
   * 除了低速域的闸门计数 FSM 与高速域的测量核心，这里还接入了信号输入通路：
   *
   * {{{
-  *   io.sig（外部引脚 W18/W19，异步）────────┐
-  *                                          ├─► SignalInputMux ─► PhaseMeter（高速域）
-  *   io.sourceSig1/2（MMCM 的两路输出）──────┘        ▲
-  *                                                   │ srcSelect / enable
-  *                          io.config（低速域）─► CdcConfigBus（整字握手）
+  *   io.sig ─► PhaseMeter（高速域）
   * }}}
   *
-  * `io.sourceSig1` / `io.sourceSig2` 是 PL 内 MMCM（clk_wiz，动态可重配置）产生的两路同频时钟， **频率与相位差都由 MMCM 的配置寄存器决定**（PS 通过 AXI4-Lite
-  * 写它的 DRP 寄存器）。 它们与外部输入一样由 `PhaseMeter` 的异步采样链在测量时钟域采样，因此切换不改变测量通路的 延迟，相位差只是被量化到 1 个测量时钟周期（即相位计本身的分辨率）。使能无效时片内源输出 恒低（用
-  * `enable` 把它门掉）。
+  * 片内信号源与外部输入的使能门控、二选一在**上级的本域**里完成（见 `SignalInputMux`），到本模块时 `io.sig` 已经是一条被测信号：
   *
-  * 时钟与复位：闸门计数 FSM 与结果锁存工作在隐式 `clock` / `reset`（低速域，主复位是高有效），`PhaseMeter` / `SignalInputMux` 与 `CdcConfigBus` 的目的域例化在
-  * `withClockAndReset(dspClock, dspReset)` 里。高速域的 `dspReset` 由本模块内部的 `ResetSynchronizer` 从主复位同步得到（异步置位、与 `dspClock`
-  * 同步释放，同步链带 `ASYNC_REG`），因此复位释放与消费它的时钟同域。注意该模块的复位输入是**低有效**的（顶层接 PS 的 `resetn`），主复位是高有效，接入前必须取反。
+  *   - 外部引脚输入（W18/W19）本来就是异步的；
+  *   - `io.sourceSig1` / `io.sourceSig2` 由 PL 内 MMCM 产生（可动态重配置，**频率与相位差都由 MMCM 的配置寄存器决定**，PS 通过 AXI4-Lite 写它的 DRP
+  *     寄存器），对测量时钟域同样没有固定相位关系。
+  *
+  * 两者共用 `PhaseMeter` 的异步采样链，因此切换不改变测量通路的延迟，相位差只是被量化到 1 个测量时钟周期（即相位计本身的分辨率）。使能无效时片内源在上级被门成恒低。
+  *
+  * 时钟与复位：闸门计数 FSM 与结果锁存工作在隐式 `clock` / `reset`（低速域，主复位是高有效），`PhaseMeter` 例化在 `withClockAndReset(dspClock, dspReset)`
+  * 里。高速域的 `dspReset` 由本模块内部的 `ResetSynchronizer` 从主复位同步得到（异步置位、与 `dspClock` 同步释放，同步链带
+  * `ASYNC_REG`），因此复位释放与消费它的时钟同域。注意该模块的复位输入是**低有效**的（顶层接 PS 的 `resetn`），主复位是高有效，接入前必须取反。
   *
   * @param gateCntWidth
   *   闸门计数器宽度
@@ -63,13 +63,8 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
     assert(gateCntWidth <= 30)
     val dspClock = IO(Input(Clock()))
     val io = IO(new Bundle {
-        // 外部输入信号（引脚送来，异步）
+        // 被测信号：由上级在本域完成外部输入/片内源的使能门控与二选一后送来（对外部与 MMCM 源都是异步信号）
         val sig = new PhaseMeterSignalPayload
-        // 片内信号源：MMCM 产生的两路同频、相位差可调的时钟（异步于测量时钟域）
-        val sourceSig1 = Input(Bool())
-        val sourceSig2 = Input(Bool())
-        // 片内信号源使能与输入选择配置（低速域），整字跨到高速域
-        val config = Flipped(DecoupledIO(new SignalConfigPayload))
         val in = Flipped(ValidIO(new ControllerInPayload(gateCntWidth)))
         val out = ValidIO(new ControllerOutPayload(gateCntWidth, edgeCntWidth, phaseCntWidth))
     })
@@ -83,26 +78,11 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
     // 必须取反后接入；直接传 reset.asBool 会让 dsp 域在系统复位撤销后被永久按在复位里。
     val dspReset = ResetSynchronizer(dspClock, !reset.asBool)
 
-    // 配置跨时钟域：目的域在收到新配置前一直保持旧值（复位后为全 0，即选外部输入）
-    private val cdcConfig = Module(new CdcConfigBus(new SignalConfigPayload))
-    cdcConfig.dstClock := dspClock
-    cdcConfig.dstReset := dspReset
-    cdcConfig.io.in.valid := io.config.valid
-    cdcConfig.io.in.bits := io.config.bits
-    io.config.ready := cdcConfig.io.in.ready
-
     val phaseMeter = withClockAndReset(dspClock, dspReset) { Module(new PhaseMeter(edgeCntWidth, phaseCntWidth)) }
-    private val signalInputMux = withClockAndReset(dspClock, dspReset) { Module(new SignalInputMux) }
 
-    signalInputMux.io.sig1External := io.sig.sig1
-    signalInputMux.io.sig2External := io.sig.sig2
-    // 片内源：MMCM 的两路输出直接作为被测信号（与外部输入共用 PhaseMeter 的异步采样链），
-    // 使能无效时把它门成恒低
-    signalInputMux.io.sig1Internal := io.sourceSig1 && cdcConfig.io.out.enable
-    signalInputMux.io.sig2Internal := io.sourceSig2 && cdcConfig.io.out.enable
-    signalInputMux.io.selectInternal := cdcConfig.io.out.srcSelect
-    phaseMeter.io.sig.sig1 := signalInputMux.io.sig1
-    phaseMeter.io.sig.sig2 := signalInputMux.io.sig2
+    // io.sig 由上级在本域做完使能门控与二选一后送来，这里直接进测量核心的异步采样链
+    phaseMeter.io.sig.sig1 := io.sig.sig1
+    phaseMeter.io.sig.sig2 := io.sig.sig2
 
     private val request = CdcToggleHandShake.send(phaseMeter.io.request)
     private val responseReady = CdcToggleHandShake.send(phaseMeter.io.response.ready)

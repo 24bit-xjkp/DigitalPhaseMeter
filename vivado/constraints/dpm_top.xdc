@@ -62,13 +62,15 @@ set_max_delay -quiet -datapath_only -from [get_clocks -quiet clkout*_raw] \
     -to [get_clocks -quiet clk_fpga_0] 20.000
 
 # ---- 两个时钟域之间的握手通路（双向）----
-# 跨域信号有三类，都是「电平翻转 + 同步器」结构：
+# 跨域信号有两类，都是「电平翻转 + 同步器」结构：
 #   - 慢 → 快：Controller 的 request / responseReady 在 DSP 域被 EdgeDetector(both) 的
 #     3 级 ASYNC_REG 同步链采样；
-#   - 快 → 慢：PhaseMeter 的 response.valid / response.ready 在慢域被同样的同步链采样；
-#   - 慢 → 快：信号源与输入选择的配置字（频率字/相位字/使能/选择位，整字一起）经
-#     CdcConfigBus 的翻转握手送到 DSP 域，数据在整笔传输期间保持稳定，同样只要求
-#     「一个慢时钟周期内到达」。
+#   - 快 → 慢：PhaseMeter 的 response.valid / response.ready 在慢域被同样的同步链采样。
+#
+# 配置通路已经不再是跨域通路：片内源使能与输入选择（SIG_CTRL）同寄存器堆一样在主时钟域，
+# 门控与二选一也在主时钟域完成（SignalInputMux），只有它的**输出**作为异步被测信号进
+# 测量域的采样链——与外部引脚 sig1/sig2 同一待遇（见上方「被测信号」一段）。
+#
 # 源寄存器翻转一次后保持一整个源时钟周期（慢域 50MHz → 20ns），目的域（400MHz）在这一整个
 # 周期内有 8 次采样机会，只需要可靠采到这一次跳变，具体落在哪一拍由同步器保证——
 # 真实需求是「一个慢时钟周期内到达」，而不是逐沿的建立/保持关系。

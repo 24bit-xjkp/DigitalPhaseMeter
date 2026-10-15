@@ -21,9 +21,11 @@
    | 0x100    | 模型里的 clk_wiz locked 状态（真实硬件是 clk_wiz 段偏移 0x004；0x27C 实测恒 0） |
    | 0x218    | clk_out2 相位字（毫度；当前 IP 未接线，`phase_model=controllable` 时才生效） |
 
-   `SIG_CTRL` 写入后先进入 `configPending`（配置要跨到测量域），这段时间 `SIG_STATUS.sourceReady`
-   读回 0 —— 这是任务书要求的「生效前延迟」，也与 RTL 注释里「快照未送走前写通道会挂起」一致
-   （RTL 里 `sourceReady` 是软件侧寄存器组合出来的，本模型更严格一点，见 README 的模型假设）。
+   `SIG_CTRL` **同拍生效**：片内源使能门控与「外部引脚/片内源」二选一都在主时钟域完成
+   （与写寄存器的寄存器堆同域），不存在跨时钟域送达延迟。写入后软件寄存器立刻更新，输入选择
+   在下一拍跟随（`cfgEnable`/`cfgSelect` 是这一拍之后的实际选择），`configDelayMs` 只表示
+   这一拍加上 AXI 写服务的延迟；因此写完成后 `SIG_STATUS.sourceReady` 立即反映新配置
+   （判据仍是「选片内源时要求使能有效且 MMCM 已锁定」）。
 
 2. **测量模型**（与 `spec/gen_golden.py` 的独立参考实现逐位一致）：
 
@@ -150,6 +152,7 @@ class SimFpga:
         freq_hz: int = P.DEFAULT_SIG_FREQ_HZ,
         phase_milli_deg: int = P.DEFAULT_SIG_PHASE_MILLI_DEG,
         meas_latency_s: float = 5e-4,
+        #: 输入选择跟随 SIG_CTRL 的延迟（默认下一拍；不再有跨时钟域送达延迟）
         config_delay_s: float = 2e-4,
         mmcm_lock_s: float = 5e-4,
         ext_freq_hz: int = 10_000_000,
@@ -182,14 +185,14 @@ class SimFpga:
         self.result_seq = 0
         self.clear_req = False
 
-        # ---- SIG_CTRL：软件侧寄存器与已送到测量域的配置快照 ----
+        # ---- SIG_CTRL：主时钟域的使能与选择寄存器（与输入选择同域，无跨域送达延迟） ----
         self.sig_enable = bool(sig_enable)
         self.src_select = bool(source == P.SOURCE_INTERNAL)
+        # 输入选择实际用的位：写入后下一拍（或过了 config_delay_s）跟随软件寄存器
         self.cfg_enable = self.sig_enable
         self.cfg_select = self.src_select
-        self.config_dirty = False
-        self.config_pending = False
-        self._config_deliver_at: float | None = None
+        self._sig_ctrl_dirty = False
+        self._sig_ctrl_apply_at: float | None = None
 
         # ---- 假 MMCM ----
         #: 相位模型：controllable（相位字可用，默认，供上位机相位通路自测）/
@@ -228,7 +231,7 @@ class SimFpga:
         self.start_ignored_while_busy = 0
         self.results_latched = 0
 
-        # 初始配置也走一次「写 SIG_CTRL」的延迟路径，行为更接近上电后 PS 配置
+        # 初始配置直接写入（输入选择在下一拍跟随，与 RTL 同域语义一致）
         self._write_sig_ctrl(self.src_select, self.sig_enable)
         # 用初始工作点配置假 MMCM（等价于上电后 PS 立刻 SET_SIG）
         self.configure_sig(int(freq_hz), int(phase_milli_deg), lock_immediately=True)
@@ -241,20 +244,15 @@ class SimFpga:
         return float(self.clock())
 
     def poll(self, now: float | None = None) -> None:
-        """推进时间相关状态：配置送达、MMCM 锁定、测量完成、挂起的 clear。"""
+        """推进时间相关状态：输入选择跟随 SIG_CTRL、MMCM 锁定、测量完成、挂起的 clear。"""
         t = self.now() if now is None else float(now)
 
-        # 1) 配置快照跨到测量域
-        if self.config_pending:
-            if self._config_deliver_at is not None and t >= self._config_deliver_at:
-                self.cfg_enable = self.sig_enable
-                self.cfg_select = self.src_select
-                self.config_pending = False
-                self._config_deliver_at = None
-        elif self.config_dirty:
-            self.config_pending = True
-            self.config_dirty = False
-            self._config_deliver_at = t + self.config_delay_s
+        # 1) SIG_CTRL 与输入选择同域：写入后输入选择跟随（默认下一拍，可配延迟）
+        if self._sig_ctrl_dirty and self._sig_ctrl_apply_at is not None and t >= self._sig_ctrl_apply_at:
+            self.cfg_enable = self.sig_enable
+            self.cfg_select = self.src_select
+            self._sig_ctrl_dirty = False
+            self._sig_ctrl_apply_at = None
 
         # 2) MMCM 锁定
         if not self.mmcm_locked and t >= self._locked_at:
@@ -355,8 +353,8 @@ class SimFpga:
 
     @property
     def wr_ready(self) -> bool:
-        """AXI 写通道是否可接受新写（配置快照未送走时挂起，对齐 RTL 的 `io.wr.ready`）。"""
-        return not self.config_dirty and not self.config_pending
+        """AXI 写通道是否可接受新写（对齐 RTL 的 `io.wr.ready`：配置不再跨域，恒为真）。"""
+        return True
 
     def read(self, offset: int) -> int:
         """读寄存器（组合读数据，对齐 RTL 的 `rdData`）。"""
@@ -435,9 +433,11 @@ class SimFpga:
         # 只读寄存器或未定义偏移：忽略写入
 
     def _write_sig_ctrl(self, src_select: bool, sig_enable: bool) -> None:
+        # 软件寄存器同拍更新；输入选择在下一拍（或 config_delay_s 之后）跟随
         self.src_select = bool(src_select)
         self.sig_enable = bool(sig_enable)
-        self.config_dirty = True  # 下一拍组装快照 → configPending
+        self._sig_ctrl_dirty = True
+        self._sig_ctrl_apply_at = self.now() + self.config_delay_s
 
     # ---- 状态字
 
@@ -478,9 +478,7 @@ class SimFpga:
 
     @property
     def source_ready(self) -> bool:
-        """当前选择的输入在配置上是否可用：配置未送达 → 0；选外部恒为 1。"""
-        if self.config_pending or self.config_dirty:
-            return False
+        """当前选择的输入在配置上是否可用（选片内源要求使能有效且 MMCM 已锁定，选外部恒为 1）。"""
         return (not self.cfg_select) or (self.cfg_enable and self.mmcm_locked)
 
     # ------------------------------------------------------------ 测量控制
@@ -660,7 +658,6 @@ class SimFpga:
             "srcSelect": self.src_select,
             "cfgEnable": self.cfg_enable,
             "cfgSelect": self.cfg_select,
-            "configPending": self.config_pending,
             "sourceReady": self.source_ready,
             "srcLocked": self.mmcm_locked,
             "signalActive": active,

@@ -106,11 +106,12 @@ port.io_reload = 0;                    // 上升沿之后撤销，恰好一拍
 
 DUT 新增输入端口后，`port_t` 里没写的端口在 Verilator 里保持 0（不是 X），因此旧测试会静默地
 继续跑「默认配置」那条分支。给 DUT 加端口时，`port_t` 与各用例里的初始化要显式补上新端口；
-真正验证新通路的用例必须显式驱动它们（例如 `Controller` 的 `io_config_valid` / `io_config_bits_*`）。
+真正验证新通路的用例必须显式驱动它们。
 
-**复位端口尤其要注意**：模块用成员端口（不在 `io` 里）显式声明复位时（如 `CdcConfigBus.dstReset`），
-漏驱动不会报错，只会让该域寄存器**从不复位**、拿到 `--x-assign unique` 的随机初值，表现为用例时好时坏。
-做法是在 `port_t` 里加 `bit_slice<CData> dst_reset{dut.dstReset, boolean}`，并在每个用例里与主复位一起驱动：
+**复位端口尤其要注意**：模块用成员端口（不在 `io` 里）显式声明复位时（`RawModule` 的 `resetn`，
+或跨域模块由调用方给的目的域复位），漏驱动不会报错，只会让该寄存器**从不复位**、拿到
+`--x-assign unique` 的随机初值，表现为用例时好时坏。做法是在 `port_t` 里加
+`bit_slice<CData> dst_reset{dut.dstReset, boolean}`，并在每个用例里与主复位一起驱动：
 
 ```cpp
 ctx.add_task(generate_reset(port.reset, port.clock));

@@ -69,6 +69,7 @@ class ServerOptions:
     mode: int = P.MODE_SINGLE
     stream_interval_ms: int = P.DEFAULT_STREAM_INTERVAL_MS
     meas_latency_ms: float = 0.5
+    #: 输入选择跟随 SIG_CTRL 的延迟（SIG_CTRL 与输入选择同域，本身同拍生效）
     config_delay_ms: float = 0.2
     mmcm_lock_ms: float = 0.5
     ext_freq_hz: int = 10_000_000
@@ -268,13 +269,9 @@ class SimPs:
         if self.fpga.busy:
             # 协议第 6 节：重配置期间两路输出停止，必须等 STATUS.busy = 0
             return self._err(P.Cmd.ERR_BUSY)
-        # AXI 写通道在配置快照送出前会拉低 ready，PS 侧表现为写被挂起（有界等待，避免
-        # 在 FakeClock 下死等：模型时间由 poll 推进，真实时钟下 200×0.5ms 也够配置送达）
-        for _ in range(200):
-            if self.fpga.wr_ready:
-                break
-            self.fpga.poll()
-            time.sleep(0.0005)
+        # SIG_CTRL 与输入选择同域，写通道不再因配置而挂起（wr_ready 恒真）；这里仍推进一次
+        # 模型时间，让输入选择完成跟随
+        self.fpga.poll()
         sol = S.solve_sig(freq_hz, phase_milli_deg, self.fpga.slow_hz, self.fpga.semantics)
         if not sol.ok:
             return self._err(P.Cmd.ERR_PARAM)
@@ -614,7 +611,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--dsp-hz", type=int, default=P.DEFAULT_DSP_HZ, help="高速/DSP 时钟频率（模型参数）")
     ap.add_argument("--stream-interval-ms", type=int, default=P.DEFAULT_STREAM_INTERVAL_MS, help="流模式默认周期")
     ap.add_argument("--meas-latency-ms", type=float, default=0.5, help="测量完成后的额外锁存延迟（模型参数）")
-    ap.add_argument("--config-delay-ms", type=float, default=0.2, help="SIG_CTRL 配置跨到测量域的延迟（模型参数）")
+    ap.add_argument("--config-delay-ms", type=float, default=0.2, help="输入选择跟随 SIG_CTRL 的延迟（模型参数；两者同域，本身同拍生效）")
     ap.add_argument("--mmcm-lock-ms", type=float, default=0.5, help="MMCM 重新锁定时间（模型参数）")
     ap.add_argument("--ext-freq", type=float, default=10e6, help="外部输入的模拟频率（Hz）")
     ap.add_argument("--ext-phase", type=float, default=0.0, help="外部输入的模拟相位差（度）")
