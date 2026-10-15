@@ -230,7 +230,13 @@ MMCM 的结构：`VCO = f_in * MULT / DIVCLK`，`f_clkoutN = VCO / D_N`。
 - **分频字段 = D 本体**（低字节），不是 `2D`：`0x28 = 40 = D`。实测 D = 40/80/96/125
   分别得到周期 40000/80000/96000/125000 ps（VCO = 1000MHz）。
 
-### 6.2 当前 bitstream 的限制：**相位不可在线改**
+### 6.2 上一版 bitstream 的限制：**相位不可在线改**（方案 A 之后已作废）
+
+> **本节的结论针对上一版 `clk_wiz_src` 方案，现在不适用**：当前片内源是「裸 MMCM +
+> 极简 DRP 控制器」，PS 写的是 **MMCM 的原始 16 位寄存器**（`0x43C1_0000` 段的
+> `0x08..0x24` + `0x28` LOAD），不再经过下面这个 `mmcm_pll_drp.v` 的换算，
+> 因此「寄存器文件里的相位字没接到重建逻辑」这条限制不存在。
+> 是否真的生效仍需上板确认（见 `docs/bringup.md` 第 4 节）。
 
 `mmcm_pll_drp.v` 重建 MMCM 配置字时，各输出的相位取自**静态 generic**（`S1_CLKOUTx_PHASE`），
 寄存器文件里的相位字（0x20C / 0x218）**没有接到重建逻辑**：
@@ -240,15 +246,12 @@ xsim 实测 **43 组**（CLKOUT0/CLKOUT1 分频字、相位字、非对称组合
 因此：
 
 - **频率可以在线改**（分频字有效），`SET_SIG` 的频率部分按 6.1 实现；
-- **相位不可在线改**：当前 bitstream 上被测信号的相位差恒为 **90°**（BD 初值）。
+- **相位不可在线改**：那一版 bitstream 上被测信号的相位差恒为 **90°**（BD 初值）。
   PS 侧仍然照写相位字（无害），但**不要**声称它能生效；`spec/drp_semantics.json` 的
-  `phase_controllable = false` 是权威结论。
-- 解锁办法：给 `clk_wiz_src` 加 `CONFIG.PHASE_DUTY_CONFIG {true}` 后重建 IP/BD
-  （`vivado/patch_enable_src_phase.tcl` 提供补丁），此后写 **0x218 = 毫度值**即可
-  （例如 `22500` = 22.5°）。**相位分辨率是 `45/D` 度**（VCO 相位步长 = 1/8 VCO 周期 125ps，
-  折算到输出 = `45°/D`）：D=40 时 **1.125°**，因此 22.5° = 20 步**可以精确表示**
-  （早期文档「只能取 45° 整数倍」的说法是错的，已作废）。
-- 该补丁**未实测**：需要重跑 IP 打包 → BD → 综合实现（见 `docs/bringup.md`）。
+  `phase_controllable = false` 是那一版的结论。
+- 当时设想的解锁办法是给 `clk_wiz_src` 加 `CONFIG.PHASE_DUTY_CONFIG {true}` 后重建 IP/BD
+  （那个补丁脚本 `patch_enable_src_phase.tcl` 已随 `clk_wiz_src` 一起删除）；
+  现在换成方案 A 后，相位由 MMCM 相位寄存器直接给出，分辨率仍是 `45/D` 度（D=40 时 1.125°）。
 
 ### 6.3 频率求解（冻结）
 

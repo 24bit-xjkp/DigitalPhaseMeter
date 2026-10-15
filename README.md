@@ -42,8 +42,9 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
 │       └── DspCounter   ×2  use_dsp 计数器，分别累计 edgeCnt / phaseCnt
 └── （片内无存储：数据通道就是寄存器本身，见下文「PS↔PL 互联」）
 
-片内信号源的 MMCM（clk_wiz_src）不在 IP 内，而是 BD 里的独立单元：它把两路输出送给 IP，
-PS 通过 AXI4-Lite 写它的动态重配置寄存器（见下文「片内信号源」）。
+片内信号源的 MMCM（`dpm_mmcm_src`，裸 `MMCME2_ADV` 薄封装）不在 IP 内，而是 BD 里的独立单元：
+它把两路输出送给 IP，PS 通过 AXI4-Lite 写 MMCM 的寄存器镜像（`dpm_src_drp` 控制器搬进 DRP 口，
+见下文「片内信号源」）。
 ```
 
 测量接口约定：`Controller.in.valid` 发起一次测量，`out.valid` 一次脉冲返回结果；`targetGate` 在测量期间保持不变，连续测量只需重复发起。测量窗口会等到被测信号的下一个上升沿才关闭，因此实际 `gateCnt` 略大于目标值。
@@ -55,15 +56,15 @@ PS 通过 AXI4-Lite 写它的动态重配置寄存器（见下文「片内信号
 | 通路       | 来源                                                    | 约束/时基                                                                     |
 | ---------- | ------------------------------------------------------- | ----------------------------------------------------------------------------- |
 | 外部输入   | `sig1` → 引脚 **W18**、`sig2` → 引脚 **W19**（LVCMOS33） | 异步输入，`set_false_path`；在测量域经 `EdgeDetector` 的 ASYNC_REG 采样链同步 |
-| 片内信号源 | PL 内 MMCM（`clk_wiz_src`）的两路输出                    | 频率/相位差由 MMCM 动态重配置设定；同样按异步输入采样                          |
+| 片内信号源 | PL 内 MMCM（`dpm_mmcm_src`）的两路输出                    | 频率/相位差由 PS 写 MMCM 寄存器镜像（`dpm_src_drp`）设定；同样按异步输入采样    |
 
 ### 片内信号源：MMCM 的两路输出
 
 ```text
-        ┌───────────────────────────────┐   clk_out1（f_sig，相位 φ0）──► dpm_top/srcSig1 ─┐
-        │ clk_wiz_src（MMCM + DRP）     │   clk_out2（f_sig，相位 φ1）──► dpm_top/srcSig2 ─┤
+        ┌───────────────────────────────┐   clkOut1（f_sig，相位 φ0）──► dpm_top/srcSig1 ─┐
+        │ dpm_mmcm_src（裸 MMCME2_ADV） │   clkOut2（f_sig，相位 φ1）──► dpm_top/srcSig2 ─┤
         │  参考时钟 = FCLK_CLK0 (50MHz) │                                                  ├─► SignalInputMux
-        │  DRP（AXI4-Lite 从口）◄───────┼── PS：改频率/相位 → 写 Load → 等 locked           │   ↕ 外部引脚
+        │  DRP ◄── dpm_src_drp（AXI 口）┼── PS：写 MMCM 寄存器镜像 → 写 LOAD → 等 locked   │   ↕ 外部引脚
         └───────────────────────────────┘                         │                        │
                                                                   └► locked ──► SIG_STATUS │
                                                                                             ▼
@@ -73,28 +74,29 @@ PS 通过 AXI4-Lite 写它的动态重配置寄存器（见下文「片内信号
 1. **MMCM 产生两路同频、相位差可调的时钟**，两路输出直接作为被测信号（初始 25MHz、相位差 90°）：
    - **频率** = VCO / CLKOUT 分频，VCO = 50MHz × CLKFBOUT 倍频 ÷ DIVCLK（VCO 必须落在 600～1200MHz），
      因此输出频率下限约 4.7MHz（VCO 600MHz ÷ 128）；实际可用上限受相位计采样率限制，取 40MHz 量级；
-   - **相位差** = 两个输出各自的相位寄存器之差，分辨率为 VCO 周期的 1/8（VCO 800MHz 时 125ps）；
-   - 两者都通过 **AXI4-Lite 的动态重配置（DRP）寄存器**在线设定：地址段 `0x43C1_0000`，
-     寄存器映射见 PG065（Clocking Wizard）的 Dynamic Reconfiguration 章节。改完参数写「Load」
-     寄存器让 MMCM 重新锁定，**期间两路输出会停止**（应在测量空闲时改）。
+   - **相位差** = 两个输出各自的相位寄存器之差，步长为 VCO 周期的 1/8（VCO 1000MHz 时 125ps，
+     折算到输出是 `45 / D` 度，D = 40 时 1.125°）；
+   - 两者都由 PS 算出 **MMCM 的 16 位寄存器值**，写进地址段 `0x43C1_0000` 的 `dpm_src_drp`
+     （`0x08..0x24` 八个寄存器镜像 + `0x28` LOAD），控制器再按固定顺序搬进 MMCM 的 DRP 口；
+     位域与编码规则见 `build/analysis/golden/mmcm_encode.py`（已对 clk_wiz 的 Write DRP 生成值
+     逐点校验）。**改完写 LOAD 让 MMCM 重新锁定，期间两路输出会停止**（应在测量空闲时改）。
    - **相位范围随分频比缩小**：MMCM 每个输出的相位寄存器覆盖 64 个 VCO 周期，换成输出相位是
      `64 / D` 个输出周期（D = CLKOUTx 分频）。当前工作点 25MHz（VCO 1000MHz、D = 40）→ 1.6 个
-     输出周期；相位分辨率是 **`45 / D` 度**（VCO 相位步长 = 1/8 VCO 周期 = 125ps 折算到输出），
-     D = 40 时 1.125°。需要更低频率时优先让 PS 用 DRP 把 VCO 调到下限（600MHz），
+     输出周期，0～360° 全覆盖；需要更低频率时优先让 PS 把 VCO 调到下限（600MHz），
      而不是把 D 拉大（D 越大相位可表示范围越小）。
-   - **⚠ 相位在线可调当前不生效**：实测（`sim/run_drp_tb.sh`，43 组探针）证明本 BD 生成的
-     `clk_wiz_src` 把 DRP 寄存器文件里的相位字（0x20C / 0x218，单位毫度）**没有接到 MMCM 的
-     重配置逻辑**，两路输出恒相差静态配置的 90°；**频率可以在线改**（分频字有效）。
-     要恢复在线改相位需给该 IP 加 `CONFIG.PHASE_DUTY_CONFIG {true}` 后重建
-     （[`vivado/patch_enable_src_phase.tcl`](vivado/patch_enable_src_phase.tcl)）。
-     结论与原始输出见 [`docs/verify-drp.md`](docs/verify-drp.md)。
+   - **不走 clk_wiz 的语义寄存器文件**：原来的 `clk_wiz_src`（`USE_DYN_RECONFIG + PHASE_DUTY_CONFIG`）
+     会把「毫度/百分比/MHz → MMCM 计数器位域」的定点换算综合成硬件（实测 13,287 个 LUT site + 38 个
+     DSP48E1）；方案 A 把换算搬到 PS 软件，PL 侧只留 DRP 搬运状态机（114 LUT / 182 FF / 0 DSP），
+     整设计 Slice LUTs 14,048（79.8%）→ 948（5.4%）、DSP 40 → 2。
+     **相位字生效与否未上板验证**：xsim 的 unisim MMCM 不支持 DRP 写，控制器只用 DRP 从端模型验证过
+     （旧的 `PHASE_DUTY_CONFIG` 补丁脚本随之作废，已删除）。
 2. **两路输出与外部输入共用同一条异步采样链**：切换不改变测量通路的延迟，相位差只被量化到
    1 个测量时钟周期（即相位计本身的分辨率，400MHz 下 2.5ns）。使能无效（`SIG_CTRL.enable = 0`）
    时片内源两路输出被门成恒低。
 
 ### 切换与配置（PS 视角）
 
-1. （可选）用 MMCM 的 DRP 寄存器设定片内源的频率与相位差，写 Load 寄存器后等 `locked`；
+1. （可选）写 MMCM 寄存器镜像（`0x08..0x24`）设定片内源的频率与相位差，写 `0x28` LOAD 后等 `locked`；
 2. 写 `SIG_CTRL = (1<<0) | (1<<1)`：使能片内源并把它接到测量核心（`1<<0` = enable，`1<<1` = srcSelect）；
 3. 读 `SIG_STATUS` 确认 `srcLocked = 1`、`sourceReady = 1`；AXI 写会在配置跨到测量域后才完成，
    因此写返回即表示配置已生效；
@@ -254,11 +256,11 @@ vivado -mode batch -source vivado/build_bitstream.tcl  # 综合 / 实现 / bitst
    片内源频率与相位设定、流模式上报；协议见 [`docs/ps-protocol.md`](docs/ps-protocol.md)。
    验证结果见 [`docs/verify-report.md`](docs/verify-report.md)（28 个测量点全部通过，
    但**相位扫描未真正生效**，见下）。
-5. **PL 侧：让在线相位扫描真正可用** —— `sim/run_drp_tb.sh` 的实测（43 组探针）证明当前
-   `clk_wiz_src` 的 DRP 相位字**没有接入 MMCM 重配置逻辑**（`PHASE_DUTY_CONFIG=false`），
-   片内源两路输出恒相差 90°，因此「多相位点扫描」只验证了一个相位点。
-   补丁脚本已就绪（[`vivado/patch_enable_src_phase.tcl`](vivado/patch_enable_src_phase.tcl)，
-   dry-run 通过），需要重建 IP/BD 后复跑 `sim/run_drp_tb.sh` 确认相位字生效。
-6. **PS UART 与上板** —— 当前 bitstream 的 PS7 未使能 UART、MIO 全部未分配，
-   PS 侧串口服务端因此无法上板通信；[`vivado/patch_enable_ps_uart.tcl`](vivado/patch_enable_ps_uart.tcl)
-   与 [`docs/bringup.md`](docs/bringup.md) 给出了补齐路径（dry-run 通过，重建与上板未做）。
+5. **PL 侧：让在线相位扫描真正可用** —— 旧 `clk_wiz_src` 方案的 DRP 相位字**没有接入 MMCM
+   重配置逻辑**（`PHASE_DUTY_CONFIG=false`），两路输出恒相差 90°。现在片内源已换成
+   **裸 MMCM + 极简 DRP 控制器**（方案 A）：相位字就是 MMCM 的相位寄存器，由 PS 直接给出，
+   不再经过厂商 IP 的换算，因此这条限制不再存在。**是否真的生效仍需上板确认**
+   （xsim 的 unisim MMCM 不支持 DRP 写，控制器只在 DRP 从端模型里验证过）。
+6. **PS UART 与上板** —— PS7 的调试串口现在是 `create_bd.tcl` 的流水线参数
+   （`-uart uart1`，默认；`uart0` / `none` 可选），重建 BD 即带上 UART1（MIO48/49、115200），
+   不再需要单独的补丁脚本；上板步骤见 [`docs/bringup.md`](docs/bringup.md)。

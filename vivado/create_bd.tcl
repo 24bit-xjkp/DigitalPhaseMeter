@@ -1,16 +1,28 @@
 # 创建 PS7 + AXI 协议转换器 + MMCM + dpm_top IP 的 block design
 #
 # 用法：
-#   vivado -mode batch -source vivado/create_bd.tcl [dsp_clk_mhz] [ps_fclk1_mhz]
+#   vivado -mode batch -source vivado/create_bd.tcl [dsp_clk_mhz] [ps_fclk1_mhz] [-uart <uart0|uart1|none>] [-baud <波特率>]
 #
 #   dsp_clk_mhz  —— DSP 域时钟频率（MHz），默认 400（MMCM 倍频；本仓库实测在 xc7z010clg400-1
 #                   上综合/实现收敛，域内 WNS ≥ +0.236ns，见 vivado/README.md）
 #   ps_fclk1_mhz —— 给定时改用 PS 的 FCLK_CLK1 直供 DSP 域（不建 MMCM、不用 dsp_clk_mhz），
 #                   用于对比「PS 直供」与「MMCM 倍频」两条路。FCLK_CLK1 上限 250MHz，
 #                   因此这条路只能覆盖 250MHz 及以下。
+#   -uart        —— 板载调试串口，默认 uart1：
+#                     uart1 → MIO48(tx)/49(rx)（Bank1，本仓库 AX7010 的板载 CP2102N 接法）
+#                     uart0 → MIO14(tx)/15(rx)（Bank0，多数板卡为 3.3V）
+#                     none  → 不给 PS 配串口（MIO 保持全 unassigned）
+#                   MIO 号与 bank 供电是板级信息，换板卡时按原理图选；改完脚本会回读校验。
+#   -baud        —— 串口波特率，默认 115200
+#
+#   例：`create_bd.tcl 300` = 300MHz；`create_bd.tcl 0 150` = PS 直供 150MHz；
+#       `create_bd.tcl -uart uart0` = 默认 400MHz + MIO14/15 串口。
 #
 # 前置条件：先运行 vivado/package_ip.tcl 与 vivado/package_src_ip.tcl 生成两个 IP
 #   （build/vivado/ip/dpm_top、build/vivado/ip/dpm_src_drp）
+#
+# 综合/实现策略（DSP 域高速时钟需要的那些 run 参数）由 build_bitstream.tcl 在启动 run 前内联设置，
+#   本脚本只负责把 BD 建对，不再需要单独的 apply_timing_strategy.tcl。
 #
 # 结构（两个 AXI4-Lite 从口：测量 IP 与片内信号源的 MMCM 动态重配置口）：
 #
@@ -64,15 +76,39 @@ set ip_repo [file join $build_dir ip]
 
 set part "xc7z010clg400-1"
 
+# ---- 参数：前两个位置参数保持原义，串口用 -uart / -baud 具名给出 ----
 # DSP 域目标时钟频率（MHz），默认 400；默认走 PL 内的 MMCM（PS 的 FCLK 分频点够不到 300MHz 以上）。
 set dsp_clk_mhz 400.0
-if {[llength $argv] >= 1 && [lindex $argv 0] ne ""} { set dsp_clk_mhz [lindex $argv 0] }
 set ps_fclk1_mhz ""
-if {[llength $argv] >= 2 && [lindex $argv 1] ne ""} {
-    set ps_fclk1_mhz [lindex $argv 1]
+set uart_sel "uart1"
+set uart_baud 115200
+set positional {}
+for {set i 0} {$i < [llength $argv]} {incr i} {
+    set arg [lindex $argv $i]
+    switch -- $arg {
+        -uart { incr i ; set uart_sel [lindex $argv $i] }
+        -baud { incr i ; set uart_baud [lindex $argv $i] }
+        default { lappend positional $arg }
+    }
+}
+if {[llength $positional] >= 1 && [lindex $positional 0] ne ""} { set dsp_clk_mhz [lindex $positional 0] }
+if {[llength $positional] >= 2 && [lindex $positional 1] ne ""} {
+    set ps_fclk1_mhz [lindex $positional 1]
     set dsp_clk_mhz $ps_fclk1_mhz
 }
 set use_mmcm [expr {$ps_fclk1_mhz eq ""}]
+
+# 串口选择：MIO 号与方向是板级信息（Zynq UART0 = MIO14(tx)/15(rx)、UART1 = MIO48(tx)/49(rx)）。
+set uart ""
+set uart_periph ""
+set mio_tx -1
+set mio_rx -1
+switch -- $uart_sel {
+    uart0 { set uart "UART0" ; set uart_periph "UART 0" ; set mio_tx 14 ; set mio_rx 15 }
+    uart1 { set uart "UART1" ; set uart_periph "UART 1" ; set mio_tx 48 ; set mio_rx 49 }
+    none  { }
+    default { error "-uart 只接受 uart0 / uart1 / none（收到 '$uart_sel'）" }
+}
 
 # 把 Vivado 的工作目录放到 build 下，避免在仓库根目录留下 .Xil 等临时文件
 file mkdir $build_dir
@@ -113,36 +149,36 @@ current_bd_design $bd_name
 # DIVCLK=1（VCO 1000MHz，在 7 系列 -1 的 600~1200MHz 范围内，见生成的 clk_wiz
 # 例化）；AXI4-Lite 寄存器访问不需要更快的时钟。
 #
-# 串口（本板上板测试用）：UART1 走 MIO48(tx)/49(rx)，115200 8N1。
+# 串口（上板调试用，由 -uart 选择）：默认 UART1 走 MIO48(tx)/49(rx)，115200 8N1。
 #   - MIO48/49 属于 MIO Bank1，本板该 bank 供电 1.8V（LVCMOS 1.8V）；
-#     MIO Bank0（MIO0..15）供电 3.3V。Zynq-7000 的 MIO I/O 标准由 bank 供电决定，
-#     不可在 PS7 里逐脚编程，因此这里只是把 bank 电压写进 PRESET_*_VOLTAGE 属性，
-#     让 .hwh / BSP 与硬件实际供电一致（声明性，不改 MIO 电气特性）。
-#   - 使能 UART1 不会释放 UART0：UART0 继续保留为可选调试口（未分配 MIO）。
-#   - MIO 树的 54 项字符串要显式改（只设 PCW_UART1_UART1_IO 不一定同步更新树），
+#     MIO Bank0（MIO0..15）供电 3.3V，UART0（MIO14/15）通常就接在这边。
+#     Zynq-7000 的 MIO I/O 标准由 bank 供电决定，不可在 PS7 里逐脚编程，因此这里只是
+#     把 bank 电压写进 PRESET_*_VOLTAGE 属性，让 .hwh / BSP 与硬件实际供电一致
+#     （声明性，不改 MIO 电气特性）。
+#   - 使能某个 UART 不会释放另一个：未选中的那个保留为可选调试口（未分配 MIO）。
+#   - MIO 树的 54 项字符串要显式改（只设 PCW_UARTx_UARTx_IO 不一定同步更新树），
 #     见下面 "MIO 树" 一段，改完脚本会回读校验。
+#   - `-uart none` 时下面这段整体跳过，PS 保持无串口（MIO 全 unassigned）。
 create_bd_cell -type ip -vlnv xilinx.com:ip:processing_system7:5.5 processing_system7_0
-set ps7_uart       "UART1"
-set ps7_uart_periph "UART 1"
-set ps7_mio_tx     48
-set ps7_mio_rx     49
-set ps7_baud       115200
 set ps7_config [list \
     CONFIG.PCW_USE_M_AXI_GP0 {1} \
     CONFIG.PCW_USE_M_AXI_GP1 {0} \
     CONFIG.PCW_FPGA0_PERIPHERAL_FREQMHZ {50} \
     CONFIG.PCW_USE_FABRIC_INTERRUPT {1} \
-    CONFIG.PCW_IRQ_F2P_INTR {1} \
-    CONFIG.PCW_EN_$ps7_uart {1} \
-    CONFIG.PCW_${ps7_uart}_PERIPHERAL_ENABLE {1} \
-    CONFIG.PCW_${ps7_uart}_${ps7_uart}_IO "MIO $ps7_mio_tx .. $ps7_mio_rx" \
-    CONFIG.PCW_${ps7_uart}_BAUD_RATE $ps7_baud \
-    CONFIG.PCW_MIO_${ps7_mio_tx}_PULLUP {enabled} \
-    CONFIG.PCW_MIO_${ps7_mio_tx}_DIRECTION {out} \
-    CONFIG.PCW_MIO_${ps7_mio_tx}_SLEW {slow} \
-    CONFIG.PCW_MIO_${ps7_mio_rx}_PULLUP {enabled} \
-    CONFIG.PCW_MIO_${ps7_mio_rx}_DIRECTION {in} \
-    CONFIG.PCW_MIO_${ps7_mio_rx}_SLEW {slow}]
+    CONFIG.PCW_IRQ_F2P_INTR {1}]
+if {$uart ne ""} {
+    lappend ps7_config \
+        CONFIG.PCW_EN_$uart {1} \
+        CONFIG.PCW_${uart}_PERIPHERAL_ENABLE {1} \
+        CONFIG.PCW_${uart}_${uart}_IO "MIO $mio_tx .. $mio_rx" \
+        CONFIG.PCW_${uart}_BAUD_RATE $uart_baud \
+        CONFIG.PCW_MIO_${mio_tx}_PULLUP {enabled} \
+        CONFIG.PCW_MIO_${mio_tx}_DIRECTION {out} \
+        CONFIG.PCW_MIO_${mio_tx}_SLEW {slow} \
+        CONFIG.PCW_MIO_${mio_rx}_PULLUP {enabled} \
+        CONFIG.PCW_MIO_${mio_rx}_DIRECTION {in} \
+        CONFIG.PCW_MIO_${mio_rx}_SLEW {slow}
+}
 if {$use_mmcm} {
     # DSP 域时钟由 PL 内 MMCM 生成，FCLK_CLK1 不需要
     lappend ps7_config CONFIG.PCW_EN_CLK1_PORT {0}
@@ -162,40 +198,46 @@ foreach {vp vv} {BANK0 "LVCMOS 3.3V" BANK1 "LVCMOS 1.8V"} {
     }
 }
 
-# ---- MIO 树：把 MIO48/49 标成 UART1（格式为 54 项、'#' 分隔）----
+# ---- MIO 树：把选中的两个 MIO 标成对应 UART（格式为 54 项、'#' 分隔）----
 # PS7 的 MIO 树是一个 54 项的字符串属性（每项是外设名 / 信号名），
-# 只写 PCW_UART1_UART1_IO 时 Vivado 不保证同步更新它，因此这里显式改并回读校验。
+# 只写 PCW_UARTx_UARTx_IO 时 Vivado 不保证同步更新它，因此这里显式改并回读校验。
 set ps_cell [get_bd_cells processing_system7_0]
-set mio_periph [split [get_property CONFIG.PCW_MIO_TREE_PERIPHERALS $ps_cell] "#"]
-set mio_sig    [split [get_property CONFIG.PCW_MIO_TREE_SIGNALS $ps_cell] "#"]
-if {[llength $mio_periph] != 54 || [llength $mio_sig] != 54} {
-    set mio_periph [lrepeat 54 "unassigned"]
-    set mio_sig    [lrepeat 54 "unassigned"]
+if {$uart ne ""} {
+    set mio_periph [split [get_property CONFIG.PCW_MIO_TREE_PERIPHERALS $ps_cell] "#"]
+    set mio_sig    [split [get_property CONFIG.PCW_MIO_TREE_SIGNALS $ps_cell] "#"]
+    if {[llength $mio_periph] != 54 || [llength $mio_sig] != 54} {
+        set mio_periph [lrepeat 54 "unassigned"]
+        set mio_sig    [lrepeat 54 "unassigned"]
+    }
+    lset mio_periph $mio_tx $uart_periph
+    lset mio_periph $mio_rx $uart_periph
+    lset mio_sig    $mio_tx "${uart_sel}_tx"
+    lset mio_sig    $mio_rx "${uart_sel}_rx"
+    set_property -dict [list \
+        CONFIG.PCW_MIO_TREE_PERIPHERALS [join $mio_periph "#"] \
+        CONFIG.PCW_MIO_TREE_SIGNALS [join $mio_sig "#"]] $ps_cell
 }
-lset mio_periph $ps7_mio_tx $ps7_uart_periph
-lset mio_periph $ps7_mio_rx $ps7_uart_periph
-lset mio_sig    $ps7_mio_tx "uart1_tx"
-lset mio_sig    $ps7_mio_rx "uart1_rx"
-set_property -dict [list \
-    CONFIG.PCW_MIO_TREE_PERIPHERALS [join $mio_periph "#"] \
-    CONFIG.PCW_MIO_TREE_SIGNALS [join $mio_sig "#"]] $ps_cell
 
 # ---- 回读校验：串口配置必须真的落到 BD 里 ----
-set uart_en  [get_property CONFIG.PCW_EN_$ps7_uart $ps_cell]
-set uart_io  [get_property CONFIG.PCW_${ps7_uart}_${ps7_uart}_IO $ps_cell]
-set uart_baud [get_property CONFIG.PCW_${ps7_uart}_BAUD_RATE $ps_cell]
-set tree_p   [split [get_property CONFIG.PCW_MIO_TREE_PERIPHERALS $ps_cell] "#"]
-set tree_s   [split [get_property CONFIG.PCW_MIO_TREE_SIGNALS $ps_cell] "#"]
-set bank0    [get_property -quiet CONFIG.PCW_PRESET_BANK0_VOLTAGE $ps_cell]
-set bank1    [get_property -quiet CONFIG.PCW_PRESET_BANK1_VOLTAGE $ps_cell]
-puts "PS7_UART_CHECK: EN_$ps7_uart=$uart_en IO='$uart_io' BAUD=$uart_baud"
-puts "PS7_UART_CHECK: MIO$ps7_mio_tx=[lindex $tree_p $ps7_mio_tx]/[lindex $tree_s $ps7_mio_tx]"
-puts "PS7_UART_CHECK: MIO$ps7_mio_rx=[lindex $tree_p $ps7_mio_rx]/[lindex $tree_s $ps7_mio_rx]"
-puts "PS7_UART_CHECK: BANK0='$bank0' BANK1='$bank1'"
-if {$uart_en != 1} { error "PS7：$ps7_uart 未使能" }
-if {[lindex $tree_p $ps7_mio_tx] ne $ps7_uart_periph || [lindex $tree_p $ps7_mio_rx] ne $ps7_uart_periph} {
-    error "PS7：MIO 树未把 MIO$ps7_mio_tx/$ps7_mio_rx 指到 $ps7_uart_periph"
+set bank0 [get_property -quiet CONFIG.PCW_PRESET_BANK0_VOLTAGE $ps_cell]
+set bank1 [get_property -quiet CONFIG.PCW_PRESET_BANK1_VOLTAGE $ps_cell]
+if {$uart eq ""} {
+    puts "PS7_UART_CHECK: -uart none（未给 PS 配串口）"
+} else {
+    set uart_en   [get_property CONFIG.PCW_EN_$uart $ps_cell]
+    set uart_io   [get_property CONFIG.PCW_${uart}_${uart}_IO $ps_cell]
+    set uart_rate [get_property CONFIG.PCW_${uart}_BAUD_RATE $ps_cell]
+    set tree_p    [split [get_property CONFIG.PCW_MIO_TREE_PERIPHERALS $ps_cell] "#"]
+    set tree_s    [split [get_property CONFIG.PCW_MIO_TREE_SIGNALS $ps_cell] "#"]
+    puts "PS7_UART_CHECK: EN_$uart=$uart_en IO='$uart_io' BAUD=$uart_rate"
+    puts "PS7_UART_CHECK: MIO$mio_tx=[lindex $tree_p $mio_tx]/[lindex $tree_s $mio_tx]"
+    puts "PS7_UART_CHECK: MIO$mio_rx=[lindex $tree_p $mio_rx]/[lindex $tree_s $mio_rx]"
+    if {$uart_en != 1} { error "PS7：$uart 未使能" }
+    if {[lindex $tree_p $mio_tx] ne $uart_periph || [lindex $tree_p $mio_rx] ne $uart_periph} {
+        error "PS7：MIO 树未把 MIO$mio_tx/$mio_rx 指到 $uart_periph"
+    }
 }
+puts "PS7_UART_CHECK: BANK0='$bank0' BANK1='$bank1'"
 if {$bank1 ne "LVCMOS 1.8V"} {
     puts "WARNING: PCW_PRESET_BANK1_VOLTAGE 回读为 '$bank1'（期望 LVCMOS 1.8V，仅影响 .hwh/BSP 声明）"
 }

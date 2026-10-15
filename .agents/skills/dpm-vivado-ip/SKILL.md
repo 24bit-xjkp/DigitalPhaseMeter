@@ -23,16 +23,18 @@ sbt -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop --type=syn"      
 sbt -batch "runMain DigitalPhaseMeter.EmitMmcmDrpController --type=syn"         # DRP 控制器 RTL
 vivado -mode batch -source vivado/package_ip.tcl        # 打包顶层 IP → build/vivado/ip/dpm_top
 vivado -mode batch -source vivado/package_src_ip.tcl    # 打包 DRP 控制器 → ip/dpm_src_drp
-vivado -mode batch -source vivado/create_bd.tcl         # BD → build/vivado/bd_proj（DSP 域默认 400MHz）
-vivado -mode batch -source vivado/apply_timing_strategy.tcl  # 写入高速时钟需要的综合/实现策略
+vivado -mode batch -source vivado/create_bd.tcl         # BD → build/vivado/bd_proj（DSP 域默认 400MHz、PS 串口默认 uart1）
 sim/run_xsim.sh                                         # xsim 仿真（综合产物 + XPM）
-vivado -mode batch -source vivado/build_bitstream.tcl   # 综合/实现/bitstream/XSA
+vivado -mode batch -source vivado/build_bitstream.tcl   # 写高速时钟策略 → 综合/实现/bitstream/XSA
 vivado -mode batch -source vivado/impl_multi.tcl 6      # 高速时钟：多次实现取余量最好的一次
 ```
 
 **改了 RTL 必须从打包重新开始**：两个 IP（`package_ip.tcl` + `package_src_ip.tcl`）的内容变了，
 `create_bd.tcl` 里的 BD 也要重新生成；只重跑 `build_bitstream.tcl` 会用旧的 IP。
-`apply_timing_strategy.tcl` 改的是 run 参数，`reset_run` 之后依然有效，但换新工程时要重跑。
+
+策略（run 参数）与串口都已经并进上面这条流水线，没有单独的补丁/策略脚本：
+`build_bitstream.tcl` 在启动 run 前写策略（`-retiming` / `-dsp` / `-strategy-only`），
+`create_bd.tcl` 用 `-uart uart0|uart1|none`（默认 uart1）与 `-baud` 配 PS 串口并回读校验。
 
 `build/` 下全部是产物，不入库；入库的是 `.scala`、`test/`、`sim/`、`vivado/` 里的脚本与文档。
 
@@ -256,8 +258,8 @@ run-to-run 波动，单次通过不算签核，见下文）；频率参数同时
    比真实布线延迟还紧，400MHz 下必然报违例。真实需求是「一个慢时钟周期内到达」（翻转电平 +
    3 级 ASYNC_REG 同步链），用 `set_max_delay -datapath_only` 表达，上限取一个慢时钟周期。
    **两个方向都要写**：只写一个方向会让另一个方向变成新的最差路径（实测 +0.055 → −0.258ns）。
-4. **运行策略**（`apply_timing_strategy.tcl`）：综合 `PerformanceOptimized` +
-   `GLOBAL_RETIMING=on` + `FLATTEN_HIERARCHY=full` + `MAX_DSP=2`；实现用内置
+4. **运行策略**（写在 `build_bitstream.tcl` 里，启动 run 前设置）：综合 `PerformanceOptimized` +
+   `GLOBAL_RETIMING=on` + `MAX_DSP=2`；实现用内置
    **`Performance_Retiming`**（phys_opt = `AlternateFlowWithRetiming`：DSP/BRAM 优化 + 重定时），
    **不要覆盖它自带的步骤 directive**，否则掉回 +0.077ns 一档。逐档实测（同一综合网表只换
    impl strategy）：`Performance_Retiming` +0.270ns > `Performance_RefinePlacement` +0.109ns >
@@ -265,6 +267,10 @@ run-to-run 波动，单次通过不算签核，见下文）；频率参数同时
    run 的 `STEPS.*.ARGS.*` 可以直接 `set_property` 改（内置 strategy 也允许），不需要
    `create_strategy`（2025.2 实测 `get_strategies` / `create_strategy` 不存在）；
    但注意**给 run 换 strategy 会把步骤参数重置回该 strategy 的预设**。
+   **写 run 属性之前先比较当前值**：把属性写成「相同的值」也会让已完成的 run 变成过期状态，
+   于是下一次 `build_bitstream.tcl` 无法复用网表、白跑一遍综合/实现（实测：
+   `set_property` 之后 `STATUS` 不再是 `Complete`）。脚本里因此用「值不同才写」，
+   并用「写了几项」决定要不要 `STRATEGY_FORCE_RERUN` 强制重跑。
 
 ### 三个必须记住的实测坑
 
@@ -294,6 +300,6 @@ run-to-run 波动，单次通过不算签核，见下文）；频率参数同时
 - 报告里写清实际跑到哪一步：IP 打包通过、`validate_bd_design` 通过、xsim 用例数与结果、
   综合实现是否 100%、时序 WNS/WHS（高速域单独给出域内 WNS）、bitstream/XSA 是否生成。
 - 高速时钟类改动要给出**多次实现**的结果（见 `impl_multi.tcl`），单次通过不作为签核依据。
-- **改了 RTL 之后**：`package_ip.tcl` → `create_bd.tcl` → `apply_timing_strategy.tcl` →
+- **改了 RTL 之后**：`package_ip.tcl` → `package_src_ip.tcl` → `create_bd.tcl` →
   `build_bitstream.tcl` 必须按顺序重跑；只重跑后面几步会用到旧的 IP 内容。
 - 没有跑到的步骤（例如没上板）要明确写成「未验证」，不要用「已验证」概括。

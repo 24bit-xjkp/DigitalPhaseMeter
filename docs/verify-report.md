@@ -75,11 +75,11 @@ DRP_TB_DONE lines=32
 4. 附加发现：Load 寄存器 `0x25C` 的 bit0 = 触发、bit1 = SADDR（0 = 静态配置 / 1 = 寄存器文件），
    状态寄存器在**偏移 0x004**（不是"字 31"）。
 
-**解锁路径**：`vivado/patch_enable_src_phase.tcl` 给 `clk_wiz_src` 加
-`CONFIG.PHASE_DUTY_CONFIG {true}`（本机 **dry-run 通过**：`false → true`、退出码 0），
+**解锁路径（当时设想的，现已作废）**：给 `clk_wiz_src` 加 `CONFIG.PHASE_DUTY_CONFIG {true}`
+（当时的补丁脚本 `vivado/patch_enable_src_phase.tcl` 已随该 IP 一起删除），
 之后写 `0x218 = 毫度值` 即可（分辨率 `45/D` 度，D=40 时 1.125°，22.5° 可精确表示）。
-补丁后需重跑 IP 打包 → BD → 综合实现，并复跑 `sim/run_drp_tb.sh` 确认
-`DRP_PHASEW` 的 `delay_ps` 随毫度值变化。**该步未执行，属未验证项。**
+**当前方案（裸 MMCM + 极简 DRP 控制器）不需要这个补丁**：相位就是 MMCM 的相位寄存器，
+由 PS 写 `0x43C1_0000` 段的寄存器镜像；是否真的生效仍未上板验证（见第 8 节）。
 
 ## 4. L4：换算与协议的正确性（三方独立实现比对）
 
@@ -231,11 +231,12 @@ sim/run_xsim.sh --no-gen
 
 ## 8. 明确未验证的部分（不要当成已验证）
 
-1. **上板**：无开发板，且当前 bitstream **未使能 PS UART**（`PCW_EN_UART0/1 = 0`、MIO 全部
-   unassigned）。`vivado/patch_enable_ps_uart.tcl` 的 dry-run 通过（属性名有效），
-   但"打好补丁的 bitstream 真能出串口"未验证。
-2. **在线相位扫描**：当前 bitstream 下不可用（第 3 节实测）；
-   `vivado/patch_enable_src_phase.tcl` 的 dry-run 通过，但"补丁后相位字生效"未验证。
+1. **上板**：本轮无开发板，且当时的 bitstream **未使能 PS UART**（`PCW_EN_UART0/1 = 0`、MIO 全部
+   unassigned）。**后续已解决**：`create_bd.tcl` 现在默认带 UART1（`-uart` 参数可选 uart0/none），
+   串口已在 AX7010 上跑通，见 `docs/onboard-ax7010.md` 与 `docs/bringup.md`。
+2. **在线相位扫描**：本轮 bitstream 下不可用（第 3 节实测，针对当时的 `clk_wiz_src` 方案）；
+   当前方案改为「裸 MMCM + 极简 DRP 控制器」，相位由 MMCM 相位寄存器直接决定，
+   但**「写寄存器后相位真的变化」仍未上板验证**。
 3. **中断通路**：PS 侧中断（GIC + 向量表）代码在，但未上板；本报告所有端到端测试走的是
    轮询路径（`GET_RESULT.valid` / `STATUS`）。
 4. **真实精度**：测量精度只在模型与 RTL 仿真层面验证，没有真实 MMCM 抖动、外部信号、

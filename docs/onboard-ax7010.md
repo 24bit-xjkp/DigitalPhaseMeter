@@ -21,16 +21,23 @@ sudo /home/luo/Vivado/2025.2/Vivado/data/xicom/cable_drivers/lin64/install_scrip
 
 ## 1. bitstream 侧改动（已重建并上板）
 
-* `vivado/create_bd.tcl`：
-  * `clk_wiz_src.CONFIG.PHASE_DUTY_CONFIG = true` —— 这是让 DRP 相位字**真正接入**
-    MMCM 配置重建逻辑的开关（原来写死静态 generic，相位恒 90°）；
+> **注意（方案 A 之后）**：本节记录的是当时那一版 bitstream 的改动。`vivado/create_bd.tcl`
+> 后来换成了「裸 MMCM + 极简 DRP 控制器」（方案 A），串口做成 `-uart` 参数；
+> `clk_wiz_src` 与当时的两个补丁脚本都已不存在。当前脚本以
+> [`../vivado/README.md`](../vivado/README.md) 与 `create_bd.tcl` 的注释为准。
+
+* 当时改的 `vivado/create_bd.tcl`：
+  * `clk_wiz_src.CONFIG.PHASE_DUTY_CONFIG = true` —— 让那一版的 DRP 相位字接入 MMCM 配置
+    重建逻辑（原来写死静态 generic，相位恒 90°）；
   * PS7 使能 UART1（MIO48/49、115200 8N1），并把 MIO Bank0/Bank1 供电写成
     `PCW_PRESET_BANK0_VOLTAGE=LVCMOS 3.3V` / `BANK1=LVCMOS 1.8V`（Zynq-7000 的 MIO
-    I/O 标准由供电轨决定，这两项是声明性属性），脚本里带回读校验。
+    I/O 标准由供电轨决定，这两项是声明性属性），脚本里带回读校验——**这一步现在等价于
+    `create_bd.tcl -uart uart1`（默认值）**。
 * 重建产物：`build/vivado/dpm_system.xsa`、`bd_proj/dpm_bd.runs/impl_1/dpm_system_wrapper.bit`
   （WNS **+0.110ns**、WHS +0.051ns）。
-* 复验：`patch_enable_ps_uart.tcl`（dry）回读 `PCW_EN_UART1=1 / MIO 48 .. 49`；
-  `patch_enable_src_phase.tcl`（dry）回读 `PHASE_DUTY_CONFIG=true`。
+* 复验（当时用两个补丁脚本的 dry run）。**现在等价的做法**：`create_bd.tcl` 自带的回读校验
+  （`PS7_UART_CHECK: EN_UART1=1 IO='MIO 48 .. 49'`）+
+  `python3 ps/tools/check_bd_uart.py build/vivado/dpm_system.xsa`。
 
 ## 2. 上板启动流程（可复现）
 

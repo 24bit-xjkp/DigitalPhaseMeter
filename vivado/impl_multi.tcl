@@ -3,16 +3,16 @@
 # 用法：
 #   vivado -mode batch -source vivado/impl_multi.tcl -tclargs 6
 #
-# 前置条件：先跑 package_ip.tcl / create_bd.tcl / apply_timing_strategy.tcl / 综合
+# 前置条件：先跑 package_ip.tcl / package_src_ip.tcl / create_bd.tcl / 综合（见 build_bitstream.tcl）
 #
 # 背景：Vivado 的 place/route 有可观的 run-to-run 差异（同一网表、同一策略实测
 # WNS 曾在 +0.006 与 -0.202 之间波动），因此「跑一次通过」不能作为签核结论，
 # 必须多次独立尝试并保留余量最好的一次（结果与所选那次的路由/时序报告一起留存）。
 #
 # 注意：本脚本会在每次尝试前**覆盖** impl_1 的 place/route directive（用于扫不同布局布线
-# 组合），因此它会覆盖 apply_timing_strategy.tcl 选定的官方策略。**签核请以
-# apply_timing_strategy.tcl + build_bitstream.tcl 那次为准**（当前为 Performance_Retiming，
-# WNS +0.270ns）；本脚本用于评估余量的稳定性/寻找更好的布局。
+# 组合），因此它会覆盖 build_bitstream.tcl 选定的官方策略。**签核请以 build_bitstream.tcl
+# 那次为准**（它启动 run 前会把策略写回 Performance_Retiming，当前 WNS +0.270ns）；
+# 本脚本用于评估余量的稳定性/寻找更好的布局。
 #
 # 另外：跑本脚本前确认没有别的 Vivado 在跑（并发会互相覆盖工程里的步骤参数）。
 #

@@ -90,8 +90,8 @@ ps/build/host_main --stdio                    # 协议字节走 stdin/stdout
 | 测量模型 | `gate = target + ceil(T_sig/T_slow)`；`edge = floor(gate·f_sig/f_slow)`；相位先量化到整数个 DSP 周期（整数 RNE）再乘沿数 → `phase_cnt = cycles·edge` | 与 `spec/gen_golden.py` 同口径，逐位一致 |
 | 时间推进 | **每次 AXI 事务**推进 64 个慢周期；主循环每轮再用 `--speed`（默认 4096）额外推进，让虚拟时间与墙钟解耦（宿主机负载高时 `poll(2ms)` 实际节拍会变慢，否则 1ms 流间隔永远等不到） | 真实硬件是自由运行的时钟 |
 | 源不可用 | 片内源未使能/未锁定，或外部引脚无信号（默认）→ 两路恒低：`busy` 恒为 1、不产生结果、`RESULT_SEQ` 不自增 | 与真实 PL 的「等参考沿」一致 |
-| 片内源相位 | **固定 90°**（`DPM_MODEL_SRC_PHASE_MDEG`）：与实测结论一致——当前 bitstream 下 DRP 相位字没接到 MMCM，写它不改变输出相位 | 等 `PHASE_DUTY_CONFIG` 补丁后可改为按请求相位算 |
-| DRP 映射 | `0x200` CLKFBOUT、`0x208`/`0x214` 分频（低字节 = D）、`0x20C`/`0x218` 相位（**毫度**）、`0x25C` Load=0x07、状态寄存器 `0x004` | 与 `spec/drp_semantics.json`、`dpm_regs.h` 一致 |
+| 片内源相位 | **固定 90°**（`DPM_MODEL_SRC_PHASE_MDEG`）：与上一版 clk_wiz 方案的实测结论一致（DRP 相位字没接到 MMCM，写它不改变输出相位） | 当前方案（裸 MMCM + 极简 DRP 控制器）下相位就是 MMCM 的相位寄存器，仿真后端可按需改为「跟随请求相位」 |
+| DRP 映射 | `0x200` CLKFBOUT、`0x208`/`0x214` 分频（低字节 = D）、`0x20C`/`0x218` 相位（**毫度**）、`0x25C` Load=0x07、状态寄存器 `0x004`（**上述 clk_wiz 语义映射已作废**：当前方案写的是 MMCM 原始 16 位寄存器，`0x43C1_0000` 段的 `0x08..0x24` + `0x28` LOAD） | `spec/drp_semantics.json`、`dpm_regs.h` 记录的是上一版；当前映射见 `vivado/package_src_ip.tcl` 与 `build/analysis/golden/mmcm_encode.py` |
 
 ## 3. 测试与实测证据
 
@@ -184,8 +184,8 @@ $ python3 spec/validate_sweep.py --server "./ps/build/host_main --device {device
 
 ## 4. 上板步骤（JTAG + UART）
 
-前提：`docs/bringup.md` 里的 BD 补丁（使能 PS UART0/MIO48-49）已应用并重建 bitstream。
-当前 BD 的 `PCW_EN_UART0 = 0`、MIO 未分配，**没有补丁时 PS 侧程序跑得起来但串口没输出**。
+前提：串口由 `vivado/create_bd.tcl` 直接给出（默认 `-uart uart1`，即 PS UART1 / MIO48-49），
+重建 BD 与 bitstream 后即可用；详细步骤见 `docs/bringup.md` 第 0–1 节。
 
 1. **生成 bitstream 并导出 XSA**（见 `vivado/build_bitstream.tcl`），启动 Vivado/Vitis 的
    硬件服务器（`hw_server`），或直接用 `xsct`：
@@ -228,8 +228,8 @@ $ python3 spec/validate_sweep.py --server "./ps/build/host_main --device {device
 | 交叉编译 + 链接 + `nm -u` 无未定义符号 | **已验证**（本机，见 1 节输出） |
 | 宿主机单元测试 433 项 + pty 端到端 256 项 | **已验证**（见 3.1/3.2） |
 | 与独立参考实现（`spec/validate_sweep.py`）28/28 一致 | **已验证**（见 3.4） |
-| 片内源相位在线可改 | **实测为否**：当前 bitstream 的 DRP 相位字没接到 MMCM，`clk_out2` 恒为静态 90.000°（`spec/drp_semantics.json`、`docs/verify-drp.md`）。固件仍按协议写 `0x218`（补丁后即生效），但 `IDENTIFY.flags.b4 = 0`、`SET_SIG/GET_SIG` 的 `phaseField` 回 0，仿真后端也把相位固定 90° |
-| 真实 PL 上的 DRP 重配置时序（等 `locked` 0→1、Safe Clock Startup） | **未上板验证**：逻辑按实测结论实现（`0x004` 状态位 + `0x25C` Load=0x07），但没有板子实测 |
+| 片内源相位在线可改 | **未上板验证**：上一版 clk_wiz 方案的实测结论是「相位字没接到 MMCM，`clk_out2` 恒为静态 90.000°」（`spec/drp_semantics.json`、`docs/verify-drp.md`）；当前方案（裸 MMCM + 极简 DRP 控制器）改由 PS 直接写 MMCM 相位寄存器，但这条通路仍只有 DRP 从端模型与 `validate_bd_design` 的证据，上板前不要当成已生效 |
+| 真实 PL 上的 DRP 重配置时序（等 `locked` 0→1、Safe Clock Startup） | **未上板验证**：旧方案的逻辑按当时的实测结论实现（`0x004` 状态位 + `0x25C` Load=0x07）；当前方案见 `vivado/package_src_ip.tcl` |
 | UART 中断路径、GIC 中断号 61/59 | **未上板验证**（轮询路径已通过 pty 验证） |
 | PS 时钟配置（`DPM_GTIMER_HZ` 默认 333.333MHz） | **未上板验证**：数值只影响超时判定的松紧，不影响协议与数值 |
 | 外部引脚输入路径 | 宿主机侧用 `--ext-present` 模拟并对照金标准通过；真实引脚未测 |
@@ -237,8 +237,10 @@ $ python3 spec/validate_sweep.py --server "./ps/build/host_main --device {device
 ## 6. 与冻结接口的关系
 
 - `ps/include/dpm_regs.h`、`dpm_calc.h`、`dpm_proto.h` 由 Lead 冻结，本目录只读使用；
-- DRP 映射与相位可写性以 `dpm_regs.h` + `spec/drp_semantics.json` 的**实测结论**为准：
-  分频字低字节 = D 本体、相位是独立 32 位毫度字（`0x20C`/`0x218`）、状态寄存器在 `0x004`；
+- DRP 映射与相位可写性以 `dpm_regs.h` + `spec/drp_semantics.json` 的记录为准——注意它们记录的是
+  **上一版 clk_wiz_src 方案**（分频字低字节 = D 本体、相位是独立 32 位毫度字 `0x20C`/`0x218`、
+  状态寄存器在 `0x004`）；当前方案写的是 MMCM 原始 16 位寄存器（`0x08..0x24` + `0x28` LOAD），
+  映射见 `vivado/package_src_ip.tcl` 与 `build/analysis/golden/mmcm_encode.py`；
 - 频率字段 `freqMilliHz` 的**单位是 Hz**（历史命名），公式用不溢出的等价形式
   （见 `dpm_calc.h` 与 `docs/ps-protocol.md` §5）；
 - 通知帧是 `0xE1`（STREAM_DATA）/ `0xE2`（EVENT），响应是 `请求|0x80`，错误 `0xFE/0xFF`。

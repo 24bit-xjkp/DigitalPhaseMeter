@@ -10,7 +10,8 @@
     - UART0/UART1 是否使能、外设号、波特率
     - MIO 分配情况（哪个 MIO 给了 UART，tx/rx 方向）
     - 对应到 PS 侧软件里应该用的 UART 基地址（UART0 = 0xE0001000，UART1 = 0xE0000000）
-退出码：0 = 至少一个 UART 可用；1 = 没有可用的 PS 串口（需要按 docs/bringup.md 打补丁）。
+退出码：0 = 至少一个 UART 可用；1 = 没有可用的 PS 串口（用 `vivado/create_bd.tcl -uart uart1`
+重建 BD，见 docs/bringup.md 第 0 节）。
 """
 
 from __future__ import annotations
@@ -95,7 +96,8 @@ def main() -> int:
         print(f"  MIO：树长度 {len(mio_periph)} != {MIO_COUNT}，无法解析")
 
     if not enabled:
-        print("PS_UART: none（需要按 docs/bringup.md 第 1 节给 BD 打补丁并重建 bitstream）")
+        print("PS_UART: none（BD 里没配串口：用 vivado/create_bd.tcl -uart uart1 重建，"
+              "见 docs/bringup.md 第 0 节）")
         return 1
     for uart, io, baud in enabled:
         if baud not in ("115200", "?"):

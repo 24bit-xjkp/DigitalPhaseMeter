@@ -1,5 +1,11 @@
 # 片内信号源 clk_wiz 的 DRP 位域语义实测（task-3）
 
+> **范围说明（方案 A 之后）**：本文的全部结论都是针对**上一版 `clk_wiz_src`（厂商 IP + 语义寄存器
+> 文件）**的实测记录。该 IP 后来被「裸 MMCM + 极简 DRP 控制器」（方案 A）取代，`clk_wiz_src`
+> 已不在 BD 里，寄存器映射也换成 MMCM 的原始 16 位寄存器（`0x08..0x24` + `0x28` LOAD）。
+> 本文保留作历史对照；当前方案请以 `vivado/package_src_ip.tcl`、`vivado/README.md`
+> 与 `build/analysis/golden/mmcm_encode.py` 为准。
+
 本文记录**用厂商 IP 自己的仿真模型实测**得到的结论：`build/vivado/bd_proj/.../dpm_system_clk_wiz_src_0`
 （clk_wiz v6.0，MMCM + 动态重配置，参考 50MHz）的 DRP 寄存器文件到底怎么解释，
 以及「通过 DRP 在线改相位」在当前 PL 方案下是否成立。
@@ -284,20 +290,22 @@ DRP_RD_STATUS off=0x27c val=0x00000000（寄存器文件 word 31，非状态寄�
 
 重配置期间两路输出停止约 9µs，只能在测量空闲时改。
 
-**若要恢复在线相位能力**，最小改动是给 `vivado/create_bd.tcl` 的 `clk_wiz_src` 加
-`CONFIG.PHASE_DUTY_CONFIG {true}` 后按 `dpm-vivado-ip` 的顺序重新生成 IP/BD
-（`package_ip.tcl` → `create_bd.tcl` → `apply_timing_strategy.tcl` → `build_bitstream.tcl`）。
-届时：
+**若要恢复在线相位能力**：这里当时设想的路径（给 `clk_wiz_src` 加
+`CONFIG.PHASE_DUTY_CONFIG {true}`，再按 `package_ip.tcl` → `create_bd.tcl` →
+`apply_timing_strategy.tcl` → `build_bitstream.tcl` 重建）**已经作废**：那个 IP 后来被
+「裸 MMCM + 极简 DRP 控制器」（方案 A）取代，`clk_wiz_src` 与补丁脚本都已删除。
+当前方案下相位就是 MMCM 的相位寄存器（由 PS 写 `0x43C1_0000` 段的寄存器镜像），
+验收入口是 `build/analysis/drp_tb/` 的 DRP 从端模型 + 上板确认，不再是 `sim/run_drp_tb.sh` 里
+那套 clk_wiz 语义寄存器探针。
+
+> 以下记录保留作对照：当时设想的写法是「写 0x218 = 22500（毫度）」。
 
 ```text
 写 0x218 = 22500                              // clk_out2（CLKOUT1）相位 = 22.5°（毫度整数）
 ```
 
-这条路径**未实测**（需要重建 IP，属 `vivado/` 的写入范围）。
-**重建之后，验收入口就是同一份激励**：直接复跑 `sim/run_drp_tb.sh`，
-此时 `DRP_PHASEW` 行的 `delay_ps` 应随写入的毫度值变化（0/22.5°/45°/90°/180°/270° →
-0/2500/5000/10000/20000/30000 ps @ D=40），同时 `phase_controllable` 才能从 `false` 改成 `true`。
-如果不想动 IP，另一条路是在 PL 内做相位可编程的信号源（`SignalSource` 的相位寄存器通路已存在），
+这条路径**未实测**，而且随着方案 A 的落地已经不需要走它。
+如果要做相位可编程的信号源，另一条路是在 PL 内做（`SignalSource` 的相位寄存器通路已存在），
 代价是相位差要自己在测量域里保证。
 
 ---
