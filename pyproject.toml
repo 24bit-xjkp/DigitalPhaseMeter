@@ -1,0 +1,46 @@
+[build-system]
+requires = ["uv_build>=0.11.7,<0.13.0"]
+build-backend = "uv_build"
+
+[project]
+name = "dpm-host"
+version = "0.1.0"
+description = "DigitalPhaseMeter PC 侧 Python 上位机（串口协议客户端、CLI、Tk GUI 与 PL 仿真后端）"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "24bit-xjkp", email = "2283572185@qq.com" }]
+# 运行时依赖只允许纯标准库 + pyserial；GUI 用标准库 tkinter，不引入其它三方包。
+dependencies = ["pyserial>=3.5"]
+
+[dependency-groups]
+dev = ["black>=26.5.1", "isort>=9.0.1", "pytest>=9.1.1", "pytest-xdist>=3.8.0"]
+
+[project.scripts]
+dpm-host = "dpm_host.cli:main"
+
+[tool.uv.build-backend]
+module-root = "host"
+module-name = "dpm_host"
+
+[tool.black]
+line-length = 140
+skip-string-normalization = false
+target-version = ["py314"]
+include = "(\\.pyi?)$"
+exclude = '''
+/(
+    \.git
+  | \.mypy_cache
+  | \.vscode
+  | \.VSCodeCounter
+  | \.xmake
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 140

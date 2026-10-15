@@ -6,7 +6,12 @@
 测量完成中断）、Vivado IP 打包与 block design 均已完成，并分别用 Verilator（测量通路）与 Vivado xsim
 （AXI4 接口与顶层 IP）验证。测量输入有两条来源，由 PL 内的选择寄存器切换：**外部引脚**（`sig1` → W18、
 `sig2` → W19）与**片内信号源**（PL 内 MMCM 的两路输出，**频率与相位差都由 MMCM 的动态重配置在线设定**，
-两路输出直接作为被测信号）。PS 侧软件尚未开始，见[路线图](#路线图)。
+两路输出直接作为被测信号）。**PS 侧软件与 PC 侧上位机已完成**：PS 侧是 freestanding 裸机 C 串口服务端（读写 AXI 寄存器与
+MMCM 的 DRP 口），PC 侧是 Python 上位机（CLI + Tk GUI，相位差 0~360° 与频率显示、单次/连续、
+片内源频率与相位、输入源切换、多频点多相位扫描）。协议见 [`docs/ps-protocol.md`](docs/ps-protocol.md)，
+验证结果见 [`docs/verify-report.md`](docs/verify-report.md)（7 频点 × 4 相位请求共 28 个测量点
+在 pty 串口上全部通过；**但相位在线扫描当前不可用**，原因是 clk_wiz 的 DRP 相位字未接入
+MMCM 重配置逻辑，实测两路输出恒相差 90°——详见 [`docs/verify-drp.md`](docs/verify-drp.md) 与路线图第 5 项）。
 
 ## 测量原理
 
@@ -73,10 +78,16 @@ PS 通过 AXI4-Lite 写它的动态重配置寄存器（见下文「片内信号
      寄存器映射见 PG065（Clocking Wizard）的 Dynamic Reconfiguration 章节。改完参数写「Load」
      寄存器让 MMCM 重新锁定，**期间两路输出会停止**（应在测量空闲时改）。
    - **相位范围随分频比缩小**：MMCM 每个输出的相位寄存器覆盖 64 个 VCO 周期，换成输出相位是
-     `64 / D` 个输出周期（D = CLKOUTx 分频）。初始工作点 25MHz（VCO 800MHz、D = 32）→ 2 个输出
-     周期，0～360° 全覆盖；D = 64（12.5MHz）时刚好 1 个周期，仍可覆盖 0～360°；D = 128（6.25MHz）
-     只剩半个周期，只能表示 0～180°。需要更低频率时优先让 PS 用 DRP 把 VCO 调到下限（600MHz），
-     而不是把 D 拉到 128。
+     `64 / D` 个输出周期（D = CLKOUTx 分频）。当前工作点 25MHz（VCO 1000MHz、D = 40）→ 1.6 个
+     输出周期；相位分辨率是 **`45 / D` 度**（VCO 相位步长 = 1/8 VCO 周期 = 125ps 折算到输出），
+     D = 40 时 1.125°。需要更低频率时优先让 PS 用 DRP 把 VCO 调到下限（600MHz），
+     而不是把 D 拉大（D 越大相位可表示范围越小）。
+   - **⚠ 相位在线可调当前不生效**：实测（`sim/run_drp_tb.sh`，43 组探针）证明本 BD 生成的
+     `clk_wiz_src` 把 DRP 寄存器文件里的相位字（0x20C / 0x218，单位毫度）**没有接到 MMCM 的
+     重配置逻辑**，两路输出恒相差静态配置的 90°；**频率可以在线改**（分频字有效）。
+     要恢复在线改相位需给该 IP 加 `CONFIG.PHASE_DUTY_CONFIG {true}` 后重建
+     （[`vivado/patch_enable_src_phase.tcl`](vivado/patch_enable_src_phase.tcl)）。
+     结论与原始输出见 [`docs/verify-drp.md`](docs/verify-drp.md)。
 2. **两路输出与外部输入共用同一条异步采样链**：切换不改变测量通路的延迟，相位差只被量化到
    1 个测量时钟周期（即相位计本身的分辨率，400MHz 下 2.5ns）。使能无效（`SIG_CTRL.enable = 0`）
    时片内源两路输出被门成恒低。
@@ -174,6 +185,10 @@ test/                               Verilator C++ 测试（测量通路），每
 sim/                                Vivado xsim 的 SystemVerilog 测试激励与运行脚本（AXI4 接口/顶层 IP）
 vivado/                             Vivado IP 打包、block design、综合实现脚本与顶层约束
 build/chisel/<Name>/                Chisel 生成的 SystemVerilog 与 filelist.f（构建产物，不入库）
+ps/                                 PS 侧裸机 C 服务端（串口协议、AXI/DRP 驱动、startup/linker）
+host/                               PC 侧 Python 上位机（协议、CLI、Tk GUI、仿真后端）
+docs/                               协议、验证计划、验证报告、上板 bring-up
+spec/                               金标准向量、独立仿真服务端、规格自检（三方实现交叉校验）
 .agents/skills/                     项目级 skill：RTL 生成、测试、测量模型、AXI/Vivado、交付前检查
 ```
 
@@ -233,8 +248,17 @@ vivado -mode batch -source vivado/build_bitstream.tcl  # 综合 / 实现 / bitst
 1. ~~**AXI4 接口** —— 为 `Controller` 增加 AXI4(-Lite) 寄存器接口，与 PS 侧通信。~~
 2. ~~**Vivado 工程** —— 打包 IP、创建 PS↔PL 互联的 block design、综合与实现。~~
 3. ~~**片内信号源** —— 用 PLL/MMCM 生成两路同频不同相的信号，对电路做片内测试。~~（PL 内 MMCM 的两个输出同频、相位差可调，两路输出直接作为被测信号；频率与相位差由 PS 通过 MMCM 的动态重配置口在线设定，外部/内部输入切换寄存器在测量 IP 的 AXI 寄存器区）
-4. **PS 侧软件** —— 基于串口的交互系统：接受 PC 指令、驱动 PL 侧测量、回传结果。计划支持：
-   - 可变闸门时间
-   - 连续 / 单次测量
-   - 片内可动态配置频率与相位的信号源
-   - 片内 / 片外信号源切换
+4. ~~**PS 侧软件** —— 基于串口的交互系统：接受 PC 指令、驱动 PL 侧测量、回传结果。~~ 已实现，
+   见 [`ps/`](ps/README.md)（Zynq PS 侧 freestanding 裸机 C 服务端）与 [`host/`](host/README.md)
+   （PC 侧 Python 上位机：CLI + Tk GUI）。支持可变闸门时间、连续/单次测量、片内/片外信号源切换、
+   片内源频率与相位设定、流模式上报；协议见 [`docs/ps-protocol.md`](docs/ps-protocol.md)。
+   验证结果见 [`docs/verify-report.md`](docs/verify-report.md)（28 个测量点全部通过，
+   但**相位扫描未真正生效**，见下）。
+5. **PL 侧：让在线相位扫描真正可用** —— `sim/run_drp_tb.sh` 的实测（43 组探针）证明当前
+   `clk_wiz_src` 的 DRP 相位字**没有接入 MMCM 重配置逻辑**（`PHASE_DUTY_CONFIG=false`），
+   片内源两路输出恒相差 90°，因此「多相位点扫描」只验证了一个相位点。
+   补丁脚本已就绪（[`vivado/patch_enable_src_phase.tcl`](vivado/patch_enable_src_phase.tcl)，
+   dry-run 通过），需要重建 IP/BD 后复跑 `sim/run_drp_tb.sh` 确认相位字生效。
+6. **PS UART 与上板** —— 当前 bitstream 的 PS7 未使能 UART、MIO 全部未分配，
+   PS 侧串口服务端因此无法上板通信；[`vivado/patch_enable_ps_uart.tcl`](vivado/patch_enable_ps_uart.tcl)
+   与 [`docs/bringup.md`](docs/bringup.md) 给出了补齐路径（dry-run 通过，重建与上板未做）。

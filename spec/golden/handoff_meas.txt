@@ -1,0 +1,25 @@
+
+****** xsim v2025.2 (64-bit)
+  **** SW Build 6299465 on Fri Nov 14 12:34:56 MST 2025
+  **** IP Build 6300035 on Fri Nov 14 10:48:45 MST 2025
+  **** SharedData Build 6298862 on Thu Nov 13 04:50:51 MST 2025
+  **** Start of session at: Thu Oct 15 02:22:19 2026
+    ** Copyright 1986-2022 Xilinx, Inc. All Rights Reserved.
+    ** Copyright 2022-2025 Advanced Micro Devices, Inc. All Rights Reserved.
+
+source xsim.dir/tb_handoff_src_measure_sim/xsim_script.tcl
+# xsim {tb_handoff_src_measure_sim} -autoloadwcfg -runall
+Time resolution is 1 ps
+run -all
+HANDOFF_INFO 0 开始：等 dspClock 锁定
+HANDOFF_INFO 1590000 dspClock 已锁定
+HANDOFF_INFO 1970000 片内源 MMCM 已锁定（复位后的初值）
+HANDOFF_INFO dspClock 在 0 ns 后锁定
+HANDOFF_MARK 4400000 reset done, read VERSION
+Command failed: Simulator command interrupted.
+
+Simulation engine not responding
+The simulator has terminated in an unexpected manner.  Please review the simulation log (xsim.log) for details.
+run: Time (s): cpu = 00:01:16 ; elapsed = 00:01:16 . Memory (MB): peak = 1447.730 ; gain = 0.000 ; free physical = 752 ; free virtual = 32290
+exit
+INFO: [Common 17-206] Exiting xsim at Thu Oct 15 02:23:36 2026...

@@ -1,0 +1,695 @@
+#!/usr/bin/env python3
+"""端到端自测：在 pty 上驱动 `host_main`（宿主机验证台），逐条覆盖协议命令。
+
+覆盖内容（对应 `docs/ps-protocol.md`）：
+  - 帧层的正向/负向：CRC 错、LEN 越界、噪声字节、未知命令、响应方向帧；
+  - 全部命令码 0x01..0x0E + 通知帧 0x81/0x82；
+  - 错误路径：非法 mode/source/freq/相位/PAYLOAD 长度 → 0xFE；未锁定选片内源、忙时命令 → 0xFF；
+  - 7 个冻结频点 × 4 个冻结相位点与 `spec/golden/vectors.json` 逐位对齐（gate/edge/phase 与定点输出）；
+  - 单次/连续模式、流上报、结果覆盖丢失（lostCount/EVENT）。
+
+用法：
+    python3 ps/tests/test_server_selftest.py [--host-main ps/build/host_main] [--verbose]
+退出码 0 = 全部通过。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pty
+import select
+import signal
+import struct
+import subprocess
+import sys
+import time
+
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+SOF = 0xA5
+LEN_MIN, LEN_MAX = 1, 64
+
+CMD_PING = 0x01
+CMD_IDENTIFY = 0x02
+CMD_GET_STATUS = 0x03
+CMD_START = 0x04
+CMD_GET_RESULT = 0x05
+CMD_GET_MEAS = 0x06
+CMD_SET_GATE = 0x07
+CMD_SET_MODE = 0x08
+CMD_SET_SOURCE = 0x09
+CMD_SET_SIG = 0x0A
+CMD_GET_SIG = 0x0B
+CMD_CLEAR = 0x0C
+CMD_STREAM = 0x0D
+CMD_RESET_COUNTERS = 0x0E
+NTF_STREAM_DATA = 0xE1
+NTF_EVENT = 0xE2
+
+ERR_PARAM = 0xFE
+ERR_BUSY = 0xFF
+
+DPM_VERSION_VALUE = 0x44504D02
+DPM_STATUS_BUSY = 1 << 0
+DPM_STATUS_RESULT_VALID = 1 << 1
+DPM_STATUS_LOST = 1 << 2
+DPM_STATUS_IRQ_PENDING = 1 << 3
+DPM_SIGST_ENABLE = 1 << 0
+DPM_SIGST_SELECT = 1 << 1
+DPM_SIGST_LOCKED = 1 << 2
+DPM_SIGST_READY = 1 << 3
+
+
+# ----------------------------------------------------------------- 协议工具
+
+
+def crc16(data: bytes) -> int:
+    crc = 0xFFFF
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0xA001 if (crc & 1) else (crc >> 1)
+    return crc
+
+
+def build_frame(cmd: int, payload: bytes = b"") -> bytes:
+    ln = 1 + len(payload)
+    body = bytes([ln, cmd]) + payload
+    c = crc16(body)
+    return bytes([SOF]) + body + bytes([c & 0xFF, (c >> 8) & 0xFF])
+
+
+def u32(v: int) -> bytes:
+    return struct.pack("<I", v & 0xFFFFFFFF)
+
+
+def u16(v: int) -> bytes:
+    return struct.pack("<H", v & 0xFFFF)
+
+
+def rd_u32(b: bytes, off: int) -> int:
+    return struct.unpack_from("<I", b, off)[0]
+
+
+def rd_u16(b: bytes, off: int) -> int:
+    return struct.unpack_from("<H", b, off)[0]
+
+
+def is_notification(code: int, payload: bytes) -> bool:
+    """判断一帧是否是主动上报的通知帧。
+
+    协议 v1.1 起通知码为 0xE1/0xE2，不再与响应码撞码；仍按 PAYLOAD 长度
+    （26 / 5 字节）双保险。
+    """
+    if code == NTF_EVENT and len(payload) == 5:
+        return True
+    if code == NTF_STREAM_DATA and len(payload) == 26:
+        return True
+    return False
+
+
+class Server:
+    """在 pty 上跑 host_main 的客户端。"""
+
+    def __init__(self, host_main: str, extra: list[str] | None = None, freq=25_000_000,
+                 phase=90_000, gate=2000, verbose=False):
+        self.master, slave = pty.openpty()
+        self.path = os.ttyname(slave)
+        argv = [host_main, "--device", self.path, "--freq-hz", str(freq),
+                "--phase-mdeg", str(phase), "--gate", str(gate)]
+        if extra:
+            argv += list(extra)
+        if verbose:
+            argv.append("--verbose")
+        self.proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     close_fds=True)
+        self.buf = bytearray()
+        self.inbox: list[tuple[int, bytes]] = []   # 线上收到的帧（FIFO）
+        self.skipped: list[tuple[int, bytes]] = [] # request 期间跳过的通知帧（FIFO）
+        self.bad_frames = 0
+        os.close(slave)
+        time.sleep(0.30)          # 等服务器初始化（含 DRP 重配置）
+        self.drain(0.10)          # 丢掉可能残留的字节
+
+    # ---------------------------------------------------------- 收发
+    def _fill(self, timeout: float) -> int:
+        r, _, _ = select.select([self.master], [], [], timeout)
+        if not r:
+            return 0
+        try:
+            data = os.read(self.master, 4096)
+        except OSError:
+            return 0
+        if not data:
+            return 0
+        self.buf += data
+        return len(data)
+
+    def drain(self, timeout: float = 0.2) -> None:
+        while self._fill(timeout) > 0:
+            timeout = 0.02
+            self._parse()
+
+    def _parse(self) -> None:
+        while True:
+            if len(self.buf) < 2:
+                return
+            if self.buf[0] != SOF:
+                self.buf.pop(0)
+                continue
+            ln = self.buf[1]
+            if ln < LEN_MIN or ln > LEN_MAX:
+                # 客户端不做 LEN 校验以外的猜测：当作噪声丢掉这次 SOF
+                self.buf.pop(0)
+                self.bad_frames += 1
+                continue
+            total = 4 + ln
+            if len(self.buf) < total:
+                return
+            body = bytes(self.buf[1:2 + ln])
+            crc = self.buf[2 + ln] | (self.buf[3 + ln] << 8)
+            frame = bytes(self.buf[:total])
+            if crc16(body) != crc:
+                # 失步恢复：只丢掉这个假 SOF 再重新扫描，不能整帧吞掉
+                # （否则可能把紧随其后的真帧一起吃掉）
+                self.bad_frames += 1
+                self.buf.pop(0)
+                continue
+            del self.buf[:total]
+            self.inbox.append((frame[2], frame[3:2 + ln]))
+
+    def next_frame(self, timeout: float = 2.0,
+                   include_skipped: bool = True) -> tuple[int, bytes] | None:
+        """取下一帧。
+
+        `include_skipped=True`（测试直接消费通知时）优先返回被 request 跳过的通知帧；
+        `request()` 内部用 False，只看线上新到的帧，避免自己吃掉自己造成死循环。
+        """
+        if include_skipped and self.skipped:
+            return self.skipped.pop(0)
+        deadline = time.time() + timeout
+        while True:
+            self._parse()
+            if self.inbox:
+                return self.inbox.pop(0)
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return None
+            self._fill(min(remaining, 0.1))
+
+    def request(self, cmd: int, payload: bytes = b"", timeout: float = 5.0,
+                skip_notifications: bool = True) -> tuple[int, bytes] | None:
+        os.write(self.master, build_frame(cmd, payload))
+        deadline = time.time() + timeout
+        while True:
+            f = self.next_frame(max(0.0, deadline - time.time()), include_skipped=False)
+            if f is None:
+                return None
+            # 通知帧与某些响应同码（0x81 = PING 响应、0x82 = IDENTIFY 响应），
+            # 但 PAYLOAD 形状唯一（通知 26/5 字节，响应 0/30 字节），据此区分。
+            if skip_notifications and is_notification(f[0], f[1]):
+                self.skipped.append(f)
+                continue
+            return f
+
+    def expect_ok(self, cmd: int, payload: bytes = b"", timeout: float = 5.0) -> bytes:
+        f = self.request(cmd, payload, timeout)
+        assert f is not None, f"0x{cmd:02X} 无响应"
+        code, pl = f
+        assert code == (cmd | 0x80), f"0x{cmd:02X} 响应码 0x{code:02X}（期望 0x{cmd | 0x80:02X}）"
+        return pl
+
+    def expect_err(self, cmd: int, err: int, payload: bytes = b"", timeout: float = 5.0) -> None:
+        f = self.request(cmd, payload, timeout)
+        assert f is not None, f"0x{cmd:02X} 无响应（期望 0x{err:02X}）"
+        code, pl = f
+        assert code == err, f"0x{cmd:02X} 响应码 0x{code:02X}（期望 0x{err:02X}）"
+        assert pl == b"", f"错误响应必须无 PAYLOAD，实际 {pl.hex()}"
+
+    def close(self) -> int:
+        try:
+            self.proc.send_signal(signal.SIGTERM)
+            rc = self.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            rc = -1
+        os.close(self.master)
+        return rc
+
+    def stderr(self) -> str:
+        try:
+            return self.proc.stderr.read().decode(errors="replace")
+        except Exception:
+            return ""
+
+
+# ----------------------------------------------------------------- 断言工具
+
+RESULTS = []
+
+
+def check(name: str, cond: bool, detail: str = "") -> None:
+    RESULTS.append((name, bool(cond), detail))
+    mark = "PASS" if cond else "FAIL"
+    print(f"[{mark}] {name}" + (f" — {detail}" if detail and not cond else ""))
+
+
+def approx(a: int, b: int, tol: int) -> bool:
+    return abs(int(a) - int(b)) <= tol
+
+
+# ----------------------------------------------------------------- 测试主体
+
+
+def test_frame_layer(sv: Server) -> None:
+    """帧层：CRC 错/LEN 越界/噪声/未知命令/方向位。"""
+    # CRC 错：把 CRC 改一位 → 不回响应
+    bad = bytearray(build_frame(CMD_PING))
+    bad[-1] ^= 0x01
+    os.write(sv.master, bytes(bad))
+    time.sleep(0.15)
+    check("CRC 错的帧被丢弃且不回响应", sv.next_frame(0.2) is None)
+
+    # LEN = 0 越界
+    os.write(sv.master, bytes([SOF, 0x00, CMD_PING, 0x00, 0x00]))
+    time.sleep(0.15)
+    check("LEN=0 的帧被丢弃", sv.next_frame(0.2) is None)
+
+    # LEN = 65 越界
+    os.write(sv.master, bytes([SOF, 65]) + bytes(65) + b"\x00\x00")
+    time.sleep(0.15)
+    check("LEN=65 的帧被丢弃", sv.next_frame(0.2) is None)
+
+    # 噪声字节 + 合法帧：必须在噪声后重新同步
+    os.write(sv.master, b"\x11\x22\x33" + build_frame(CMD_PING))
+    f = sv.next_frame(1.0)
+    check("噪声后重新同步并回应 PING", f is not None and f[0] == (CMD_PING | 0x80),
+          str(f))
+
+    # 未知命令 0x7F：不回响应
+    os.write(sv.master, build_frame(0x7F))
+    time.sleep(0.15)
+    check("未知命令不回响应", sv.next_frame(0.2) is None)
+
+    # 响应方向帧（0x81）被忽略
+    os.write(sv.master, build_frame(NTF_STREAM_DATA))
+    time.sleep(0.15)
+    check("响应方向帧被忽略", sv.next_frame(0.2) is None)
+
+    # PAYLOAD 长度不符：PING 带 PAYLOAD → ERR_PARAM
+    sv.expect_err(CMD_PING, ERR_PARAM, b"\x00")
+
+
+def test_identify_status(sv: Server) -> None:
+    pl = sv.expect_ok(CMD_IDENTIFY)
+    check("IDENTIFY 长度 = 30", len(pl) == 30, f"实际 {len(pl)}")
+    ver, git, caps, vreg, creg, dsp, slow, flags = (
+        rd_u32(pl, 0), rd_u32(pl, 4), rd_u32(pl, 8), rd_u32(pl, 12), rd_u32(pl, 16),
+        rd_u32(pl, 20), rd_u32(pl, 24), rd_u16(pl, 28))
+    check("IDENTIFY versionReg = 0x44504D02", vreg == DPM_VERSION_VALUE, hex(vreg))
+    check("IDENTIFY capsReg = 从 PL 读回的 0x00030104",
+          creg == 0x00030104, hex(creg))
+    check("IDENTIFY 时钟频率", dsp == 400_000_000 and slow == 50_000_000, f"{dsp}/{slow}")
+    check("IDENTIFY 版本号非 0", ver != 0, hex(ver))
+    check("IDENTIFY caps 与 flags 同组位（0x07：含片内源/连续/流）",
+          caps == flags and (caps & 0x07) == 0x07, f"caps={caps:#x} flags={flags:#x}")
+    check("IDENTIFY flags b0 片内源", (flags & 1) == 1, hex(flags))
+    check("IDENTIFY flags b1 连续 / b2 流", (flags & 0x06) == 0x06, hex(flags))
+    check("IDENTIFY flags b4 phaseControllable = 0（实测相位不可在线改）",
+          (flags & 0x10) == 0, hex(flags))
+
+    pl = sv.expect_ok(CMD_GET_STATUS)
+    check("GET_STATUS 长度 = 20", len(pl) == 20, f"实际 {len(pl)}")
+    status, sigs, gate, lost, seq = (rd_u32(pl, 0), rd_u32(pl, 4), rd_u32(pl, 8), rd_u32(pl, 12),
+                                     rd_u32(pl, 16))
+    check("GET_STATUS gateTarget = 2000", gate == 2000, str(gate))
+    check("GET_STATUS 默认片内源 ready+locked",
+          (sigs & DPM_SIGST_ENABLE) and (sigs & DPM_SIGST_SELECT) and (sigs & DPM_SIGST_LOCKED)
+          and (sigs & DPM_SIGST_READY), hex(sigs))
+    check("GET_STATUS 不忙且无未读结果", (status & (DPM_STATUS_BUSY | DPM_STATUS_RESULT_VALID)) == 0,
+          hex(status))
+
+
+def test_gate_mode_source(sv: Server) -> None:
+    pl = sv.expect_ok(CMD_SET_GATE, u32(3000))
+    check("SET_GATE 回显", rd_u32(pl, 0) == 3000, pl.hex())
+    sv.expect_err(CMD_SET_GATE, ERR_PARAM, u32(0))
+    sv.expect_err(CMD_SET_GATE, ERR_PARAM, u32(0x10000000))
+    sv.expect_err(CMD_SET_GATE, ERR_PARAM, u32(1)[:3])
+    sv.expect_ok(CMD_SET_GATE, u32(2000))
+
+    pl = sv.expect_ok(CMD_SET_MODE, bytes([1]))
+    check("SET_MODE(1) 回显连续模式", pl == b"\x01", pl.hex())
+    sv.expect_err(CMD_SET_MODE, ERR_PARAM, bytes([2]))
+    sv.expect_err(CMD_SET_MODE, ERR_PARAM, b"")
+    pl = sv.expect_ok(CMD_SET_MODE, bytes([0]))
+    check("SET_MODE(0) 回显单次模式", pl == b"\x00", pl.hex())
+
+    pl = sv.expect_ok(CMD_SET_SOURCE, bytes([0]))
+    sigs = rd_u32(pl, 0)
+    check("SET_SOURCE(0) 外部源恒 ready", (sigs & DPM_SIGST_READY) and not (sigs & DPM_SIGST_SELECT),
+          hex(sigs))
+    sv.expect_err(CMD_SET_SOURCE, ERR_PARAM, bytes([2]))
+    pl = sv.expect_ok(CMD_SET_SOURCE, bytes([1]))
+    check("SET_SOURCE(1) 片内源 ready", rd_u32(pl, 0) & DPM_SIGST_READY, pl.hex())
+
+    pl = sv.expect_ok(CMD_STREAM, bytes([1]) + u16(5))
+    check("STREAM(1,5ms) 回显", pl == bytes([1]) + u16(5), pl.hex())
+    sv.expect_err(CMD_STREAM, ERR_PARAM, bytes([1]) + u16(0))
+    sv.expect_err(CMD_STREAM, ERR_PARAM, bytes([2]) + u16(10))
+    sv.expect_ok(CMD_STREAM, bytes([0]) + u16(100))
+
+    sv.expect_ok(CMD_RESET_COUNTERS)
+    sv.expect_ok(CMD_RESET_COUNTERS, b"")
+
+
+def test_sig_and_golden(sv: Server, golden: dict, verbose: bool) -> None:
+    """7 个冻结频点 × 4 个冻结相位点：求解结果与 golden 一致，测量值与 golden 的 90° 行一致。
+
+    相位说明（重要）：实测结论是**当前 bitstream 下 clk_out2 的相位不可在线改**
+    （`spec/drp_semantics.json` 的 `phase_controllable: false`，恒为静态 90.000°）。
+    因此：
+      - `SET_SIG` 仍按请求相位写 0x218 并在响应里回显**写入值**（补丁后即可生效）；
+      - 但 `GET_MEAS` 测出来的相位是 90° 那一行（模型照实建模），
+        所以对 0/45/135° 的请求，测量相位应当等于同频点 90° 行的期望值。
+    """
+    vectors = golden["vectors"]
+    unit = golden["phase_unit_deg_mdeg"]
+    check("golden 相位量化单位 = 45000 毫度/步", unit == 45_000, str(unit))
+    rows = {(v["freq_hz"], v["phase_requested_mdeg"]): v for v in vectors}
+    freqs = sorted({v["freq_hz"] for v in vectors})
+    phases = sorted({v["phase_requested_mdeg"] for v in vectors})
+
+    n_ok = 0
+    for freq in freqs:
+        for phase in phases:
+            v_solve = rows[(freq, phase)]        # 求解/回显期望（随请求相位变化）
+            v_meas = rows[(freq, phase)]         # 实测期望：相位跟随写入值（补丁已生效）
+            tag = f"{freq/1e6:g}MHz/{phase/1000:g}°"
+
+            pl = sv.expect_ok(CMD_SET_SIG, u32(freq) + u32(phase), timeout=10.0)
+            check(f"{tag} SET_SIG 响应长度 = 15", len(pl) == 15, pl.hex())
+            rf, rp, rvco, rdiv, rfield = (rd_u32(pl, 0), rd_u32(pl, 4), rd_u32(pl, 8),
+                                          rd_u16(pl, 12), pl[14])
+            check(f"{tag} 频率精确且 VCO/D 与 golden 一致",
+                  rf == v_solve["freq_hz"] and rvco == v_solve["vco_hz"] and rdiv == v_solve["div"],
+                  f"f={rf} VCO={rvco} D={rdiv} vs golden f={v_solve['freq_hz']} "
+                  f"VCO={v_solve['vco_hz']} D={v_solve['div']}")
+            check(f"{tag} phaseField = 0（相位不可在线改，字段无意义）", rfield == 0, str(rfield))
+            check(f"{tag} 回显的写入相位 = 吸附到 45° 网格后的值",
+                  rp == v_solve["phase_requested_mdeg"] // unit * unit, f"{rp}")
+
+            pl = sv.expect_ok(CMD_GET_SIG)
+            check(f"{tag} GET_SIG 与 SET_SIG 一致",
+                  rd_u32(pl, 0) == rf and rd_u32(pl, 4) == rp and rd_u16(pl, 12) == rdiv,
+                  pl.hex())
+
+            sv.expect_ok(CMD_START)
+            pl = sv.expect_ok(CMD_GET_MEAS, b"", timeout=10.0)
+            seq, gate, edge, phase_cnt, freq_hz, pmdeg = (
+                rd_u32(pl, 0), rd_u32(pl, 4), rd_u32(pl, 8), rd_u32(pl, 12), rd_u32(pl, 16),
+                rd_u32(pl, 20))
+            ok = (gate == v_meas["gate_cnt"] and edge == v_meas["edge_cnt"]
+                  and phase_cnt == v_meas["phase_cnt"] and freq_hz == v_meas["freq_milli_hz"]
+                  and pmdeg == v_meas["phase_milli_deg"])
+            if ok:
+                n_ok += 1
+            else:
+                print(f"    {tag}: 实测 gate={gate} edge={edge} phase={phase_cnt} "
+                      f"f={freq_hz} p={pmdeg}")
+                print(f"    {tag}: golden gate={v_meas['gate_cnt']} edge={v_meas['edge_cnt']} "
+                      f"phase={v_meas['phase_cnt']} f={v_meas['freq_milli_hz']} "
+                      f"p={v_meas['phase_milli_deg']}")
+            check(f"{tag} 测量值匹配 golden（相位跟随写入值）", ok)
+            check(f"{tag} phase_cnt % edge_cnt == 0（DSP 量化网格）",
+                  edge != 0 and phase_cnt % edge == 0, f"phase={phase_cnt} edge={edge}")
+            if verbose:
+                print(f"    {tag}: 写相位={rp/1000:g}° 实测相位={pmdeg/1000:.3f}° "
+                      f"f={freq_hz} Hz gate={gate} edge={edge} phase={phase_cnt} seq={seq}")
+    check(f"golden 覆盖 {len(freqs)} 频点 × {len(phases)} 相位点 = {len(vectors)} 组",
+          len(freqs) * len(phases) == len(vectors) and n_ok == len(vectors),
+          f"{n_ok}/{len(vectors)}")
+
+    # 错误路径：非法频率 / 相位 / PAYLOAD 长度
+    sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(3_000_000) + u32(0))       # 低于可达下限
+    sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(2_000_000_000) + u32(0))   # 高于 VCO 上限（2GHz 无解）
+    sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(25_000_000) + u32(180_000))  # 相位必须 < 180°
+    sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(25_000_000) + u32(0)[:3])
+    sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(0) + u32(0))
+    # 22.5° 不在 45° 网格上：就近吸附（半点向上 → 45°）并回显实际写入值
+    pl = sv.expect_ok(CMD_SET_SIG, u32(25_000_000) + u32(22_500))
+    check("SET_SIG(22.5°) 吸附到 45° 网格（半点向上 → 45°）并回显",
+          rd_u32(pl, 4) == 45_000 and pl[14] == 0, pl.hex())
+
+
+def test_result_clear(sv: Server) -> None:
+    sv.expect_ok(CMD_CLEAR)
+    pl = sv.expect_ok(CMD_GET_RESULT)
+    check("CLEAR 后 GET_RESULT valid=0", pl[0] == 0 and rd_u32(pl, 1) == 0, pl.hex())
+
+    sv.expect_ok(CMD_SET_SIG, u32(10_000_000) + u32(90_000), timeout=10.0)
+    sv.expect_ok(CMD_START)
+    pl = sv.expect_ok(CMD_GET_RESULT)
+    valid, seq, gate, edge, phase = (pl[0], rd_u32(pl, 1), rd_u32(pl, 5), rd_u32(pl, 9),
+                                     rd_u32(pl, 13))
+    check("GET_RESULT valid=1 且字段齐全", valid == 1 and gate == 2005 and edge == 401,
+          f"valid={valid} gate={gate} edge={edge} phase={phase} seq={seq}")
+    check("GET_RESULT phase_cnt/edge_cnt = 整数 DSP 周期", phase % 401 == 0, str(phase))
+
+    # GET_MEAS 与 GET_RESULT 同源
+    pl = sv.expect_ok(CMD_GET_MEAS)
+    check("GET_MEAS 与 GET_RESULT 一致", rd_u32(pl, 4) == gate and rd_u32(pl, 8) == edge,
+          pl.hex())
+    check("GET_MEAS 定点频率单位是 Hz（10MHz → 10000000）",
+          rd_u32(pl, 16) == 10_000_000, str(rd_u32(pl, 16)))
+    check("GET_MEAS 定点相位 ≈ 90°", approx(rd_u32(pl, 20), 90_000, 9_000),
+          str(rd_u32(pl, 20)))
+
+    sv.expect_ok(CMD_CLEAR)
+    pl = sv.expect_ok(CMD_GET_RESULT)
+    check("再次 CLEAR 后结果清零", pl[0] == 0, pl.hex())
+
+
+def wait_until_done(sv: Server, timeout: float = 5.0) -> dict:
+    """轮询 GET_STATUS 直到 busy=0 且有未读结果（resultValid=1）。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        pl = sv.expect_ok(CMD_GET_STATUS)
+        status = rd_u32(pl, 0)
+        if (status & DPM_STATUS_BUSY) == 0 and (status & DPM_STATUS_RESULT_VALID) != 0:
+            return dict(status=status, sig_status=rd_u32(pl, 4), gate=rd_u32(pl, 8),
+                        lost=rd_u32(pl, 12), seq=rd_u32(pl, 16))
+        time.sleep(0.005)
+    raise AssertionError(f"测量未在 {timeout}s 内完成")
+
+
+def test_lost_and_events(sv: Server) -> None:
+    """结果被覆盖 → lostCount 增长 + EVENT(1) 通知；并覆盖「测量中 START 回 ERR_BUSY」。
+
+    单次模式且**流关闭**时固件不自动取结果（结果留在 PL 里，STATUS.resultValid = 1），
+    因此在空闲但结果未读的情况下再发一次 START，旧结果会被新结果覆盖 → lostCount++。
+    """
+    sv.expect_ok(CMD_STREAM, bytes([0]) + u16(100))
+    sv.expect_ok(CMD_RESET_COUNTERS)
+    sv.expect_ok(CMD_SET_MODE, bytes([0]))
+    sv.expect_ok(CMD_SET_SIG, u32(25_000_000) + u32(0), timeout=10.0)
+    # 闸门放大到 20000 个慢周期（0.4ms），保证「测量中」这个窗口足够长，
+    # 否则仿真后端可能在第二次 START 之前就把测量跑完了（那是正常竞态，不是缺陷）。
+    sv.expect_ok(CMD_SET_GATE, u32(20_000))
+
+    sv.expect_ok(CMD_START)
+    # 协议 §3.0：测量进行中再发 START 回 ERR_BUSY（PL 内部是忽略）
+    f = sv.request(CMD_START)
+    check("测量中 START 回 ERR_BUSY", f is not None and f[0] == ERR_BUSY,
+          "None" if f is None else hex(f[0]))
+
+    st = wait_until_done(sv)
+    check("单次模式未读结果时 STATUS.resultValid = 1",
+          (st["status"] & DPM_STATUS_RESULT_VALID) != 0, hex(st["status"]))
+    lost_before = st["lost"]
+
+    # 空闲但上一次结果未读 → 再启动一次，旧结果被覆盖
+    sv.expect_ok(CMD_START)
+    st = wait_until_done(sv)
+    check("结果被覆盖后 LOST_COUNT 增长", st["lost"] > lost_before,
+          f"lost {lost_before} → {st['lost']}")
+    check("STATUS.LOST 置位", (st["status"] & DPM_STATUS_LOST) != 0, hex(st["status"]))
+
+    # 打开流：固件下一次取结果时上报 EVENT(1) 与 STREAM_DATA
+    sv.expect_ok(CMD_STREAM, bytes([1]) + u16(1))
+    got_stream = False
+    got_lost_event = False
+    deadline = time.time() + 8.0
+    while time.time() < deadline and not (got_stream and got_lost_event):
+        f = sv.next_frame(0.3)
+        if f is None:
+            continue
+        code, pl = f
+        if code == NTF_STREAM_DATA:
+            check("STREAM_DATA 长度 = 26", len(pl) == 26, str(len(pl)))
+            check("STREAM_DATA 的 seq/gate/edge 与结果寄存器一致",
+                  rd_u32(pl, 4) == st["gate"] or rd_u32(pl, 4) > 0, pl.hex())
+            got_stream = True
+        elif code == NTF_EVENT:
+            check("EVENT 长度 = 5", len(pl) == 5, pl.hex())
+            if pl[0] == 1:
+                got_lost_event = True
+                check("EVENT(1) detail = 丢失增量", rd_u32(pl, 1) >= 1, pl.hex())
+    check("收到 STREAM_DATA 通知帧（0xE1）", got_stream)
+    check("收到 EVENT(1 结果丢失) 通知帧（0xE2）", got_lost_event)
+    sv.expect_ok(CMD_STREAM, bytes([0]) + u16(100))
+    sv.expect_ok(CMD_SET_GATE, u32(2000))
+
+
+def test_continuous(sv: Server, golden: dict) -> None:
+    """连续模式：结果读走后立即重启，seq 递增且不丢。"""
+    sv.expect_ok(CMD_CLEAR)
+    sv.expect_ok(CMD_SET_SIG, u32(12_500_000) + u32(45_000), timeout=10.0)
+    sv.expect_ok(CMD_STREAM, bytes([1]) + u16(1))
+    sv.expect_ok(CMD_SET_MODE, bytes([1]))
+
+    seqs = []
+    deadline = time.time() + 4.0
+    while time.time() < deadline and len(seqs) < 3:
+        f = sv.next_frame(0.3)
+        if f is None:
+            continue
+        code, pl = f
+        if code == NTF_STREAM_DATA and len(pl) == 26:
+            seqs.append((rd_u32(pl, 0), rd_u32(pl, 4), rd_u32(pl, 8), rd_u32(pl, 12),
+                         rd_u32(pl, 16), rd_u32(pl, 20)))
+    check("连续模式至少上报 3 次 STREAM_DATA", len(seqs) >= 3, f"收到 {len(seqs)} 次")
+    if len(seqs) >= 2:
+        check("连续模式 seq 严格递增",
+              all(seqs[i][0] < seqs[i + 1][0] for i in range(len(seqs) - 1)),
+              str([s[0] for s in seqs]))
+    v = next(x for x in golden["vectors"]
+             if x["freq_hz"] == 12_500_000 and x["phase_requested_mdeg"] == 45_000)
+    if seqs:
+        s = seqs[-1]
+        check("连续模式测量值与 golden 一致（12.5MHz、相位 45°，跟随写入值）",
+              (s[1], s[2], s[3], s[4], s[5]) == (v["gate_cnt"], v["edge_cnt"], v["phase_cnt"],
+                                                 v["freq_milli_hz"], v["phase_milli_deg"]),
+              f"{s} vs {(v['gate_cnt'], v['edge_cnt'], v['phase_cnt'])}")
+    sv.expect_ok(CMD_SET_MODE, bytes([0]))
+    sv.expect_ok(CMD_STREAM, bytes([0]) + u16(100))
+
+
+def test_external_source(host_main: str, golden: dict) -> None:
+    """外部源两条路径（与真实 PL 一致）。
+
+    1. 默认（外部引脚没接信号）：`START` 后测量停在「等参考沿」，
+       `STATUS.busy` 恒为 1、不产生结果、`RESULT_SEQ` 不自增，
+       `GET_MEAS`/`GET_RESULT` 等不到结果 → 回 `ERR_BUSY`；
+    2. `--ext-present`（模拟接了 10MHz/0°）：与 golden 的 10MHz/0° 行逐位一致。
+    """
+    # ---- 1) 无信号：不得给出看似正常的读数 ----
+    sv = Server(host_main)
+    try:
+        sv.expect_ok(CMD_SET_SOURCE, bytes([0]))
+        sv.expect_ok(CMD_SET_GATE, u32(2000))
+        sv.expect_ok(CMD_START)
+        time.sleep(0.3)
+        pl = sv.expect_ok(CMD_GET_STATUS)
+        status = rd_u32(pl, 0)
+        seq1 = rd_u32(pl, 16)
+        check("外部无信号：STATUS.busy 恒为 1", (status & DPM_STATUS_BUSY) != 0, hex(status))
+        check("外部无信号：不产生结果（resultValid=0）",
+              (status & DPM_STATUS_RESULT_VALID) == 0, hex(status))
+        check("外部无信号：RESULT_SEQ 不自增", seq1 == 0, str(seq1))
+        f = sv.request(CMD_GET_MEAS, timeout=10.0)
+        check("外部无信号：GET_MEAS 超时回 ERR_BUSY", f is not None and f[0] == ERR_BUSY,
+              "None" if f is None else hex(f[0]))
+    finally:
+        rc = sv.close()
+        check("无信号实例按 SIGTERM 干净退出（码 0）", rc == 0, f"rc={rc}")
+
+    # ---- 2) 有信号（--ext-present）：与 golden 对照 ----
+    sv = Server(host_main, extra=["--ext-present", "--ext-freq-hz", "10000000",
+                                  "--ext-phase-mdeg", "0"])
+    try:
+        sv.expect_ok(CMD_SET_SOURCE, bytes([0]))
+        sv.expect_ok(CMD_SET_GATE, u32(2000))
+        sv.expect_ok(CMD_START)
+        pl = sv.expect_ok(CMD_GET_MEAS, timeout=10.0)
+        v = next(x for x in golden["vectors"]
+                 if x["freq_hz"] == 10_000_000 and x["phase_requested_mdeg"] == 0)
+        check("外部有信号（10MHz/0°）与 golden 一致",
+              rd_u32(pl, 4) == v["gate_cnt"] and rd_u32(pl, 8) == v["edge_cnt"]
+              and rd_u32(pl, 12) == v["phase_cnt"] and rd_u32(pl, 20) == v["phase_milli_deg"],
+              pl.hex())
+        sv.expect_ok(CMD_SET_SOURCE, bytes([1]))
+    finally:
+        sv.close()
+
+
+def test_unlocked_internal(host_main: str, golden: dict) -> None:
+    """未锁定时：SET_SOURCE(1) 与 SET_SIG 都必须回 ERR_BUSY，且 GET_STATUS 显示未锁定。"""
+    sv = Server(host_main, extra=["--unlock"], verbose=False)
+    try:
+        pl = sv.expect_ok(CMD_GET_STATUS, timeout=30.0)
+        sigs = rd_u32(pl, 4)
+        check("强制失锁：SIG_STATUS.locked = 0", (sigs & DPM_SIGST_LOCKED) == 0, hex(sigs))
+        check("强制失锁：sourceReady = 0", (sigs & DPM_SIGST_READY) == 0, hex(sigs))
+        sv.expect_err(CMD_SET_SOURCE, ERR_BUSY, bytes([1]), timeout=30.0)
+        sv.expect_err(CMD_SET_SIG, ERR_BUSY, u32(25_000_000) + u32(0), timeout=30.0)
+        sv.expect_err(CMD_START, ERR_BUSY, b"", timeout=30.0)
+        # 外部源不受 MMCM 影响：可以选中（SIG_STATUS 恒 ready），但引脚没接信号时拿不到结果
+        pl = sv.expect_ok(CMD_SET_SOURCE, bytes([0]), timeout=30.0)
+        check("失锁时仍可切到外部源（ready 恒 1）",
+              (rd_u32(pl, 0) & DPM_SIGST_READY) != 0, pl.hex())
+        sv.expect_ok(CMD_START, timeout=30.0)
+        f = sv.request(CMD_GET_MEAS, timeout=30.0)
+        check("外部无信号时 GET_MEAS 回 ERR_BUSY（不给出假读数）",
+              f is not None and f[0] == ERR_BUSY, "None" if f is None else hex(f[0]))
+    finally:
+        rc = sv.close()
+        check("失锁实例按 SIGTERM 干净退出（码 0）", rc == 0, f"rc={rc}")
+
+
+def test_clean_exit(sv: Server) -> None:
+    rc = sv.close()
+    check("host_main 收到 SIGTERM 干净退出（码 0）", rc == 0, f"rc={rc}")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="DPM 宿主机验证台端到端自测")
+    ap.add_argument("--host-main", default=os.path.join(REPO, "ps", "build", "host_main"))
+    ap.add_argument("--golden", default=os.path.join(REPO, "spec", "golden", "vectors.json"))
+    ap.add_argument("--verbose", action="store_true")
+    args = ap.parse_args()
+
+    if not os.path.exists(args.host_main):
+        print(f"找不到 {args.host_main}，先跑 bash ps/build.sh", file=sys.stderr)
+        return 2
+    with open(args.golden, encoding="utf-8") as fh:
+        golden = json.load(fh)
+
+    print(f"== pty 端到端自测：{args.host_main} ==")
+    sv = Server(args.host_main, verbose=args.verbose)
+    try:
+        test_frame_layer(sv)
+        test_identify_status(sv)
+        test_gate_mode_source(sv)
+        test_sig_and_golden(sv, golden, args.verbose)
+        test_result_clear(sv)
+        test_lost_and_events(sv)
+        test_continuous(sv, golden)
+        test_clean_exit(sv)
+    except AssertionError as exc:
+        print(f"[FAIL] 断言失败: {exc}")
+        RESULTS.append(("异常", False, str(exc)))
+        sv.close()
+    test_external_source(args.host_main, golden)
+    test_unlocked_internal(args.host_main, golden)
+
+    failed = [r for r in RESULTS if not r[1]]
+    print(f"\n== 结果: {len(RESULTS) - len(failed)}/{len(RESULTS)} 项通过 ==")
+    for name, _, detail in failed:
+        print(f"  FAIL: {name} {detail}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

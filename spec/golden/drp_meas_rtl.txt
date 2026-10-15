@@ -1,0 +1,218 @@
+
+****** xsim v2025.2 (64-bit)
+  **** SW Build 6299465 on Fri Nov 14 12:34:56 MST 2025
+  **** IP Build 6300035 on Fri Nov 14 10:48:45 MST 2025
+  **** SharedData Build 6298862 on Thu Nov 13 04:50:51 MST 2025
+  **** Start of session at: Thu Oct 15 02:33:11 2026
+    ** Copyright 1986-2022 Xilinx, Inc. All Rights Reserved.
+    ** Copyright 2022-2025 Advanced Micro Devices, Inc. All Rights Reserved.
+
+source xsim.dir/tb_clk_wiz_src_drp_rtl_sim/xsim_script.tcl
+# xsim {tb_clk_wiz_src_drp_rtl_sim} -autoloadwcfg -runall
+Time resolution is 1 ps
+run -all
+==== clk_wiz DRP 位域语义实测（clk_in1=50MHz, s_axi_aclk=50MHz）====
+DUT=dpm_system_clk_wiz_src_0（MMCM + 动态重配置）
+---- 复位锁定后的初始状态 ----
+DRP_INIT div=-1 phase_field=-1 t_out1_ps=40000 t_out2_ps=40000 delay_ps=10000 delay_deg_milli=90000 locked=1
+DRP_RD_STATUS off=0x004 val=0x00000001 locked=1（锁定后）
+DRP_RD_STATUS off=0x27c val=0x00000000（寄存器文件 word 31，非状态寄存器）
+---- 复位后 DRP 寄存器文件 dump（0x200 起，步长 4）----
+DRP_RD_RESET off=0x200 val=0x00001401
+DRP_RD_RESET off=0x204 val=0x00000000
+DRP_RD_RESET off=0x208 val=0x00000028
+DRP_RD_RESET off=0x20c val=0x00000000
+DRP_RD_RESET off=0x210 val=0x0000c350
+DRP_RD_RESET off=0x214 val=0x00000028
+DRP_RD_RESET off=0x218 val=0x00015f90
+DRP_RD_RESET off=0x21c val=0x0000c350
+DRP_RD_RESET off=0x220 val=0x00000001
+DRP_RD_RESET off=0x224 val=0x00000000
+DRP_RD_RESET off=0x228 val=0x0000c350
+---- Load（0x25C）触发位与 SADDR 探针 ----
+DRP_LOAD_PROBE val=0x00000002 div=96 phase_field=0 t_out1_ps=40000 t_out2_ps=40000 delay_ps=10000 delay_deg_milli=90000 locked=1
+DRP_LOAD_PROBE val=0x00000000 div=96 phase_field=0 t_out1_ps=40000 t_out2_ps=40000 delay_ps=10000 delay_deg_milli=90000 locked=1
+DRP_LOAD_PROBE val=0x00000001 div=96 phase_field=0 t_out1_ps=40000 t_out2_ps=40000 delay_ps=10000 delay_deg_milli=90000 locked=1
+DRP_RD_STATUS off=0x004 val=0x00000000 locked=0（重配置中）
+DRP_RD_STATUS off=0x004 val=0x00000001 locked=1（重锁定后）
+DRP_LOAD_PROBE val=0x00000003 div=96 phase_field=0 t_out1_ps=96000 t_out2_ps=96000 delay_ps=24000 delay_deg_milli=90000 locked=1
+DRP_LOAD_PROBE val=0x00000007 div=96 phase_field=0 t_out1_ps=96000 t_out2_ps=96000 delay_ps=24000 delay_deg_milli=90000 locked=1
+---- 扫描矩阵：div × phase_field（Load=0x07）----
+DRP_MEAS div=40 phase_field=0 t_out1_ps=40000 t_out2_ps=40000 delay_ps=10000 locked=1
+DRP_PHASE_DEG div=40 phase_field=0 delay_ps=10000 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=40 phase_field=0 w208=0x00000028
+DRP_REGCHK div=40 phase_field=0 w214=0x00000028
+DRP_REGCHK div=40 phase_field=0 w218=0x00000000
+DRP_MEAS div=40 phase_field=1 t_out1_ps=40000 t_out2_ps=40000 delay_ps=10000 locked=1
+DRP_PHASE_DEG div=40 phase_field=1 delay_ps=10000 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=40 phase_field=1 w208=0x00040128
+DRP_REGCHK div=40 phase_field=1 w214=0x00000128
+DRP_REGCHK div=40 phase_field=1 w218=0x000003e8
+DRP_MEAS div=40 phase_field=2 t_out1_ps=40000 t_out2_ps=40000 delay_ps=10000 locked=1
+DRP_PHASE_DEG div=40 phase_field=2 delay_ps=10000 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=40 phase_field=2 w208=0x00040228
+DRP_REGCHK div=40 phase_field=2 w214=0x00000228
+DRP_REGCHK div=40 phase_field=2 w218=0x000007d0
+DRP_MEAS div=40 phase_field=4 t_out1_ps=40000 t_out2_ps=40000 delay_ps=10000 locked=1
+DRP_PHASE_DEG div=40 phase_field=4 delay_ps=10000 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=40 phase_field=4 w208=0x00040428
+DRP_REGCHK div=40 phase_field=4 w214=0x00000428
+DRP_REGCHK div=40 phase_field=4 w218=0x00000fa0
+DRP_MEAS div=40 phase_field=8 t_out1_ps=40000 t_out2_ps=40000 delay_ps=10000 locked=1
+DRP_PHASE_DEG div=40 phase_field=8 delay_ps=10000 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=40 phase_field=8 w208=0x00040828
+DRP_REGCHK div=40 phase_field=8 w214=0x00000828
+DRP_REGCHK div=40 phase_field=8 w218=0x00001f40
+DRP_MEAS div=40 phase_field=22 t_out1_ps=40000 t_out2_ps=40000 delay_ps=10000 locked=1
+DRP_PHASE_DEG div=40 phase_field=22 delay_ps=10000 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=40 phase_field=22 w208=0x00041628
+DRP_REGCHK div=40 phase_field=22 w214=0x00001628
+DRP_REGCHK div=40 phase_field=22 w218=0x000055f0
+DRP_MEAS div=40 phase_field=45 t_out1_ps=40000 t_out2_ps=40000 delay_ps=10000 locked=1
+DRP_PHASE_DEG div=40 phase_field=45 delay_ps=10000 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=40 phase_field=45 w208=0x00042d28
+DRP_REGCHK div=40 phase_field=45 w214=0x00002d28
+DRP_REGCHK div=40 phase_field=45 w218=0x0000afc8
+DRP_MEAS div=40 phase_field=90 t_out1_ps=40000 t_out2_ps=40000 delay_ps=10000 locked=1
+DRP_PHASE_DEG div=40 phase_field=90 delay_ps=10000 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=40 phase_field=90 w208=0x00045a28
+DRP_REGCHK div=40 phase_field=90 w214=0x00005a28
+DRP_REGCHK div=40 phase_field=90 w218=0x00015f90
+DRP_MEAS div=80 phase_field=0 t_out1_ps=80000 t_out2_ps=80000 delay_ps=20000 locked=1
+DRP_PHASE_DEG div=80 phase_field=0 delay_ps=20000 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=80 phase_field=0 w208=0x00000050
+DRP_REGCHK div=80 phase_field=0 w214=0x00000050
+DRP_REGCHK div=80 phase_field=0 w218=0x00000000
+DRP_MEAS div=80 phase_field=1 t_out1_ps=80000 t_out2_ps=80000 delay_ps=20000 locked=1
+DRP_PHASE_DEG div=80 phase_field=1 delay_ps=20000 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=80 phase_field=1 w208=0x00040150
+DRP_REGCHK div=80 phase_field=1 w214=0x00000150
+DRP_REGCHK div=80 phase_field=1 w218=0x000003e8
+DRP_MEAS div=80 phase_field=2 t_out1_ps=80000 t_out2_ps=80000 delay_ps=20000 locked=1
+DRP_PHASE_DEG div=80 phase_field=2 delay_ps=20000 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=80 phase_field=2 w208=0x00040250
+DRP_REGCHK div=80 phase_field=2 w214=0x00000250
+DRP_REGCHK div=80 phase_field=2 w218=0x000007d0
+DRP_MEAS div=80 phase_field=4 t_out1_ps=80000 t_out2_ps=80000 delay_ps=20000 locked=1
+DRP_PHASE_DEG div=80 phase_field=4 delay_ps=20000 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=80 phase_field=4 w208=0x00040450
+DRP_REGCHK div=80 phase_field=4 w214=0x00000450
+DRP_REGCHK div=80 phase_field=4 w218=0x00000fa0
+DRP_MEAS div=80 phase_field=8 t_out1_ps=80000 t_out2_ps=80000 delay_ps=20000 locked=1
+DRP_PHASE_DEG div=80 phase_field=8 delay_ps=20000 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=80 phase_field=8 w208=0x00040850
+DRP_REGCHK div=80 phase_field=8 w214=0x00000850
+DRP_REGCHK div=80 phase_field=8 w218=0x00001f40
+DRP_MEAS div=80 phase_field=22 t_out1_ps=80000 t_out2_ps=80000 delay_ps=20000 locked=1
+DRP_PHASE_DEG div=80 phase_field=22 delay_ps=20000 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=80 phase_field=22 w208=0x00041650
+DRP_REGCHK div=80 phase_field=22 w214=0x00001650
+DRP_REGCHK div=80 phase_field=22 w218=0x000055f0
+DRP_MEAS div=80 phase_field=45 t_out1_ps=80000 t_out2_ps=80000 delay_ps=20000 locked=1
+DRP_PHASE_DEG div=80 phase_field=45 delay_ps=20000 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=80 phase_field=45 w208=0x00042d50
+DRP_REGCHK div=80 phase_field=45 w214=0x00002d50
+DRP_REGCHK div=80 phase_field=45 w218=0x0000afc8
+DRP_MEAS div=80 phase_field=90 t_out1_ps=80000 t_out2_ps=80000 delay_ps=20000 locked=1
+DRP_PHASE_DEG div=80 phase_field=90 delay_ps=20000 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=80 phase_field=90 w208=0x00045a50
+DRP_REGCHK div=80 phase_field=90 w214=0x00005a50
+DRP_REGCHK div=80 phase_field=90 w218=0x00015f90
+DRP_MEAS div=125 phase_field=0 t_out1_ps=125000 t_out2_ps=125000 delay_ps=31250 locked=1
+DRP_PHASE_DEG div=125 phase_field=0 delay_ps=31250 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=125 phase_field=0 w208=0x0000007d
+DRP_REGCHK div=125 phase_field=0 w214=0x0000007d
+DRP_REGCHK div=125 phase_field=0 w218=0x00000000
+DRP_MEAS div=125 phase_field=1 t_out1_ps=125000 t_out2_ps=125000 delay_ps=31250 locked=1
+DRP_PHASE_DEG div=125 phase_field=1 delay_ps=31250 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=125 phase_field=1 w208=0x0004017d
+DRP_REGCHK div=125 phase_field=1 w214=0x0000017d
+DRP_REGCHK div=125 phase_field=1 w218=0x000003e8
+DRP_MEAS div=125 phase_field=2 t_out1_ps=125000 t_out2_ps=125000 delay_ps=31250 locked=1
+DRP_PHASE_DEG div=125 phase_field=2 delay_ps=31250 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=125 phase_field=2 w208=0x0004027d
+DRP_REGCHK div=125 phase_field=2 w214=0x0000027d
+DRP_REGCHK div=125 phase_field=2 w218=0x000007d0
+DRP_MEAS div=125 phase_field=4 t_out1_ps=125000 t_out2_ps=125000 delay_ps=31250 locked=1
+DRP_PHASE_DEG div=125 phase_field=4 delay_ps=31250 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=125 phase_field=4 w208=0x0004047d
+DRP_REGCHK div=125 phase_field=4 w214=0x0000047d
+DRP_REGCHK div=125 phase_field=4 w218=0x00000fa0
+DRP_MEAS div=125 phase_field=8 t_out1_ps=125000 t_out2_ps=125000 delay_ps=31250 locked=1
+DRP_PHASE_DEG div=125 phase_field=8 delay_ps=31250 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=125 phase_field=8 w208=0x0004087d
+DRP_REGCHK div=125 phase_field=8 w214=0x0000087d
+DRP_REGCHK div=125 phase_field=8 w218=0x00001f40
+DRP_MEAS div=125 phase_field=22 t_out1_ps=125000 t_out2_ps=125000 delay_ps=31250 locked=1
+DRP_PHASE_DEG div=125 phase_field=22 delay_ps=31250 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=125 phase_field=22 w208=0x0004167d
+DRP_REGCHK div=125 phase_field=22 w214=0x0000167d
+DRP_REGCHK div=125 phase_field=22 w218=0x000055f0
+DRP_MEAS div=125 phase_field=45 t_out1_ps=125000 t_out2_ps=125000 delay_ps=31250 locked=1
+DRP_PHASE_DEG div=125 phase_field=45 delay_ps=31250 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=125 phase_field=45 w208=0x00042d7d
+DRP_REGCHK div=125 phase_field=45 w214=0x00002d7d
+DRP_REGCHK div=125 phase_field=45 w218=0x0000afc8
+DRP_MEAS div=125 phase_field=90 t_out1_ps=125000 t_out2_ps=125000 delay_ps=31250 locked=1
+DRP_PHASE_DEG div=125 phase_field=90 delay_ps=31250 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=125 phase_field=90 w208=0x00045a7d
+DRP_REGCHK div=125 phase_field=90 w214=0x00005a7d
+DRP_REGCHK div=125 phase_field=90 w218=0x00015f90
+DRP_MEAS div=96 phase_field=0 t_out1_ps=96000 t_out2_ps=96000 delay_ps=24000 locked=1
+DRP_PHASE_DEG div=96 phase_field=0 delay_ps=24000 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=96 phase_field=0 w208=0x00000060
+DRP_REGCHK div=96 phase_field=0 w214=0x00000060
+DRP_REGCHK div=96 phase_field=0 w218=0x00000000
+DRP_MEAS div=96 phase_field=1 t_out1_ps=96000 t_out2_ps=96000 delay_ps=24000 locked=1
+DRP_PHASE_DEG div=96 phase_field=1 delay_ps=24000 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=96 phase_field=1 w208=0x00040160
+DRP_REGCHK div=96 phase_field=1 w214=0x00000160
+DRP_REGCHK div=96 phase_field=1 w218=0x000003e8
+DRP_MEAS div=96 phase_field=2 t_out1_ps=96000 t_out2_ps=96000 delay_ps=24000 locked=1
+DRP_PHASE_DEG div=96 phase_field=2 delay_ps=24000 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=96 phase_field=2 w208=0x00040260
+DRP_REGCHK div=96 phase_field=2 w214=0x00000260
+DRP_REGCHK div=96 phase_field=2 w218=0x000007d0
+DRP_MEAS div=96 phase_field=4 t_out1_ps=96000 t_out2_ps=96000 delay_ps=24000 locked=1
+DRP_PHASE_DEG div=96 phase_field=4 delay_ps=24000 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=96 phase_field=4 w208=0x00040460
+DRP_REGCHK div=96 phase_field=4 w214=0x00000460
+DRP_REGCHK div=96 phase_field=4 w218=0x00000fa0
+DRP_MEAS div=96 phase_field=8 t_out1_ps=96000 t_out2_ps=96000 delay_ps=24000 locked=1
+DRP_PHASE_DEG div=96 phase_field=8 delay_ps=24000 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=96 phase_field=8 w208=0x00040860
+DRP_REGCHK div=96 phase_field=8 w214=0x00000860
+DRP_REGCHK div=96 phase_field=8 w218=0x00001f40
+DRP_MEAS div=96 phase_field=22 t_out1_ps=96000 t_out2_ps=96000 delay_ps=24000 locked=1
+DRP_PHASE_DEG div=96 phase_field=22 delay_ps=24000 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=96 phase_field=22 w208=0x00041660
+DRP_REGCHK div=96 phase_field=22 w214=0x00001660
+DRP_REGCHK div=96 phase_field=22 w218=0x000055f0
+DRP_MEAS div=96 phase_field=45 t_out1_ps=96000 t_out2_ps=96000 delay_ps=24000 locked=1
+DRP_PHASE_DEG div=96 phase_field=45 delay_ps=24000 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=96 phase_field=45 w208=0x00042d60
+DRP_REGCHK div=96 phase_field=45 w214=0x00002d60
+DRP_REGCHK div=96 phase_field=45 w218=0x0000afc8
+DRP_MEAS div=96 phase_field=90 t_out1_ps=96000 t_out2_ps=96000 delay_ps=24000 locked=1
+DRP_PHASE_DEG div=96 phase_field=90 delay_ps=24000 delay_deg_milli=90000 n_delay=31
+DRP_REGCHK div=96 phase_field=90 w208=0x00045a60
+DRP_REGCHK div=96 phase_field=90 w214=0x00005a60
+DRP_REGCHK div=96 phase_field=90 w218=0x00015f90
+---- 非对称相位字段探针：CLKOUT0 字与 CLKOUT1 字写不同的 phase_field ----
+DRP_ASYM div=2 phase_field=0 t_out1_ps=40000 t_out2_ps=40000 delay_ps=10000 delay_deg_milli=90000 locked=1
+DRP_ASYM div=4 phase_field=0 t_out1_ps=40000 t_out2_ps=40000 delay_ps=10000 delay_deg_milli=90000 locked=1
+DRP_ASYM div=0 phase_field=4 t_out1_ps=40000 t_out2_ps=40000 delay_ps=10000 delay_deg_milli=90000 locked=1
+DRP_ASYM div=0 phase_field=8 t_out1_ps=40000 t_out2_ps=40000 delay_ps=10000 delay_deg_milli=90000 locked=1
+DRP_ASYM div=8 phase_field=0 t_out1_ps=40000 t_out2_ps=40000 delay_ps=10000 delay_deg_milli=90000 locked=1
+---- 只写相位字 0x218（毫度）的探针，分频固定 D=40 ----
+DRP_PHASEW div=40 phase_field=0 t_out1_ps=40000 t_out2_ps=40000 delay_ps=10000 delay_deg_milli=90000 locked=1
+DRP_PHASEW div=40 phase_field=22 t_out1_ps=40000 t_out2_ps=40000 delay_ps=10000 delay_deg_milli=90000 locked=1
+DRP_PHASEW div=40 phase_field=45 t_out1_ps=40000 t_out2_ps=40000 delay_ps=10000 delay_deg_milli=90000 locked=1
+DRP_PHASEW div=40 phase_field=90 t_out1_ps=40000 t_out2_ps=40000 delay_ps=10000 delay_deg_milli=90000 locked=1
+DRP_PHASEW div=40 phase_field=180 t_out1_ps=40000 t_out2_ps=40000 delay_ps=10000 delay_deg_milli=90000 locked=1
+DRP_PHASEW div=40 phase_field=270 t_out1_ps=40000 t_out2_ps=40000 delay_ps=10000 delay_deg_milli=90000 locked=1
+DRP_TB_DONE lines=32
+$finish called at time : 673610 ns : File "/home/luo/DigitalPhaseMeter/sim/tb_clk_wiz_src_drp.sv" Line 466
+exit
+INFO: xsimkernel Simulation Memory Usage: 301188 KB (Peak: 341288 KB), Simulation CPU Usage: 1550 ms
+INFO: [Common 17-206] Exiting xsim at Thu Oct 15 02:33:14 2026...

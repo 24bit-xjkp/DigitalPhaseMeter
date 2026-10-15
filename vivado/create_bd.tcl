@@ -86,18 +86,42 @@ update_ip_catalog -rebuild
 create_bd_design $bd_name
 current_bd_design $bd_name
 
-# ---- PS7：使能 M_AXI_GP0、FCLK 与 PL 中断 ----
+# ---- PS7：使能 M_AXI_GP0、FCLK、PL 中断与调试串口 ----
 # FCLK_CLK0 取 50MHz：既作 AXI/低速控制域时钟（闸门计数、FSM 都跑在这个域），
 # 又作 MMCM 的参考时钟。50MHz 参考下 400MHz 输出的实际参数是 M=20、O=2.5、
 # DIVCLK=1（VCO 1000MHz，在 7 系列 -1 的 600~1200MHz 范围内，见生成的 clk_wiz
 # 例化）；AXI4-Lite 寄存器访问不需要更快的时钟。
+#
+# 串口（本板上板测试用）：UART1 走 MIO48(tx)/49(rx)，115200 8N1。
+#   - MIO48/49 属于 MIO Bank1，本板该 bank 供电 1.8V（LVCMOS 1.8V）；
+#     MIO Bank0（MIO0..15）供电 3.3V。Zynq-7000 的 MIO I/O 标准由 bank 供电决定，
+#     不可在 PS7 里逐脚编程，因此这里只是把 bank 电压写进 PRESET_*_VOLTAGE 属性，
+#     让 .hwh / BSP 与硬件实际供电一致（声明性，不改 MIO 电气特性）。
+#   - 使能 UART1 不会释放 UART0：UART0 继续保留为可选调试口（未分配 MIO）。
+#   - MIO 树的 54 项字符串要显式改（只设 PCW_UART1_UART1_IO 不一定同步更新树），
+#     见下面 "MIO 树" 一段，改完脚本会回读校验。
 create_bd_cell -type ip -vlnv xilinx.com:ip:processing_system7:5.5 processing_system7_0
+set ps7_uart       "UART1"
+set ps7_uart_periph "UART 1"
+set ps7_mio_tx     48
+set ps7_mio_rx     49
+set ps7_baud       115200
 set ps7_config [list \
     CONFIG.PCW_USE_M_AXI_GP0 {1} \
     CONFIG.PCW_USE_M_AXI_GP1 {0} \
     CONFIG.PCW_FPGA0_PERIPHERAL_FREQMHZ {50} \
     CONFIG.PCW_USE_FABRIC_INTERRUPT {1} \
-    CONFIG.PCW_IRQ_F2P_INTR {1}]
+    CONFIG.PCW_IRQ_F2P_INTR {1} \
+    CONFIG.PCW_EN_$ps7_uart {1} \
+    CONFIG.PCW_${ps7_uart}_PERIPHERAL_ENABLE {1} \
+    CONFIG.PCW_${ps7_uart}_${ps7_uart}_IO "MIO $ps7_mio_tx .. $ps7_mio_rx" \
+    CONFIG.PCW_${ps7_uart}_BAUD_RATE $ps7_baud \
+    CONFIG.PCW_MIO_${ps7_mio_tx}_PULLUP {enabled} \
+    CONFIG.PCW_MIO_${ps7_mio_tx}_DIRECTION {out} \
+    CONFIG.PCW_MIO_${ps7_mio_tx}_SLEW {slow} \
+    CONFIG.PCW_MIO_${ps7_mio_rx}_PULLUP {enabled} \
+    CONFIG.PCW_MIO_${ps7_mio_rx}_DIRECTION {in} \
+    CONFIG.PCW_MIO_${ps7_mio_rx}_SLEW {slow}]
 if {$use_mmcm} {
     # DSP 域时钟由 PL 内 MMCM 生成，FCLK_CLK1 不需要
     lappend ps7_config CONFIG.PCW_EN_CLK1_PORT {0}
@@ -106,6 +130,54 @@ if {$use_mmcm} {
     lappend ps7_config CONFIG.PCW_FPGA1_PERIPHERAL_FREQMHZ $ps_fclk1_mhz
 }
 set_property -dict $ps7_config [get_bd_cells processing_system7_0]
+
+# ---- MIO bank 供电声明（本板：Bank0 = 3.3V、Bank1 = 1.8V）----
+# Zynq-7000 的 MIO I/O 标准由 bank 供电轨决定，不能在 PS7 里逐脚编程；这两个
+# PRESET 属性只是把供电事实写进 .hwh/BSP。它们只在导入 board preset 时才存在，
+# 本工程没有绑板，因此用 catch 保护：设不上也不影响硬件，只提示。
+foreach {vp vv} {BANK0 "LVCMOS 3.3V" BANK1 "LVCMOS 1.8V"} {
+    if {[catch {set_property CONFIG.PCW_PRESET_${vp}_VOLTAGE $vv [get_bd_cells processing_system7_0]} err]} {
+        puts "WARNING: 设置 PCW_PRESET_${vp}_VOLTAGE=$vv 失败（$err）——仅影响声明，不影响硬件"
+    }
+}
+
+# ---- MIO 树：把 MIO48/49 标成 UART1（格式为 54 项、'#' 分隔）----
+# PS7 的 MIO 树是一个 54 项的字符串属性（每项是外设名 / 信号名），
+# 只写 PCW_UART1_UART1_IO 时 Vivado 不保证同步更新它，因此这里显式改并回读校验。
+set ps_cell [get_bd_cells processing_system7_0]
+set mio_periph [split [get_property CONFIG.PCW_MIO_TREE_PERIPHERALS $ps_cell] "#"]
+set mio_sig    [split [get_property CONFIG.PCW_MIO_TREE_SIGNALS $ps_cell] "#"]
+if {[llength $mio_periph] != 54 || [llength $mio_sig] != 54} {
+    set mio_periph [lrepeat 54 "unassigned"]
+    set mio_sig    [lrepeat 54 "unassigned"]
+}
+lset mio_periph $ps7_mio_tx $ps7_uart_periph
+lset mio_periph $ps7_mio_rx $ps7_uart_periph
+lset mio_sig    $ps7_mio_tx "uart1_tx"
+lset mio_sig    $ps7_mio_rx "uart1_rx"
+set_property -dict [list \
+    CONFIG.PCW_MIO_TREE_PERIPHERALS [join $mio_periph "#"] \
+    CONFIG.PCW_MIO_TREE_SIGNALS [join $mio_sig "#"]] $ps_cell
+
+# ---- 回读校验：串口配置必须真的落到 BD 里 ----
+set uart_en  [get_property CONFIG.PCW_EN_$ps7_uart $ps_cell]
+set uart_io  [get_property CONFIG.PCW_${ps7_uart}_${ps7_uart}_IO $ps_cell]
+set uart_baud [get_property CONFIG.PCW_${ps7_uart}_BAUD_RATE $ps_cell]
+set tree_p   [split [get_property CONFIG.PCW_MIO_TREE_PERIPHERALS $ps_cell] "#"]
+set tree_s   [split [get_property CONFIG.PCW_MIO_TREE_SIGNALS $ps_cell] "#"]
+set bank0    [get_property -quiet CONFIG.PCW_PRESET_BANK0_VOLTAGE $ps_cell]
+set bank1    [get_property -quiet CONFIG.PCW_PRESET_BANK1_VOLTAGE $ps_cell]
+puts "PS7_UART_CHECK: EN_$ps7_uart=$uart_en IO='$uart_io' BAUD=$uart_baud"
+puts "PS7_UART_CHECK: MIO$ps7_mio_tx=[lindex $tree_p $ps7_mio_tx]/[lindex $tree_s $ps7_mio_tx]"
+puts "PS7_UART_CHECK: MIO$ps7_mio_rx=[lindex $tree_p $ps7_mio_rx]/[lindex $tree_s $ps7_mio_rx]"
+puts "PS7_UART_CHECK: BANK0='$bank0' BANK1='$bank1'"
+if {$uart_en != 1} { error "PS7：$ps7_uart 未使能" }
+if {[lindex $tree_p $ps7_mio_tx] ne $ps7_uart_periph || [lindex $tree_p $ps7_mio_rx] ne $ps7_uart_periph} {
+    error "PS7：MIO 树未把 MIO$ps7_mio_tx/$ps7_mio_rx 指到 $ps7_uart_periph"
+}
+if {$bank1 ne "LVCMOS 1.8V"} {
+    puts "WARNING: PCW_PRESET_BANK1_VOLTAGE 回读为 '$bank1'（期望 LVCMOS 1.8V，仅影响 .hwh/BSP 声明）"
+}
 
 # ---- 复位：把 PS 的 FCLK_RESET0_N 交给 proc_sys_reset 生成同步复位 ----
 create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 proc_sys_reset_0
@@ -171,9 +243,23 @@ set_property -dict [list \
     CONFIG.CLKOUT2_REQUESTED_OUT_FREQ {25.000} \
     CONFIG.CLKOUT2_REQUESTED_PHASE {90.000} \
     CONFIG.USE_DYN_RECONFIG {true} \
+    CONFIG.PHASE_DUTY_CONFIG {true} \
     CONFIG.USE_LOCKED {true} \
     CONFIG.USE_RESET {true} \
     CONFIG.USE_SAFE_CLOCK_STARTUP {true}] [get_bd_cells clk_wiz_src]
+
+# PHASE_DUTY_CONFIG 必须打开，否则 DRP 寄存器文件里的相位字是"死"的：
+# 关掉时模板里的 MMCM 重建逻辑写死 `S2_CLKOUT1 = mmcm_pll_count_calc(S2_CLKOUT1_DIVIDE,
+# S1_CLKOUT1_PHASE, ...)`（静态 generic），写 0x20C/0x218 完全不改变输出相位，
+# 两路源信号恒差 90°——这是 xsim 用真实 clk_wiz IP 实测 43 组得到的结论
+# （见 docs/verify-drp.md、spec/drp_semantics.json、sim/tb_clk_wiz_src_drp.sv）。
+# 打开后模板多出 S2_CLKOUTx_PHASE/S2_CLKOUTx_DUTY 端口并把寄存器文件的字接进重建逻辑，
+# 于是写相位字（单位毫度）即可在线改相位差，分辨率 45/D 度（D=40 时 1.125°）。
+set prop_phase_duty [get_property -quiet CONFIG.PHASE_DUTY_CONFIG [get_bd_cells clk_wiz_src]]
+puts "CLK_WIZ_SRC_CHECK: PHASE_DUTY_CONFIG='$prop_phase_duty' USE_DYN_RECONFIG='[get_property -quiet CONFIG.USE_DYN_RECONFIG [get_bd_cells clk_wiz_src]]'"
+if {$prop_phase_duty ne "true" && $prop_phase_duty ne "1"} {
+    error "clk_wiz_src 的 PHASE_DUTY_CONFIG 未生效（当前 '$prop_phase_duty'），相位字不会被接进 MMCM 重建逻辑"
+}
 
 # ---- 自定义 IP ----
 create_bd_cell -type ip -vlnv $ip_vlnv dpm_top_0
