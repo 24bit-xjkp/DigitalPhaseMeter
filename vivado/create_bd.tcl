@@ -9,24 +9,32 @@
 #                   用于对比「PS 直供」与「MMCM 倍频」两条路。FCLK_CLK1 上限 250MHz，
 #                   因此这条路只能覆盖 250MHz 及以下。
 #
-# 前置条件：先运行 vivado/package_ip.tcl 生成 IP（build/vivado/ip/dpm_top）
+# 前置条件：先运行 vivado/package_ip.tcl 与 vivado/package_src_ip.tcl 生成两个 IP
+#   （build/vivado/ip/dpm_top、build/vivado/ip/dpm_src_drp）
 #
 # 结构（两个 AXI4-Lite 从口：测量 IP 与片内信号源的 MMCM 动态重配置口）：
 #
 #   processing_system7_0 ──M_AXI_GP0(AXI3)──► axi_interconnect_0 ──M00_AXI(AXI4-Lite)──► dpm_top_0/s_axi_lite
-#          │                                        └──M01_AXI(AXI4-Lite)──► clk_wiz_src/s_axi（DRP）
+#          │                                        └──M01_AXI(AXI4-Lite)──► dpm_src_drp_0/s_axi_lite（DRP）
 #          │  FCLK_CLK0(50MHz) ──► proc_sys_reset_0 ─► 互联与两个从口的主时钟/复位
 #          │                    ├► clk_wiz_0(MMCM + Safe Clock Startup) ─► dpm_top_0/dspClock
-#          │                    └► clk_wiz_src(MMCM + DRP) ─► dpm_top_0/srcSig1、srcSig2、srcLocked
+#          │                    └► dpm_mmcm_src_0(裸 MMCM) ─► dpm_top_0/srcSig1、srcSig2、srcLocked
+#          │                          ▲
+#          │                          └── DRP ◄── dpm_src_drp_0（极简 DRP 控制器，方案 A）
 #          └◄── IRQ_F2P ◄── xlconcat_0 ◄── dpm_top_0/interrupt（IRQ_F2P[0]）
 #
 #   sig1 / sig2 作为 BD 外部端口引出，供顶层约束分配引脚
 #
-# 片内信号源（clk_wiz_src）：
-#   - 两路输出同频（初始 25MHz）、相位差 90°，**频率与相位差都由 PS 通过 DRP（AXI4-Lite）在线设定**：
-#     改 CLKOUT0/1 的分频与相位、CLKFBOUT 的倍频，使能动态重配置后写「Load」寄存器即可；
+# 片内信号源（方案 A：裸 MMCM + 极简 DRP 控制器）：
+#   - 两路输出同频（初始 25MHz）、相位差 90°，**频率与相位差都由 PS 写成 MMCM 的
+#     16 位寄存器值**，再由 dpm_src_drp_0 逐条写进 MMCM 的 DRP 口；
 #   - 两路输出送给 dpm_top_0，由 IP 在测量时钟域里采样边沿并做后分频（SIG_DIV）；
-#   - 地址段 0x43C1_0000，寄存器映射见 PG065（Clocking Wizard）的 Dynamic Reconfiguration 章节。
+#   - 地址段 0x43C1_0000，寄存器映射见 vivado/package_src_ip.tcl 的说明与
+#     build/analysis/golden/mmcm_encode.py（编码参考实现）。
+#
+# 不再使用 clk_wiz 的 `USE_DYN_RECONFIG + PHASE_DUTY_CONFIG`：那套配置会把
+# 「毫度/百分比/MHz → MMCM 计数器位域」的定点换算综合成硬件，实测占 13,287 个
+# 物理 LUT site 与 38 个 DSP48E1（整设计 96% 的逻辑 LUT）。
 #
 # 为什么互联改成 axi_interconnect（原先只有一个从口时用 axi_protocol_converter）：
 #   从口多于一个时互联要负责地址译码，axi_interconnect 会自动插入 auto_pc 完成
@@ -46,7 +54,7 @@
 #
 # 地址分配：
 #   dpm_top_0/s_axi_lite   0x43C0_0000（4KB：控制/状态寄存器 + 只读结果寄存器 + 输入选择/后分频）
-#   clk_wiz_src/s_axi      0x43C1_0000（4KB：片内信号源 MMCM 的动态重配置寄存器，映射见 PG065）
+#   dpm_src_drp_0/s_axi_lite  0x43C1_0000（4KB：MMCM 寄存器镜像 + LOAD，见 package_src_ip.tcl）
 
 set script_dir [file dirname [file normalize [info script]]]
 set root_dir [file normalize [file join $script_dir ..]]
@@ -77,11 +85,24 @@ set drp_base "0x43C10000"
 if {![file exists [file join $ip_repo dpm_top component.xml]]} {
     error "找不到打包好的 IP：$ip_repo/dpm_top，请先运行 vivado/package_ip.tcl"
 }
+if {![file exists [file join $ip_repo dpm_src_drp component.xml]]} {
+    error "找不到打包好的 IP：$ip_repo/dpm_src_drp，请先运行 vivado/package_src_ip.tcl"
+}
+if {![file exists [file join $script_dir rtl dpm_mmcm_src.v]]} {
+    error "找不到 MMCM 薄封装：vivado/rtl/dpm_mmcm_src.v"
+}
 
 file delete -force $proj_dir
 create_project -force dpm_bd $proj_dir -part $part
 set_property ip_repo_paths $ip_repo [current_project]
 update_ip_catalog -rebuild
+
+# 裸 MMCM 的薄封装：MMCME2_ADV 是 unisim 原语，create_bd_cell 不接受 -type primitive，
+# 也不能用 -type module -reference 直接引用（实测 [filemgmt 56-587]），因此用 HDL 模块
+# 包一层再加进工程，BD 里即可用 module reference 例化。
+add_files -norecurse [file join $script_dir rtl dpm_mmcm_src.v]
+set_property top dpm_mmcm_src [get_filesets sources_1]
+update_compile_order -fileset sources_1
 
 create_bd_design $bd_name
 current_bd_design $bd_name
@@ -226,40 +247,41 @@ if {$use_mmcm} {
         CONFIG.USE_RESET {true}] [get_bd_cells clk_wiz_0]
 }
 
-# ---- 片内信号源：MMCM + 动态重配置（DRP）----
-# 两路输出同频、相位差 90°（初始 25MHz：VCO 800MHz = 50MHz × 16，输出 = VCO / 32）。
-# 选 25MHz / D=32 的原因：MMCM 每个输出的相位寄存器覆盖 64 个 VCO 周期，相位范围
-# （以输出周期为单位）是 64 / D，D = 32 时正好 2 个输出周期，0～360° 都能表示；
-# 更低的输出频率（更小的 D 分频比）会把可表示的相位范围压缩到 180° 以下。
-# 需要更低频率时由 IP 侧的后分频（SIG_DIV，f_out = f_src / 2N）完成，相位差不受影响。
-create_bd_cell -type ip -vlnv xilinx.com:ip:clk_wiz:6.0 clk_wiz_src
-set_property -dict [list \
-    CONFIG.PRIMITIVE {MMCM} \
-    CONFIG.PRIM_SOURCE {Single_ended_clock_capable_pin} \
-    CONFIG.PRIM_IN_FREQ {50.000} \
-    CONFIG.CLKOUT1_REQUESTED_OUT_FREQ {25.000} \
-    CONFIG.CLKOUT1_REQUESTED_PHASE {0.000} \
-    CONFIG.CLKOUT2_USED {true} \
-    CONFIG.CLKOUT2_REQUESTED_OUT_FREQ {25.000} \
-    CONFIG.CLKOUT2_REQUESTED_PHASE {90.000} \
-    CONFIG.USE_DYN_RECONFIG {true} \
-    CONFIG.PHASE_DUTY_CONFIG {true} \
-    CONFIG.USE_LOCKED {true} \
-    CONFIG.USE_RESET {true} \
-    CONFIG.USE_SAFE_CLOCK_STARTUP {true}] [get_bd_cells clk_wiz_src]
+# ---- 片内信号源：裸 MMCM + 极简 DRP 控制器（方案 A）----
+#
+# 【为什么不再用 clk_wiz】
+#   原来这里用 clk_wiz 的 `USE_DYN_RECONFIG + PHASE_DUTY_CONFIG`：它会把
+#   「毫度/百分比/MHz → MMCM 计数器位域」的定点换算综合成硬件（mmcm_pll_count_calc
+#   等函数），实测在 xc7z010clg400-1 上占 13,287 个物理 LUT site 与 38 个 DSP48E1
+#   ——整设计 96% 的逻辑 LUT。而厂商 PG065 明确写了 "Enabling this option utilizes
+#   DSP resources. By default, this option is deselected to optimize the design for area."
+#
+#   那套换算是纯整数算术，PS 侧软件完全算得出来。方案 A 把换算搬到软件，
+#   PL 侧只留「把软件给的 16 位寄存器值按顺序写进 MMCM DRP 口」的状态机
+#   （dpm_src_drp，实测 114 LUT / 182 FF / 0 DSP）。
+#   寄存器位域与编码规则见 build/analysis/golden/mmcm_encode.py（已对 clk_wiz 的
+#   Write DRP 生成值逐点验证）。
+#
+# 结构：
+#   FCLK_CLK0(50MHz) ──► dpm_mmcm_src(clkIn) ──► clkOut1/clkOut2 ──► dpm_top_0/srcSig1,srcSig2
+#                                          └──► locked ──► dpm_src_drp/locked、dpm_top_0/srcLocked
+#   dpm_src_drp（AXI4-Lite 从口 @0x43C1_0000）──► DRP 口 ──► dpm_mmcm_src
+#
+# MMCM 的静态配置与原来 clk_wiz 的默认工作点一致（50MHz 参考、M=20、D=40、25MHz、
+# 相位差 90°）；软件在初始化时通过 DRP 改写工作点。
+create_bd_cell -type module -reference dpm_mmcm_src dpm_mmcm_src_0
 
-# PHASE_DUTY_CONFIG 必须打开，否则 DRP 寄存器文件里的相位字是"死"的：
-# 关掉时模板里的 MMCM 重建逻辑写死 `S2_CLKOUT1 = mmcm_pll_count_calc(S2_CLKOUT1_DIVIDE,
-# S1_CLKOUT1_PHASE, ...)`（静态 generic），写 0x20C/0x218 完全不改变输出相位，
-# 两路源信号恒差 90°——这是 xsim 用真实 clk_wiz IP 实测 43 组得到的结论
-# （见 docs/verify-drp.md、spec/drp_semantics.json、sim/tb_clk_wiz_src_drp.sv）。
-# 打开后模板多出 S2_CLKOUTx_PHASE/S2_CLKOUTx_DUTY 端口并把寄存器文件的字接进重建逻辑，
-# 于是写相位字（单位毫度）即可在线改相位差，分辨率 45/D 度（D=40 时 1.125°）。
-set prop_phase_duty [get_property -quiet CONFIG.PHASE_DUTY_CONFIG [get_bd_cells clk_wiz_src]]
-puts "CLK_WIZ_SRC_CHECK: PHASE_DUTY_CONFIG='$prop_phase_duty' USE_DYN_RECONFIG='[get_property -quiet CONFIG.USE_DYN_RECONFIG [get_bd_cells clk_wiz_src]]'"
-if {$prop_phase_duty ne "true" && $prop_phase_duty ne "1"} {
-    error "clk_wiz_src 的 PHASE_DUTY_CONFIG 未生效（当前 '$prop_phase_duty'），相位字不会被接进 MMCM 重建逻辑"
-}
+# 极简 DRP 控制器（Chisel 生成 → vivado/package_src_ip.tcl 打包）
+create_bd_cell -type ip -vlnv xjkp.org:dpm:dpm_src_drp:1.0 dpm_src_drp_0
+
+# 旧方案（clk_wiz + PHASE_DUTY_CONFIG）保留为注释，便于对照与回退：
+#   create_bd_cell -type ip -vlnv xilinx.com:ip:clk_wiz:6.0 clk_wiz_src
+#   set_property -dict [list CONFIG.PRIMITIVE {MMCM} CONFIG.PRIM_IN_FREQ {50.000} \
+#       CONFIG.CLKOUT1_REQUESTED_OUT_FREQ {25.000} CONFIG.CLKOUT2_USED {true} \
+#       CONFIG.CLKOUT2_REQUESTED_OUT_FREQ {25.000} CONFIG.CLKOUT2_REQUESTED_PHASE {90.000} \
+#       CONFIG.USE_DYN_RECONFIG {true} CONFIG.PHASE_DUTY_CONFIG {true} \
+#       CONFIG.USE_LOCKED {true} CONFIG.USE_RESET {true} \
+#       CONFIG.USE_SAFE_CLOCK_STARTUP {true}] [get_bd_cells clk_wiz_src]
 
 # ---- 自定义 IP ----
 create_bd_cell -type ip -vlnv $ip_vlnv dpm_top_0
@@ -285,13 +307,25 @@ connect_bd_net [get_bd_pins proc_sys_reset_0/peripheral_aresetn] [get_bd_pins ax
 connect_bd_net [get_bd_pins proc_sys_reset_0/peripheral_aresetn] [get_bd_pins axi_interconnect_0/M00_ARESETN]
 connect_bd_net [get_bd_pins proc_sys_reset_0/peripheral_aresetn] [get_bd_pins axi_interconnect_0/M01_ARESETN]
 # 片内源的 MMCM：参考时钟与 AXI 时钟都用 FCLK_CLK0，复位用同域的高有效复位
-connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0] [get_bd_pins clk_wiz_src/clk_in1]
-connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0] [get_bd_pins clk_wiz_src/s_axi_aclk]
-connect_bd_net [get_bd_pins proc_sys_reset_0/peripheral_aresetn] [get_bd_pins clk_wiz_src/s_axi_aresetn]
+# MMCM 参考时钟与 DRP 控制器的主时钟（同域：DRP 的 DCLK 直接用 FCLK_CLK0）
+connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0] [get_bd_pins dpm_mmcm_src_0/clkIn]
+connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0] [get_bd_pins dpm_mmcm_src_0/drpDclk]
+connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0] [get_bd_pins dpm_src_drp_0/clock]
+connect_bd_net [get_bd_pins proc_sys_reset_0/peripheral_aresetn] [get_bd_pins dpm_src_drp_0/resetn]
+# MMCM 的复位：peripheral_reset 是高有效（与原来 clk_wiz_src 的 reset 接法一致）
+connect_bd_net [get_bd_pins proc_sys_reset_0/peripheral_reset] [get_bd_pins dpm_mmcm_src_0/reset]
+# DRP 连线：控制器 → MMCM
+connect_bd_net [get_bd_pins dpm_src_drp_0/drp_daddr] [get_bd_pins dpm_mmcm_src_0/drpDaddr]
+connect_bd_net [get_bd_pins dpm_src_drp_0/drp_di] [get_bd_pins dpm_mmcm_src_0/drpDi]
+connect_bd_net [get_bd_pins dpm_src_drp_0/drp_den] [get_bd_pins dpm_mmcm_src_0/drpDen]
+connect_bd_net [get_bd_pins dpm_src_drp_0/drp_dwe] [get_bd_pins dpm_mmcm_src_0/drpDwe]
+connect_bd_net [get_bd_pins dpm_mmcm_src_0/drpDout] [get_bd_pins dpm_src_drp_0/drp_dout]
+connect_bd_net [get_bd_pins dpm_mmcm_src_0/drpDrdy] [get_bd_pins dpm_src_drp_0/drp_drdy]
+connect_bd_net [get_bd_pins dpm_mmcm_src_0/locked] [get_bd_pins dpm_src_drp_0/locked]
 # 两路源信号与锁定指示送给 IP
-connect_bd_net [get_bd_pins clk_wiz_src/clk_out1] [get_bd_pins dpm_top_0/srcSig1]
-connect_bd_net [get_bd_pins clk_wiz_src/clk_out2] [get_bd_pins dpm_top_0/srcSig2]
-connect_bd_net [get_bd_pins clk_wiz_src/locked] [get_bd_pins dpm_top_0/srcLocked]
+connect_bd_net [get_bd_pins dpm_mmcm_src_0/clkOut1] [get_bd_pins dpm_top_0/srcSig1]
+connect_bd_net [get_bd_pins dpm_mmcm_src_0/clkOut2] [get_bd_pins dpm_top_0/srcSig2]
+connect_bd_net [get_bd_pins dpm_mmcm_src_0/locked] [get_bd_pins dpm_top_0/srcLocked]
 connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0] [get_bd_pins dpm_top_0/clock]
 connect_bd_net [get_bd_pins proc_sys_reset_0/peripheral_aresetn] [get_bd_pins dpm_top_0/resetn]
 
@@ -309,7 +343,7 @@ if {$use_mmcm} {
 # ---- AXI 数据通路：PS → 互联 → 测量 IP 与片内源 MMCM 的动态重配置口 ----
 connect_bd_intf_net [get_bd_intf_pins processing_system7_0/M_AXI_GP0] [get_bd_intf_pins axi_interconnect_0/S00_AXI]
 connect_bd_intf_net [get_bd_intf_pins axi_interconnect_0/M00_AXI] [get_bd_intf_pins dpm_top_0/s_axi_lite]
-connect_bd_intf_net [get_bd_intf_pins axi_interconnect_0/M01_AXI] [get_bd_intf_pins clk_wiz_src/s_axi_lite]
+connect_bd_intf_net [get_bd_intf_pins axi_interconnect_0/M01_AXI] [get_bd_intf_pins dpm_src_drp_0/s_axi_lite]
 
 # ---- 中断 ----
 connect_bd_net [get_bd_pins dpm_top_0/interrupt] [get_bd_pins xlconcat_0/In0]
@@ -323,7 +357,7 @@ connect_bd_net [get_bd_ports sig2] [get_bd_pins dpm_top_0/sig2]
 assign_bd_address -quiet -target_address_space /processing_system7_0/Data \
     -offset $lite_base -range 4K [get_bd_addr_segs dpm_top_0/s_axi_lite/Reg] -force
 assign_bd_address -quiet -target_address_space /processing_system7_0/Data \
-    -offset $drp_base -range 4K [get_bd_addr_segs clk_wiz_src/s_axi_lite/Reg] -force
+    -offset $drp_base -range 4K [get_bd_addr_segs dpm_src_drp_0/s_axi_lite/Reg] -force
 
 regenerate_bd_layout
 validate_bd_design

@@ -6,11 +6,17 @@
 #     （默认 400MHz，由 vivado/create_bd.tcl 的 dsp_clk_mhz 参数决定；
 #      Zynq-7000 的 PS FCLK 上限 250MHz，300MHz 以上必须用 PL 内 MMCM）
 #
-# 时钟拓扑补充（片内信号源，由 BD 里的 clk_wiz_src 提供）：
-#   clk_out1_dpm_system_clk_wiz_src_0_0 / clk_out2_... —— 同一个 MMCM 的两个输出：
-#     同频（初始 25MHz）、相位差由 MMCM 的相位寄存器通过 DRP 设定（初始 90°）。
-#     它们在 IP 内被测量时钟域采样成边沿脉冲（再用 SourceDivider 数边沿分频），
-#     对目的域来说是异步输入，与外部引脚同样处理。
+# 时钟拓扑补充（片内信号源，由 BD 里的 dpm_mmcm_src_0 提供）：
+#   该模块是裸 MMCME2_ADV 的薄封装（vivado/rtl/dpm_mmcm_src.v），两个 BUFGCE 输出
+#   同频（初始 25MHz）、相位差由 MMCM 的相位寄存器通过 DRP 设定（初始 90°）。
+#   它们在 IP 内被测量时钟域采样成边沿脉冲（再用 SourceDivider 数边沿分频），
+#   对目的域来说是异步输入，与外部引脚同样处理。
+#
+#   注意：这里的时钟名随实现方式变化。
+#     旧方案（clk_wiz_src，IP 内部 BUFGCE）→ `clk_out1_dpm_system_clk_wiz_src_0_0` 之类；
+#     新方案（裸 MMCM 薄封装，BUFGCE 在自定义模块里）→ 工具按**网表里的网络名**
+#     命名，实测是 `clkout0_raw` / `clkout1_raw`（即 MMCM 的 CLKOUT0/CLKOUT1 网络）。
+#   为兼容两种命名，下面同时列出两组名字。
 #
 # 本文件补充五类约束：被测信号、片内信号源时钟、慢↔快时钟域的握手通路、MMCM 锁定、板级引脚。
 
@@ -23,9 +29,15 @@ set_false_path -from [get_ports {sig1 sig2}]
 # ---- 片内信号源：两路 MMCM 输出 ----
 # 频率与相位差都由 MMCM 的动态重配置设定，软件可以在线改动，因此源时钟与测量时钟之间
 # 没有固定的相位关系：IP 只用边沿检测链采样它们，不做建立/保持检查。
+# 新方案：MMCM 输出的网络名（实测）
+set_false_path -from [get_clocks clkout0_raw] -to [get_clocks *clk_wiz_0*]
+set_false_path -from [get_clocks clkout1_raw] -to [get_clocks *clk_wiz_0*]
+# 旧方案（clk_wiz_src）的时钟名，保留以免回退时漏约束
 set_false_path -from [get_clocks *clk_wiz_src*] -to [get_clocks *clk_wiz_0*]
 # MMCM 的 locked 是准静态电平，经 3 级同步链进主时钟域（与其它跨域电平同样按「一个慢时钟
 # 周期内到达」约束）
+set_max_delay -datapath_only -from [get_clocks clkout0_raw] -to [get_clocks clk_fpga_0] 20.000
+set_max_delay -datapath_only -from [get_clocks clkout1_raw] -to [get_clocks clk_fpga_0] 20.000
 set_max_delay -datapath_only -from [get_clocks *clk_wiz_src*] -to [get_clocks clk_fpga_0] 20.000
 
 # ---- 两个时钟域之间的握手通路（双向）----

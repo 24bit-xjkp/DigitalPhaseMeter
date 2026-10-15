@@ -43,7 +43,7 @@ static inline void dpm_reg_wr(const dpm_io_t *io, void *ctx, uint32_t off, uint3
     io->wr32(ctx, (uint32_t)DPM_BASE + off, val);
 }
 
-/** 读 MMCM DRP 配置字（`off` 取 `DPM_DRP_WORD(n)` / `DPM_DRP_STATUS...`）。 */
+/** 读 MMCM DRP 寄存器镜像（`off` 取 `DPM_DRP_OFF_*`）。 */
 static inline uint32_t dpm_drp_rd(const dpm_io_t *io, void *ctx, uint32_t off)
 {
     return io->rd32(ctx, (uint32_t)DPM_DRP_BASE + off);

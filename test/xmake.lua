@@ -3,6 +3,16 @@ local verilator_options = {
 }
 local test_args = { "+verilator+rand+reset+2", "-fc" }
 local chisel_dir = path.join(os.scriptdir(), "..", "build", "chisel")
+
+-- 逐目标的 Verilator 豁免：
+-- MmcmDrpController 是一个 AXI4-Lite 从口 + MMCM DRP 控制器。AXI4-Lite 接口固定
+-- 带有 awprot / arprot / wstrb 与 32 位写数据，但 MMCM 的配置寄存器只有 16 位、
+-- 且本设计不做保护级检查，因此这些位天然不被消费。这些是**接口固有的未使用位**，
+-- 不是 RTL 缺陷，所以对该目标关掉 UNUSEDSIGNAL（其余 -Wall 检查全部保留）。
+local extra_verilator_options = {
+    ["MmcmDrpController"] = { "-Wno-UNUSEDSIGNAL" }
+}
+
 for _, file in ipairs(os.files("*.cpp")) do
     local name = path.basename(file)
     target(name .. "Verilator", function ()
@@ -13,7 +23,8 @@ for _, file in ipairs(os.files("*.cpp")) do
         if is_mode("debug") then
             set_optimize("fast")
         end
-        add_values("verilator.flags", verilator_options)
+        local flags = table.join(verilator_options, extra_verilator_options[name] or {})
+        add_values("verilator.flags", flags)
 
         on_load(function (target)
             local sv_dir = path.join(chisel_dir, name)

@@ -187,48 +187,62 @@ void dpm_sig_solve(uint32_t target_freq_hz, uint32_t phase_milli_deg, uint32_t s
     st->error_milli_hz = (uint32_t)((best_err_num * 1000u) / (uint64_t)best_div);
 }
 
-void dpm_sig_drp_words(const dpm_sig_t *sig, uint32_t *clkfbout, uint32_t *clkout0,
-                       uint32_t *clkout1)
+void dpm_sig_drp_words(const dpm_sig_t *sig, uint32_t *clkfbout, uint32_t *clkfbout2,
+                       uint32_t *clkout0, uint32_t *clkout0_2, uint32_t *clkout1,
+                       uint32_t *clkout1_2)
 {
+    uint16_t fb1, fb2, c01, c02, c11, c12;
+
     if (sig == 0) {
         return;
     }
-    /* 寄存器映射以实测为准（见 `dpm_regs.h` 与 `spec/drp_semantics.json`）：
-     *   0x200 CLKFBOUT = (MULT << 8) | DIVCLK
-     *   0x208 clk_out1 分频 = 低字节 D
-     *   0x20C clk_out1 相位 = 毫度（恒 0，相位差只在 clk_out2 上给）
-     *   0x214 clk_out2 分频 = 低字节 D
-     *   0x218 clk_out2 相位 = 毫度
-     * 本函数的三个输出对应前三项；相位字由 `dpm_sig_phase_word_mdeg()` 给出。 */
+    /* 方案 A：**软件自己把频率/相位编码成 MMCM 的 16 位寄存器值**，
+     * PL 侧的 dpm_src_drp 只负责按顺序写进 MMCM 的 DRP 口（硬件不含任何算术）。
+     *
+     * 编码规则（位域取自官方 XAPP888 v1.8 Table 1/2，并用 clk_wiz 的 Write DRP
+     * 生成值逐点校验；参考实现见 build/analysis/golden/mmcm_encode.py）：
+     *   ClkReg1 = {PHASE_MUX[15:13], 1'b1, HIGH_TIME[11:6], LOW_TIME[5:0]}
+     *   ClkReg2 = {EDGE[7], NO_COUNT[6], DELAY_TIME[5:0]}
+     * 相位差只加在 clk_out2（CLKOUT1）上，clk_out1 恒 0。
+     */
+    DPM_MMCM_ENCODE_CLKOUT(sig->mult, 0u, fb1, fb2);
+    DPM_MMCM_ENCODE_CLKOUT(sig->div, 0u, c01, c02);
+    DPM_MMCM_ENCODE_CLKOUT(sig->div, sig->phase_milli_deg, c11, c12);
+
     if (clkfbout != 0) {
-        *clkfbout = ((uint32_t)sig->mult << 8) | DPM_DRP_DIVIDE_FIELD(sig->divclk);
+        *clkfbout = (uint32_t)fb1;
+    }
+    if (clkfbout2 != 0) {
+        *clkfbout2 = (uint32_t)fb2;
     }
     if (clkout0 != 0) {
-        *clkout0 = DPM_DRP_DIVIDE_FIELD(sig->div);
+        *clkout0 = (uint32_t)c01;
+    }
+    if (clkout0_2 != 0) {
+        *clkout0_2 = (uint32_t)c02;
     }
     if (clkout1 != 0) {
-        *clkout1 = DPM_DRP_DIVIDE_FIELD(sig->div);
+        *clkout1 = (uint32_t)c11;
+    }
+    if (clkout1_2 != 0) {
+        *clkout1_2 = (uint32_t)c12;
     }
 }
 
 uint32_t dpm_sig_phase_word_mdeg(const dpm_sig_t *sig)
 {
-    if (sig == 0) {
-        return 0u;
-    }
-    /* 相位字单位 = 毫度（0x218 复位值 0x15F90 = 90000 = 90.000°）。
-     * 注意：当前 bitstream 里这个字没有接到 MMCM 重建逻辑（DPM_DRP_PHASE_WRITABLE = 0），
-     * 写它不会改变输出相位；仍按协议写入，待 PHASE_DUTY_CONFIG 补丁后可生效。 */
-    return DPM_DRP_PHASE_MDEG(sig->phase_milli_deg);
+    (void)sig;
+    /* 方案 A 下相位不再是一个独立的「毫度字」：它已经被编码进 CLKOUT1 的
+     * ClkReg2（DELAY_TIME 字段），见 `dpm_sig_drp_words`。
+     * 保留本函数只为兼容旧接口，返回值不再有硬件含义。 */
+    return 0u;
 }
 
 /* ============================= 写入时序 =================================== */
 
 int dpm_sig_apply(const dpm_cmd_ctx_t *c, const dpm_sig_t *sig)
 {
-    uint32_t fb;
-    uint32_t c0;
-    uint32_t c1;
+    uint32_t fb1, fb2, c01, c02, c11, c12;
     uint32_t i;
 
     if (c == 0 || sig == 0 || c->io == 0) {
@@ -239,16 +253,20 @@ int dpm_sig_apply(const dpm_cmd_ctx_t *c, const dpm_sig_t *sig)
         return 3;
     }
 
-    dpm_sig_drp_words(sig, &fb, &c0, &c1);
-    /* 顺序：CLKFBOUT → clk_out1 分频 → clk_out1 相位 → clk_out2 分频 → clk_out2 相位 → Load */
-    dpm_drp_wr(c->io, c->io_ctx, DPM_DRP_WORD(DPM_DRP_IDX_CLKFBOUT), fb);
-    dpm_drp_wr(c->io, c->io_ctx, DPM_DRP_WORD(DPM_DRP_IDX_CLKOUT0), c0);
-    dpm_drp_wr(c->io, c->io_ctx, DPM_DRP_WORD(DPM_DRP_IDX_CLKOUT0_PHASE), 0u);
-    dpm_drp_wr(c->io, c->io_ctx, DPM_DRP_WORD(DPM_DRP_IDX_CLKOUT1), c1);
-    dpm_drp_wr(c->io, c->io_ctx, DPM_DRP_WORD(DPM_DRP_IDX_CLKOUT1_PHASE),
-               dpm_sig_phase_word_mdeg(sig));
-    /* Load：bit0 触发、bit1 = SADDR = 1（用寄存器文件里的动态配置） */
-    dpm_drp_wr(c->io, c->io_ctx, DPM_DRP_LOAD_OFF, DPM_DRP_LOAD_BOTH);
+    dpm_sig_drp_words(sig, &fb1, &fb2, &c01, &c02, &c11, &c12);
+    /* 顺序与 PL 侧状态机的发送顺序一致（CLKFBOUT → CLKOUT0 → CLKOUT1 → DIVCLK → POWER）。
+     * 顺序本身不影响功能（PL 是等 LOAD 才整批写进 MMCM 的），但保持一致便于对照。 */
+    dpm_drp_wr(c->io, c->io_ctx, DPM_DRP_OFF_CLKFBOUT, fb1);
+    dpm_drp_wr(c->io, c->io_ctx, DPM_DRP_OFF_CLKFBOUT2, fb2);
+    dpm_drp_wr(c->io, c->io_ctx, DPM_DRP_OFF_CLKOUT0, c01);
+    dpm_drp_wr(c->io, c->io_ctx, DPM_DRP_OFF_CLKOUT0_2, c02);
+    dpm_drp_wr(c->io, c->io_ctx, DPM_DRP_OFF_CLKOUT1, c11);
+    dpm_drp_wr(c->io, c->io_ctx, DPM_DRP_OFF_CLKOUT1_2, c12);
+    dpm_drp_wr(c->io, c->io_ctx, DPM_DRP_OFF_DIVCLK,
+               (uint32_t)dpm_mmcm_encode_divclk(sig->divclk));
+    dpm_drp_wr(c->io, c->io_ctx, DPM_DRP_OFF_POWER, DPM_DRP_POWER_ENABLE_PHASE);
+    /* Load：写 1 触发一次完整重配置 */
+    dpm_drp_wr(c->io, c->io_ctx, DPM_DRP_OFF_LOAD, 1u);
 
     /* 等 DRP 状态字（偏移 0x004 的 bit0）与 DPM 的 SIG_STATUS 都报 locked。
      * 注意：这里只轮询 locked，不轮询 sourceReady —— 后者的语义还与

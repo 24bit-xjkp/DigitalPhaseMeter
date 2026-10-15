@@ -427,29 +427,45 @@ void dpm_cmd_tick(dpm_cmd_ctx_t *c, uint32_t now_ms)
 
 /* ------------------------------------------------------------- 命令处理 */
 
-/** GET_SIG 用：从 DRP 配置字反推当前工作点（无缓存时使用）。
+/** GET_SIG 用：从 MMCM 寄存器镜像反推当前工作点（无缓存时使用）。
  *
- * 寄存器映射以实测为准：0x200 = (MULT<<8)|DIVCLK、0x208 = clk_out1 分频（低字节 D）、
- * 0x218 = clk_out2 相位（毫度）。 */
+ * 方案 A 下 PL 侧的寄存器就是 **MMCM 的原始 16 位寄存器值**，因此反推要按
+ * XAPP888 的位域解码（编码规则见 `dpm_regs.h` 的 `DPM_MMCM_ENCODE_CLKOUT`）：
+ *
+ *   ClkReg1 = {PHASE_MUX[15:13], 1'b1, HIGH_TIME[11:6], LOW_TIME[5:0]}
+ *   ClkReg2 = {EDGE[7], NO_COUNT[6], DELAY_TIME[5:0]}
+ *
+ * 分频比 = HIGH_TIME + LOW_TIME（divide==1 时是 no_count 的特例，单独处理）。
+ * 相位：DELAY_TIME 是 1 个 VCO 周期的整数倍，换算回毫度是
+ *   phase_mdeg = DELAY_TIME * 360000 / (4 * divide)
+ * 该换算与 `dpm_sig.c` 的正向编码互为逆运算（四舍五入到整数毫度）。
+ */
 static void sig_from_drp(const dpm_cmd_ctx_t *c, dpm_sig_t *out)
 {
-    uint32_t fb = dpm_drp_rd(c->io, c->io_ctx, DPM_DRP_WORD(DPM_DRP_IDX_CLKFBOUT));
-    uint32_t c0 = dpm_drp_rd(c->io, c->io_ctx, DPM_DRP_WORD(DPM_DRP_IDX_CLKOUT0));
-    uint32_t ph = dpm_drp_rd(c->io, c->io_ctx, DPM_DRP_WORD(DPM_DRP_IDX_CLKOUT1_PHASE));
-    uint32_t mult = (fb >> 8) & 0xFFu;
-    uint32_t divclk = DPM_DRP_DIVIDE_GET(fb);
-    uint32_t div = DPM_DRP_DIVIDE_GET(c0);
-    uint32_t unit = dpm_sig_phase_unit_deg_milli();
+    uint32_t fb1 = dpm_drp_rd(c->io, c->io_ctx, DPM_DRP_OFF_CLKFBOUT);
+    uint32_t fb2 = dpm_drp_rd(c->io, c->io_ctx, DPM_DRP_OFF_CLKFBOUT2);
+    uint32_t c01 = dpm_drp_rd(c->io, c->io_ctx, DPM_DRP_OFF_CLKOUT0);
+    uint32_t dv = dpm_drp_rd(c->io, c->io_ctx, DPM_DRP_OFF_DIVCLK);
+    uint32_t c12 = dpm_drp_rd(c->io, c->io_ctx, DPM_DRP_OFF_CLKOUT1_2);
+    uint32_t mult, divclk, div, delay, unit;
 
-    if (divclk == 0u || div == 0u) {
+    (void)fb2;
+    /* divide==1 是特例（NO_COUNT 置位、HIGH/LOW_TIME 是占位的 1），用共享解码函数 */
+    mult = dpm_mmcm_decode_divide(fb1);
+    div = dpm_mmcm_decode_divide(c01);
+    divclk = dpm_mmcm_decode_divclk(dv);
+    if (mult == 0u || div == 0u || divclk == 0u) {
         return;
     }
+    unit = dpm_sig_phase_unit_deg_milli();
+
+    delay = c12 & 0x3Fu; /* DELAY_TIME */
     out->mult = (uint16_t)mult;
     out->divclk = (uint16_t)divclk;
     out->div = (uint16_t)div;
     out->vco_hz = (uint32_t)(((uint64_t)c->clk.slow_hz * (uint64_t)mult) / (uint64_t)divclk);
     out->freq_hz = (uint32_t)(((uint64_t)out->vco_hz + (uint64_t)div / 2u) / (uint64_t)div);
-    out->phase_milli_deg = DPM_DRP_PHASE_MDEG_GET(ph) % 360000u;
+    out->phase_milli_deg = dpm_mmcm_decode_phase_mdeg(delay, div);
     out->phase_field = (uint16_t)(out->phase_milli_deg / unit);
     out->phase_step_ps = dpm_sig_phase_step_ps(out->vco_hz);
 }

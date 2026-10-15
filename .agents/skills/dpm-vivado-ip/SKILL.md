@@ -19,8 +19,10 @@ RTL 本身的写法见 `dpm-chisel-rtl`；测量结果的判据见 `dpm-measurem
 ## 交付物与执行顺序
 
 ```text
-sbt -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop --type=syn"   # 生成综合产物 RTL
-vivado -mode batch -source vivado/package_ip.tcl        # 打包 IP → build/vivado/ip/dpm_top
+sbt -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop --type=syn"      # 顶层 IP RTL
+sbt -batch "runMain DigitalPhaseMeter.EmitMmcmDrpController --type=syn"         # DRP 控制器 RTL
+vivado -mode batch -source vivado/package_ip.tcl        # 打包顶层 IP → build/vivado/ip/dpm_top
+vivado -mode batch -source vivado/package_src_ip.tcl    # 打包 DRP 控制器 → ip/dpm_src_drp
 vivado -mode batch -source vivado/create_bd.tcl         # BD → build/vivado/bd_proj（DSP 域默认 400MHz）
 vivado -mode batch -source vivado/apply_timing_strategy.tcl  # 写入高速时钟需要的综合/实现策略
 sim/run_xsim.sh                                         # xsim 仿真（综合产物 + XPM）
@@ -28,9 +30,9 @@ vivado -mode batch -source vivado/build_bitstream.tcl   # 综合/实现/bitstrea
 vivado -mode batch -source vivado/impl_multi.tcl 6      # 高速时钟：多次实现取余量最好的一次
 ```
 
-**改了 RTL 必须从 `package_ip.tcl` 重新开始**：IP 内容变了，`create_bd.tcl` 里的 BD 也要重新
-生成；只重跑 `build_bitstream.tcl` 会用旧的 IP。`apply_timing_strategy.tcl` 改的是 run 参数，
-`reset_run` 之后依然有效，但换新工程时要重跑。
+**改了 RTL 必须从打包重新开始**：两个 IP（`package_ip.tcl` + `package_src_ip.tcl`）的内容变了，
+`create_bd.tcl` 里的 BD 也要重新生成；只重跑 `build_bitstream.tcl` 会用旧的 IP。
+`apply_timing_strategy.tcl` 改的是 run 参数，`reset_run` 之后依然有效，但换新工程时要重跑。
 
 `build/` 下全部是产物，不入库；入库的是 `.scala`、`test/`、`sim/`、`vivado/` 里的脚本与文档。
 
@@ -123,6 +125,67 @@ xsim <snapshot> -runall
   Verilator 全绿、只有顶层 xsim 用例（写寄存器 → 启动测量 → 校验结果跟随片内源）能抓到。
   因此**动 AXI 寄存器通路必须跑 `sim/run_xsim.sh`**，并把新寄存器纳入激励：读回、字节选通、
   复位默认值、以及「配置真的改变了测量结果」这类有区分度的断言。
+
+## 片内信号源：裸 MMCM + 极简 DRP 控制器（方案 A，当前实现）
+
+> **背景**：这里原本用 clk_wiz 的 `USE_DYN_RECONFIG + PHASE_DUTY_CONFIG`。实测该配置
+> 会把「毫度/百分比/MHz → MMCM 计数器位域」的定点换算（`mmcm_pll_count_calc` 等）
+> **综合成硬件**，在 xc7z010clg400-1 上占 **13,287 个物理 LUT site + 38 个 DSP48E1**
+> （整设计 96% 的逻辑 LUT、95% 的 DSP）。官方 PG065 Table 4-1 自己就写了
+> "Enabling this option utilizes DSP resources. By default, this option is deselected
+> to optimize the design for area."
+>
+> 那套换算是纯整数算术，PS 软件完全算得出来。把它搬到软件后，PL 侧只留
+> 「把软件给的 16 位寄存器值按顺序写进 MMCM DRP 口」的状态机。实测整设计
+> **Slice LUTs 14,048（79.8%）→ 948（5.4%）**、**DSP 40 → 2**，且时序更好
+> （WNS +0.110 → +0.281ns）。
+
+### 结构
+
+```
+FCLK_CLK0(50MHz) ──► dpm_mmcm_src(clkIn) ──► clkOut1/clkOut2 ──► dpm_top_0/srcSig1,srcSig2
+                                       └──► locked ──► dpm_src_drp/locked、dpm_top_0/srcLocked
+dpm_src_drp（AXI4-Lite @0x43C1_0000）──► DRP 口 ──► dpm_mmcm_src
+```
+
+- `vivado/rtl/dpm_mmcm_src.v`：`MMCME2_ADV` 薄封装（BUFG 反馈 + 每个输出一路
+  `BUFGCE`/`BUFH` 的 8 拍 Safe Clock Startup）。
+- `src/main/scala/DigitalPhaseMeter/MmcmDrpController.scala` → `vivado/package_src_ip.tcl`
+  打包成 `xjkp.org:dpm:dpm_src_drp:1.0`。
+
+### 实测陷阱（按重要性）
+
+| 坑 | 现象与处理 |
+| --- | --- |
+| **`MMCME2_ADV` 不能直接做 BD cell** | `create_bd_cell -type primitive` 不支持；`-type module -reference MMCME2_ADV` 报 `[filemgmt 56-587] Failed to resolve reference`。必须写薄 HDL 封装、`add_files` 后用 module reference 例化 |
+| **MMCM 输出时钟的网络名会变** | 换成裸 MMCM 后，时钟名不再是 `clk_out1_dpm_system_clk_wiz_src_0_0`，而是**网表里的网络名** `clkout0_raw` / `clkout1_raw`。XDC 里的 `set_false_path`/`set_max_delay` 必须同步改，否则 25MHz→400MHz 的两条跨域路径会变成时序违例（实测 WNS −0.238ns、2 个 failing endpoint） |
+| **`DPM_DRP_OFF_*` 是字节偏移，且 PL 侧寄存器 = MMCM 原始寄存器** | 旧方案是 clk_wiz 的「语义寄存器文件」（0x200 起、单位毫度/百分比）。新方案的寄存器直接镜像 MMCM 的 16 位寄存器值（0x08/0x0C/0x10/0x14/0x18/0x1C/0x20/0x24/0x28） |
+| **`ClkReg1` 的 bit12** | XAPP888 标为 RSVD，但 clk_wiz 生成器在该位**恒置 1**（div=20/40/80/100 实测全为 1）；而 `divide == 1` 的计数器字是 `0x0041`（bit12 为 0）。编码/解码按**实测生成值**，不要按手册推断 |
+| **DIVCLK 寄存器布局与 ClkReg1 不同** | `DivReg = {2'b00, EDGE[13], NO_COUNT[12], HIGH_TIME[11:6], LOW_TIME[5:0]}`；bit12 是 NO_COUNT（divide==1 时为 1）。`divide = 1` 时 HIGH/LOW_TIME 都是占位的 1，**不能相加**，必须先判 NO_COUNT |
+| **xsim 的 unisim MMCM 不支持 DRP 写** | 对 `MMCME2_ADV` 写 0x0A/0x0B 的任意值读回都不变（16 个单比特探针全部无效）。因此**裸 DRP 通路无法在 xsim 里验证**；控制器的正确性要用「DRP 从端模型」验证（`build/analysis/drp_tb/`），真实器件上的行为必须上板确认 |
+| 取权威寄存器值的办法 | 用 clk_wiz 的 **`CONFIG.AXI_DRP=true`（Write DRP 模式）** 生成配置——该模式下 IP 不做任何换算，生成的 `S1_*` 参数就是**权威的 MMCM 寄存器值**（`*_clk_wiz_drp.vhd` 的 generic map 里）。用它校验自己的编码实现 |
+
+### MMCM 寄存器编码（软件侧，已对权威值验证）
+
+```
+ClkReg1 = 0x1000 | (PHASE_MUX[2:0] << 13) | (HIGH_TIME[5:0] << 6) | LOW_TIME[5:0]
+ClkReg2 = (EDGE << 7) | (NO_COUNT << 6) | DELAY_TIME[5:0]
+DivReg  = (EDGE << 13) | (NO_COUNT << 12) | (HIGH_TIME[5:0] << 6) | LOW_TIME[5:0]
+
+HIGH_TIME = divide // 2, LOW_TIME = divide - HIGH_TIME（50% 占空比）
+EDGE = divide & 1, NO_COUNT = (divide == 1)
+DELAY_TIME = round(phase_mdeg * divide / 360000) & 0x3F
+PHASE_MUX  = (round(phase_mdeg * divide / 360000) >> 6) & 0x7
+```
+
+参考实现与校验：`build/analysis/golden/mmcm_encode.py`、`verify_encoder.py`
+（对金标准 1664 行 + 权威值 14 点全部一致）。
+
+---
+
+## 附：旧方案（clk_wiz + DRP）的实测纪要
+
+以下内容对应**已被方案 A 取代**的旧实现，保留供对照与回退参考。
 
 ## 片内信号源：MMCM 的动态重配置（DRP）
 

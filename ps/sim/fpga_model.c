@@ -128,22 +128,30 @@ static void txn(dpm_model_t *m)
 
 /* ------------------------------------------------------------- 测量模型 */
 
-/** 从 DRP 寄存器文件解析内部源：返回 1 = 可用（VCO/D 合法）。
+/** 从 MMCM 寄存器镜像解析内部源：返回 1 = 可用（VCO/D 合法）。
  *
- * 映射以实测为准：0x200 = (MULT<<8)|DIVCLK、0x208 = clk_out1 分频（低字节 D）、
- * 0x218 = clk_out2 相位（毫度）。相位字在**当前 bitstream 里未接线**，因此
- * `dpm_model_active_signal` 不使用它（见 `DPM_MODEL_SRC_PHASE_MDEG`）。 */
+ * 方案 A 下寄存器就是 MMCM 的原始 16 位值，按 XAPP888 的位域解码：
+ *   ClkReg1 = {PHASE_MUX[15:13], 1'b1, HIGH_TIME[11:6], LOW_TIME[5:0]}
+ *   ClkReg2 = {EDGE[7], NO_COUNT[6], DELAY_TIME[5:0]}
+ * 分频比 = HIGH_TIME + LOW_TIME；相位由 DELAY_TIME（VCO 周期）换算回毫度。 */
 static int internal_point(const dpm_model_t *m, uint32_t *vco_hz, uint32_t *div, uint32_t *phase_mdeg)
 {
-    uint32_t fb = m->drp[DPM_DRP_IDX_CLKFBOUT];
-    uint32_t c0 = m->drp[DPM_DRP_IDX_CLKOUT0];
-    uint32_t ph = m->drp[DPM_DRP_IDX_CLKOUT1_PHASE];
-    uint32_t mult = (fb >> 8) & 0xFFu;
-    uint32_t divclk = DPM_DRP_DIVIDE_GET(fb);
-    uint32_t d = DPM_DRP_DIVIDE_GET(c0);
+    uint32_t fb = m->drp[DPM_DRP_OFF_CLKFBOUT / 4u];
+    uint32_t c0 = m->drp[DPM_DRP_OFF_CLKOUT0 / 4u];
+    uint32_t c12 = m->drp[DPM_DRP_OFF_CLKOUT1_2 / 4u];
+    uint32_t dv = m->drp[DPM_DRP_OFF_DIVCLK / 4u];
+    /* divide==1 时 NO_COUNT 置位、HIGH/LOW_TIME 都是占位的 1，必须用共享解码函数 */
+    uint32_t mult = dpm_mmcm_decode_divide(fb);
+    uint32_t divclk = dpm_mmcm_decode_divclk(dv);
+    uint32_t d = dpm_mmcm_decode_divide(c0);
+    uint32_t delay = c12 & 0x3Fu;
     uint32_t v;
 
-    if (divclk == 0u || d == 0u) {
+#ifdef DPM_MODEL_DEBUG
+    fprintf(stderr, "DBG ip: fb=0x%04X dv=0x%04X c0=0x%04X c12=0x%04X -> mult=%u divclk=%u d=%u\n",
+            fb, dv, c0, c12, mult, divclk, d);
+#endif
+    if (mult == 0u || divclk == 0u || d == 0u) {
         return 0;
     }
     v = (uint32_t)(((uint64_t)m->slow_hz * (uint64_t)mult) / (uint64_t)divclk);
@@ -152,7 +160,9 @@ static int internal_point(const dpm_model_t *m, uint32_t *vco_hz, uint32_t *div,
     }
     *vco_hz = v;
     *div = d;
-    *phase_mdeg = DPM_DRP_PHASE_MDEG_GET(ph);
+    if (phase_mdeg != 0) {
+        *phase_mdeg = dpm_mmcm_decode_phase_mdeg(delay, d);
+    }
     return 1;
 }
 
@@ -313,8 +323,6 @@ static void apply_dpm_write(dpm_model_t *m, uint32_t off, uint32_t data)
 
 static void apply_drp_write(dpm_model_t *m, uint32_t off, uint32_t data)
 {
-    uint32_t idx = (off - DPM_DRP_OFF_BASE) / 4u;
-
     if (off < DPM_DRP_OFF_BASE) {
         return; /* 本地寄存器（例如状态 0x004）不通过写配置字改变 */
     }
@@ -335,8 +343,8 @@ static void apply_drp_write(dpm_model_t *m, uint32_t off, uint32_t data)
         }
         return;
     }
-    if (idx < 32u) {
-        m->drp[idx] = data;
+    if ((off / 4u) < 32u) {
+        m->drp[off / 4u] = data;
     }
 }
 
@@ -349,14 +357,15 @@ static uint32_t model_rd32(void *ctx, uint32_t addr)
 
     if (in_drp(addr)) {
         uint32_t off = addr - (uint32_t)DPM_DRP_BASE;
-        if (off == DPM_DRP_STATUS_OFF) {
-            /* 硬件状态：bit0 = locked、bit1 = srdy（只在锁定那一拍为 1） */
-            v = (m->drp_locked != 0u) ? DPM_DRP_STATUS_LOCKED : 0u;
-        } else if (off >= DPM_DRP_OFF_BASE) {
-            uint32_t idx = (off - DPM_DRP_OFF_BASE) / 4u;
-            if (idx < 32u) {
-                v = m->drp[idx];
-            }
+        if (off == DPM_DRP_OFF_ID) {
+            v = DPM_DRP_ID_VALUE;
+        } else if (off == DPM_DRP_STATUS_OFF) {
+            /* bit0 = locked、bit1 = busy（重配置进行中） */
+            v = ((m->drp_locked != 0u) ? DPM_DRP_STATUS_LOCKED : 0u) |
+                ((m->lock_left != 0u) ? DPM_DRP_STATUS_BUSY : 0u);
+        } else if ((off / 4u) < 32u) {
+            /* 寄存器镜像按字索引（off/4），与写路径一致 */
+            v = m->drp[off / 4u];
         }
         return v;
     }
@@ -494,16 +503,18 @@ void dpm_model_init(dpm_model_t *m, uint32_t slow_hz, uint32_t dsp_hz)
     m->ext_phase_mdeg = 0u;
     m->ext_absent = 1u;         /* 默认外部引脚无信号：测量不会完成（与真实 PL 一致） */
 
-    /* DRP 复位值 = BD 初值（clk_wiz 生成的复位字，见 dpm_regs.h 的表）：
-     * VCO = 50MHz×20 = 1000MHz、D = 40 → clk_out1/clk_out2 = 25MHz；
-     * clk_out2 相位字 = 90000 毫度 = 90.000°（同时是当前 bitstream 下固定的实际相位）。 */
-    m->drp[DPM_DRP_IDX_CLKFBOUT] = (20u << 8) | DPM_DRP_DIVIDE_FIELD(1u);  /* 0x00001401 */
-    m->drp[DPM_DRP_IDX_CLKOUT0] = DPM_DRP_DIVIDE_FIELD(40u);               /* 0x00000028 */
-    m->drp[DPM_DRP_IDX_CLKOUT0_PHASE] = 0u;                                /* 0x00000000 */
-    m->drp[DPM_DRP_IDX_CLKOUT0_DUTY] = 50000u;                             /* 0x0000C350 */
-    m->drp[DPM_DRP_IDX_CLKOUT1] = DPM_DRP_DIVIDE_FIELD(40u);               /* 0x00000028 */
-    m->drp[DPM_DRP_IDX_CLKOUT1_PHASE] = DPM_DRP_PHASE_MDEG(90000u);        /* 0x00015F90 */
-    m->drp[DPM_DRP_IDX_CLKOUT1_DUTY] = 50000u;                             /* 0x0000C350 */
+    /* DRP 复位值 = 方案 A 下 MMCM 寄存器的 BD 初值（与 clk_wiz Write DRP 在
+     * 同一工作点生成的权威值一致）：
+     * VCO = 50MHz×20/1 = 1000MHz、D = 40 → clk_out1/clk_out2 = 25MHz；
+     * clk_out2 的 ClkReg2 的 DELAY_TIME = 10 个 VCO 周期 = 90°。 */
+    m->drp[DPM_DRP_OFF_CLKFBOUT / 4u] = 0x128Au;  /* CLKFBOUT ClkReg1 */
+    m->drp[DPM_DRP_OFF_CLKFBOUT2 / 4u] = 0x0000u; /* CLKFBOUT ClkReg2 */
+    m->drp[DPM_DRP_OFF_CLKOUT0 / 4u] = 0x1514u;   /* CLKOUT0 ClkReg1 */
+    m->drp[DPM_DRP_OFF_CLKOUT0_2 / 4u] = 0x0000u; /* CLKOUT0 ClkReg2 */
+    m->drp[DPM_DRP_OFF_CLKOUT1 / 4u] = 0x1514u;   /* CLKOUT1 ClkReg1 */
+    m->drp[DPM_DRP_OFF_CLKOUT1_2 / 4u] = 0x000Au; /* CLKOUT1 ClkReg2（90°） */
+    m->drp[DPM_DRP_OFF_DIVCLK / 4u] = 0x1041u;    /* DIVCLK = 1 */
+    m->drp[DPM_DRP_OFF_POWER / 4u] = 0xFFFFu;     /* POWER */
     m->drp_locked = 1u;
     m->lock_left = 0u;
     m->cycles = 0u;

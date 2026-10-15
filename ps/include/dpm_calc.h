@@ -114,11 +114,19 @@ void dpm_sig_solve(uint32_t target_freq_hz, uint32_t phase_milli_deg, uint32_t s
 #define DPM_SIG_BD_VCO_HZ 1000000000u
 #define DPM_SIG_BD_DIV 40u
 
-/** 由工作点组装 MMCM DRP 的三个配置字（CLKFBOUT / CLKOUT0 / CLKOUT1）。
+/** 由工作点算出要写进 MMCM 寄存器镜像的 6 个 16 位寄存器值（方案 A）。
  *
- * 字段编码见 `dpm_regs.h`：分频字段 = 低字节的 `div` 本体，相位字段在 bit[15:8]。
+ * 每个 CLKOUTx / CLKFBOUT 需要两个寄存器（ClkReg1/ClkReg2），因此是三对：
+ *   - `clkfbout`  / `clkfbout2`  → MMCM 0x14 / 0x15（CLKFBOUT）
+ *   - `clkout0`   / `clkout0_2`  → MMCM 0x08 / 0x09（参考输出）
+ *   - `clkout1`   / `clkout1_2`  → MMCM 0x0A / 0x0B（移相输出，相位差在这里）
+ *
+ * 编码规则见 `dpm_regs.h` 的 `DPM_MMCM_ENCODE_CLKOUT`（位域取自 XAPP888 v1.8，
+ * 已对 clk_wiz Write DRP 生成值逐点校验）。PL 侧只搬值、不做算术。
+ * 任一输出指针可以为 NULL，表示不需要该值。
  */
-void dpm_sig_drp_words(const dpm_sig_t *sig, uint32_t *clkfbout, uint32_t *clkout0,
-                       uint32_t *clkout1);
+void dpm_sig_drp_words(const dpm_sig_t *sig, uint32_t *clkfbout, uint32_t *clkfbout2,
+                       uint32_t *clkout0, uint32_t *clkout0_2, uint32_t *clkout1,
+                       uint32_t *clkout1_2);
 
 #endif /* DPM_CALC_H */

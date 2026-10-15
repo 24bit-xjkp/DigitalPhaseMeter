@@ -119,31 +119,48 @@ static void test_drp_words(void)
 {
     dpm_sig_t sig;
     dpm_sig_solve_t st;
-    uint32_t fb;
-    uint32_t c0;
-    uint32_t c1;
+    uint32_t fb1, fb2, c01, c02, c11, c12;
 
-    printf("== DRP 配置字（实测映射）\n");
+    printf("== MMCM 寄存器编码（方案 A）\n");
     dpm_sig_solve(25000000u, 90000u, G_F_SLOW_HZ, G_PHASE_UNIT_MDEG, &sig, &st);
-    dpm_sig_drp_words(&sig, &fb, &c0, &c1);
+    dpm_sig_drp_words(&sig, &fb1, &fb2, &c01, &c02, &c11, &c12);
 
-    /* CLKFBOUT：低字节 = DIVCLK、bit[15:8] = MULT（复位值 0x00001401 同构） */
-    CHECK(fb == 0x00001401u, "CLKFBOUT 字 = 0x%08X 期望 0x00001401", fb);
-    /* clk_out1 / clk_out2 分频字：低字节 = D 本体（不是 2D） */
-    CHECK(c0 == 40u && c1 == 40u, "分频字 = 0x%08X / 0x%08X 期望 40", c0, c1);
-    /* 相位是**独立的 32 位毫度字**（0x218），不是分频字的 bit[15:8] */
-    CHECK(dpm_sig_phase_word_mdeg(&sig) == 90000u, "相位字 = %u 期望 90000 毫度",
-          dpm_sig_phase_word_mdeg(&sig));
-    CHECK(DPM_DRP_WORD(DPM_DRP_IDX_CLKOUT1_PHASE) == 0x218u, "0x218 偏移");
+    /* 权威值：clk_wiz 的 Write DRP 模式在同一工作点（50MHz 参考、M=20、D=40、
+     * 相位 0/90°）生成的值，已在 build/analysis/golden 逐点校验过。
+     *   CLKFBOUT ClkReg1 = 0x128A、ClkReg2 = 0x0000
+     *   CLKOUT0  ClkReg1 = 0x1514、ClkReg2 = 0x0000
+     *   CLKOUT1  ClkReg1 = 0x1514、ClkReg2 = 0x000A  ← 90° 编码在 DELAY_TIME=10
+     */
+    CHECK(fb1 == 0x128Au, "CLKFBOUT ClkReg1 = 0x%04X 期望 0x128A", fb1);
+    CHECK(fb2 == 0x0000u, "CLKFBOUT ClkReg2 = 0x%04X 期望 0x0000", fb2);
+    CHECK(c01 == 0x1514u, "CLKOUT0 ClkReg1 = 0x%04X 期望 0x1514", c01);
+    CHECK(c02 == 0x0000u, "CLKOUT0 ClkReg2 = 0x%04X 期望 0x0000", c02);
+    CHECK(c11 == 0x1514u, "CLKOUT1 ClkReg1 = 0x%04X 期望 0x1514", c11);
+    CHECK(c12 == 0x000Au, "CLKOUT1 ClkReg2 = 0x%04X 期望 0x000A（DELAY_TIME=10）", c12);
+    CHECK(dpm_mmcm_encode_divclk(1u) == 0x1041u, "DIVCLK(1) = 0x%04X 期望 0x1041",
+          dpm_mmcm_encode_divclk(1u));
+
+    /* 相位单调性：更大的相位应给出不小于的 DELAY_TIME（同一分频下） */
+    {
+        dpm_sig_t s2;
+        dpm_sig_solve_t st2;
+        uint32_t a1, a2, b1, b2, d1, d2;
+        dpm_sig_solve(25000000u, 45000u, G_F_SLOW_HZ, G_PHASE_UNIT_MDEG, &s2, &st2);
+        dpm_sig_drp_words(&s2, &a1, &a2, &b1, &b2, &d1, &d2);
+        CHECK((d2 & 0x3Fu) <= (c12 & 0x3Fu), "45° 的 DELAY_TIME(%u) 应 <= 90° 的(%u)",
+              d2 & 0x3Fu, c12 & 0x3Fu);
+    }
+
+    /* 寄存器表与状态偏移 */
+    CHECK(DPM_DRP_OFF_LOAD == 0x28u, "LOAD 偏移 0x28（实际 0x%02X）", DPM_DRP_OFF_LOAD);
     CHECK(DPM_DRP_STATUS_OFF == 0x004u, "状态寄存器偏移 0x004");
-    CHECK(DPM_DRP_LOAD_BOTH == 0x07u, "Load 值");
-    CHECK(DPM_DRP_PHASE_WRITABLE == 0, "当前 bitstream 相位不可写（实测结论）");
+    CHECK(DPM_DRP_OFF_CLKFBOUT == 0x08u && DPM_DRP_OFF_CLKOUT1_2 == 0x1Cu,
+          "寄存器偏移表（CLKFBOUT=0x08、CLKOUT1_2=0x1C）");
+    CHECK(DPM_DRP_PHASE_WRITABLE == 1, "方案 A 下相位可写（软件直接编码 MMCM 位域）");
 
-    /* 相位步长：候选 B 下 = 1/8 VCO 周期 */
+    /* 相位步长与相位单位宏保持原语义 */
     CHECK(dpm_sig_phase_step_ps(1000000000u) == 125u, "1000MHz 步长 %u ps",
           dpm_sig_phase_step_ps(1000000000u));
-    CHECK(dpm_sig_phase_step_ps(600000000u) == 208u || dpm_sig_phase_step_ps(600000000u) == 208u,
-          "600MHz 步长 %u ps", dpm_sig_phase_step_ps(600000000u));
     CHECK(dpm_sig_phase_unit_deg_milli() == 45000u, "相位单位宏");
 }
 

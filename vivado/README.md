@@ -10,9 +10,19 @@ IP 对外只有**一个 AXI 从口**：`s_axi_lite`（AXI4-Lite，4KB 寄存器�
 同一个寄存器区里还有**片内信号源使能与输入选择**的寄存器（`SIG_CTRL` / `SIG_STATUS`，
 偏移 0x2C–0x30）：PL 内用选择位在**外部引脚输入**与**片内信号源**之间切换，`SIG_CTRL.enable` 控制
 片内源的使能。
-片内信号源本身由 BD 里另一个 **MMCM（`clk_wiz_src`，带动态重配置）** 产生：两路输出同频、相位差可调，
-**频率与相位差由 PS 通过 AXI4-Lite 写它的 DRP 寄存器在线设定**（独立地址段 `0x43C1_0000`，
-寄存器映射见 PG065），两路输出**直接**作为被测信号送进 IP 的异步采样链。
+片内信号源本身由 BD 里的 **裸 MMCM（`vivado/rtl/dpm_mmcm_src.v`，`MMCME2_ADV` 薄封装）** 产生：
+两路输出同频、相位差可调，**频率与相位差由 PS 通过 AXI4-Lite 直接把 MMCM 的 16 位寄存器值
+写进 `dpm_src_drp`（极简 DRP 控制器）**，控制器再按固定顺序搬进 MMCM 的 DRP 口
+（独立地址段 `0x43C1_0000`），两路输出**直接**作为被测信号送进 IP 的异步采样链。
+
+> **为什么不再用 clk_wiz 的 `USE_DYN_RECONFIG + PHASE_DUTY_CONFIG`**：
+> 那套配置会把「毫度/百分比/MHz → MMCM 计数器位域」的定点换算综合成硬件，
+> 实测占 13,287 个物理 LUT site 与 38 个 DSP48E1（整设计 96% 的逻辑 LUT）。
+> AMD PG065 明确写了「Enabling this option utilizes DSP resources. By default, this option
+> is deselected to optimize the design for area.」。把这套纯整数换算搬到 PS 软件后，
+> 整设计 Slice LUTs 从 14,048（79.8%）降到 **948（5.4%）**、DSP 从 40 降到 **2**。
+> 编码规则见 `build/analysis/golden/mmcm_encode.py`（已对 clk_wiz 的 Write DRP
+> 生成值逐点校验）。
 寄存器定义见仓库根目录 [`README.md`](../README.md#寄存器映射s_axi_lite基地址-0x43c0_0000)。
 
 ## 前提
@@ -31,7 +41,8 @@ IP 对外只有**一个 AXI 从口**：`s_axi_lite`（AXI4-Lite，4KB 寄存器�
 | 脚本                  | 作用                                                                                                                  | 产物                                                                               |
 | --------------------- | --------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
 | `package_ip.tcl`      | 读入生成的 RTL，打包成 IP（VLNV `xjkp.org:dpm:dpm_top:1.0`），推断唯一的 AXI4-Lite 从口、补时钟/复位/中断接口与地址块 | `build/vivado/ip/dpm_top/`（component.xml + src/ + xgui/）                         |
-| `create_bd.tcl`       | 创建 PS7 + AXI 协议转换器 + IP 的 block design，连接时钟/复位/中断/信号，分配地址，验证并生成 wrapper                 | `build/vivado/bd_proj/`                                                            |
+| `package_src_ip.tcl`  | 把 `MmcmDrpController` 打包成 IP（VLNV `xjkp.org:dpm:dpm_src_drp:1.0`），推断 AXI4-Lite 从口、补时钟/复位接口与 4KB 地址块 | `build/vivado/ip/dpm_src_drp/`                                                     |
+| `create_bd.tcl`       | 创建 PS7 + AXI 互联 + 两个 IP + 裸 MMCM 的 block design，连接时钟/复位/中断/信号，分配地址，验证并生成 wrapper            | `build/vivado/bd_proj/`                                                            |
 | `build_bitstream.tcl` | 综合、实现、导出 bitstream 与 XSA                                                                                     | `build/vivado/dpm_system.xsa`、`build/vivado/{timing_summary,utilization,drc}.rpt` |
 | `apply_timing_strategy.tcl` | 给 `synth_1` / `impl_1` 写入 DSP 域高速时钟所需的高性能策略（见下文「400MHz 的策略」）                            | 修改 `build/vivado/bd_proj/dpm_bd.xpr` 里的 run 参数（不产出文件）                  |
 | `impl_multi.tcl`      | 同一网表上做多次独立布局布线（place/route 有 run-to-run 差异），取余量最好的一次并汇总 WNS/WHS | `best_timing.rpt`、`multi_a<N>_timing.rpt`、`impl_multi_results.csv`                |
@@ -43,6 +54,7 @@ IP 对外只有**一个 AXI 从口**：`s_axi_lite`（AXI4-Lite，4KB 寄存器�
 
 ```bash
 vivado -mode batch -source vivado/package_ip.tcl
+vivado -mode batch -source vivado/package_src_ip.tcl    # 片内信号源的 DRP 控制器
 vivado -mode batch -source vivado/create_bd.tcl         # DSP 域默认 400MHz；可传参数改频率
 vivado -mode batch -source vivado/apply_timing_strategy.tcl   # 写入 400MHz 需要的综合/实现策略
 vivado -mode batch -source vivado/build_bitstream.tcl
@@ -54,7 +66,7 @@ vivado -mode batch -source vivado/query_runs.tcl        # 随时可跑，查看�
 > `FCLK_CLK1` 上限 250MHz，因此第二条路只能覆盖 250MHz 及以下。
 > 例：`create_bd.tcl` = 400MHz（默认）；`create_bd.tcl 300` = 300MHz；`create_bd.tcl 0 150` = PS 直供 150MHz。
 
-> **改了 RTL 之后**：`package_ip.tcl` → `create_bd.tcl` → `apply_timing_strategy.tcl` →
+> **改了 RTL 之后**：`package_ip.tcl`（顶层 IP）→ `package_src_ip.tcl`（DRP 控制器）→ `create_bd.tcl` → `apply_timing_strategy.tcl` →
 > `build_bitstream.tcl` 要按顺序重跑（IP 内容变了，BD 里的 IP 也要重新生成）。
 
 ## 查看综合 / 实现选项

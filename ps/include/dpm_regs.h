@@ -91,68 +91,155 @@
 
 /* --------------------------------------------------- 片内源 MMCM 的 DRP 口 */
 
-/** DRP 寄存器文件基偏移（PG065：AXI4-Lite 动态重配置寄存器从 0x200 起，按字对齐）。 */
-#define DPM_DRP_OFF_BASE 0x200u
-/** 第 n 个配置字（n = 0..31）的字节偏移：0x200 + 4n。 */
-#define DPM_DRP_WORD(n) (DPM_DRP_OFF_BASE + 4u * (uint32_t)(n))
-
-/** 配置字索引（与 `clk_wiz_drp.vhd` 的 ram_clk_config 索引一致）。 */
-#define DPM_DRP_IDX_CLKFBOUT 0u      /**< {MULT[15:8], DIVCLK[7:0]} */
-#define DPM_DRP_IDX_CLKOUT0 2u       /**< clk_out1 分频（低字节 = D） */
-#define DPM_DRP_IDX_CLKOUT0_PHASE 3u /**< clk_out1 相位，单位**毫度** */
-#define DPM_DRP_IDX_CLKOUT0_DUTY 4u  /**< clk_out1 占空比（×1e5，50000 = 50%） */
-#define DPM_DRP_IDX_CLKOUT1 5u       /**< clk_out2 分频（低字节 = D） */
-#define DPM_DRP_IDX_CLKOUT1_PHASE 6u /**< clk_out2 相位，单位**毫度** */
-#define DPM_DRP_IDX_CLKOUT1_DUTY 7u  /**< clk_out2 占空比 */
-
-/** 配置字内容（实测：`*_clk_wiz_drp.vhd:391-415` 的复位赋值 + xsim 读回，
- *  每个输出占 3 个字；`spec/drp_semantics.json` 是机器可读版本）。
+/** DRP 寄存器文件基偏移。
  *
- * | 字索引 | 字节偏移 | 复位值     | 含义                                    |
- * | ------ | -------- | ---------- | --------------------------------------- |
- * | 0      | 0x200    | 0x00001401 | CLKFBOUT：MULT = 0x14 = 20、DIVCLK = 1  |
- * | 2      | 0x208    | 0x00000028 | clk_out1 分频 = 0x28 = **40 = D 本体**  |
- * | 3      | 0x20C    | 0x00000000 | clk_out1 相位（**毫度**）               |
- * | 4      | 0x210    | 0x0000C350 | clk_out1 占空比（50000 → 50%）          |
- * | 5      | 0x214    | 0x00000028 | clk_out2 分频 = 40 = D                  |
- * | 6      | 0x218    | 0x00015F90 | clk_out2 相位 = 90000 毫度 = 90.000°    |
- * | 7      | 0x21C    | 0x0000C350 | clk_out2 占空比 = 50%                   |
+ * 方案 A（`vivado/package_src_ip.tcl` 打包的 `dpm_src_drp`）把寄存器表重排为
+ * **直接镜像 MMCM 的 16 位寄存器值**：软件自己完成「频率/相位 → MMCM 计数器位域」
+ * 的编码，PL 侧只负责把值按顺序写进 MMCM 的 DRP 口（硬件不含任何算术）。
  *
- * **两条纠正**（早期文档写错过，以实测为准）：
- *   1. 分频字段是**低字节的 D 本体**，不是 `2*D`；
- *   2. 相位**不是**分频字里的 bit[15:8]，而是**独立的 32 位毫度字**（0x20C / 0x218）。
+ * 这样做的原因：原来用 clk_wiz 的 `USE_DYN_RECONFIG + PHASE_DUTY_CONFIG`，该配置
+ * 会把这套定点换算综合成硬件，实测在 xc7z010clg400-1 上占 13,287 个物理 LUT site
+ * 与 38 个 DSP48E1（整设计 96% 的逻辑 LUT）；而 PG065 明确建议用「Write DRP」
+ * 之类不做换算的方式省 DSP。
+ *
+ * 寄存器映射（字节偏移，每个都是 32 位访问、只有低 16 位有效）：
+ *
+ * | 偏移 | 名称        | 属性 | 说明                                     |
+ * | ---- | ----------- | ---- | ---------------------------------------- |
+ * | 0x00 | ID          | 只读 | 固定 0x44504D03（"DPM3"）                  |
+ * | 0x04 | STATUS      | 只读 | b0 = MMCM locked、b1/b2 = 重配置进行中     |
+ * | 0x08 | CLKFBOUT    | 读写 | MMCM 寄存器 0x14 的值                     |
+ * | 0x0C | CLKFBOUT2   | 读写 | MMCM 寄存器 0x15 的值                     |
+ * | 0x10 | CLKOUT0     | 读写 | MMCM 寄存器 0x08 的值（参考输出）           |
+ * | 0x14 | CLKOUT0_2   | 读写 | MMCM 寄存器 0x09 的值                     |
+ * | 0x18 | CLKOUT1     | 读写 | MMCM 寄存器 0x0A 的值（移相输出）           |
+ * | 0x1C | CLKOUT1_2   | 读写 | MMCM 寄存器 0x0B 的值                     |
+ * | 0x20 | DIVCLK      | 读写 | MMCM 寄存器 0x16 的值                     |
+ * | 0x24 | POWER       | 读写 | MMCM 寄存器 0x28 的值（复位值 0xFFFF）      |
+ * | 0x28 | LOAD        | W1S  | 写 1 触发一次完整重配置                     |
  */
+#define DPM_DRP_OFF_BASE 0x08u
 
-/** 分频字段：低字节直接存放分频比 D。 */
-#define DPM_DRP_DIVIDE_FIELD(div) ((uint32_t)(div) & 0xFFu)
-/** 从配置字取回分频比（低字节）。 */
-#define DPM_DRP_DIVIDE_GET(w) ((w) & 0xFFu)
-/** 相位字：整数**毫度**（例如 90000 = 90.000°、22500 = 22.5°）。 */
-#define DPM_DRP_PHASE_MDEG(mdeg) ((uint32_t)(mdeg))
-/** 从相位字取回毫度。 */
-#define DPM_DRP_PHASE_MDEG_GET(w) ((w) & 0xFFFFFFFFu)
+/** 关键寄存器偏移（字节）。 */
+#define DPM_DRP_OFF_ID 0x00u        /**< 只读，应为 0x44504D03 */
+#define DPM_DRP_OFF_STATUS 0x04u    /**< b0 = locked、b1/b2 = busy */
+#define DPM_DRP_OFF_CLKFBOUT 0x08u  /**< MMCM 0x14 */
+#define DPM_DRP_OFF_CLKFBOUT2 0x0Cu /**< MMCM 0x15 */
+#define DPM_DRP_OFF_CLKOUT0 0x10u   /**< MMCM 0x08（参考输出） */
+#define DPM_DRP_OFF_CLKOUT0_2 0x14u /**< MMCM 0x09 */
+#define DPM_DRP_OFF_CLKOUT1 0x18u   /**< MMCM 0x0A（移相输出） */
+#define DPM_DRP_OFF_CLKOUT1_2 0x1Cu /**< MMCM 0x0B */
+#define DPM_DRP_OFF_DIVCLK 0x20u    /**< MMCM 0x16 */
+#define DPM_DRP_OFF_POWER 0x24u     /**< MMCM 0x28 */
+#define DPM_DRP_OFF_LOAD 0x28u      /**< W1S：写 1 触发重配置 */
 
-/** 写「Load」寄存器触发重新锁定。实测语义：
- *  - bit0 = **触发位**（写 1 才真正加载）；
- *  - bit1 = **SADDR**：0 = 用静态 S1 配置（BD 里的初值）、1 = 用寄存器文件（S2）配置；
- *  - 复位值 `0x00000003`（= 触发 + S1 路径），xsim 实测 `0x03` 与 `0x07` 结果一致。
- */
-#define DPM_DRP_LOAD_OFF 0x25Cu
-#define DPM_DRP_LOAD_TRIGGER (1u << 0) /**< 触发重新加载 */
-#define DPM_DRP_LOAD_SADDR (1u << 1)   /**< 1 = 使用寄存器文件（动态）配置 */
-/** 触发一次加载（寄存器文件路径）。 */
-#define DPM_DRP_LOAD_BOTH 0x07u
-
-/** 状态寄存器在**偏移 0x004**（不是「字 31 / 0x27C」，后者恒为 0）。 */
-#define DPM_DRP_STATUS_OFF 0x004u
+#define DPM_DRP_ID_VALUE 0x44504D03u /**< ID 寄存器的固定值 */
+/** 状态寄存器偏移（与 ID 同处本地寄存器区，不是 MMCM 镜像的一部分）。 */
+#define DPM_DRP_STATUS_OFF 0x04u
 #define DPM_DRP_STATUS_LOCKED (1u << 0) /**< MMCM 已锁定 */
-#define DPM_DRP_STATUS_SRDY (1u << 1)   /**< 重新配置完成（只在锁定那一拍为 1） */
+#define DPM_DRP_STATUS_BUSY (1u << 1)   /**< 重配置进行中 */
+/** LOAD 寄存器的别名（写 1 触发一次完整重配置）。 */
+#define DPM_DRP_LOAD_OFF DPM_DRP_OFF_LOAD
 
-/** **当前 bitstream 的限制**：寄存器文件里的相位字没有接到 MMCM 重建逻辑，
- *  写它不会改变输出相位（xsim 实测 43 组，`clk_out2` 恒为静态配置的 90°）。
- *  频率（分频字）可以改。要恢复在线相位能力需要给 `clk_wiz_src` 加
- *  `CONFIG.PHASE_DUTY_CONFIG {true}` 后重建 IP/BD，见 `docs/verify-drp.md`。
+/** POWER 寄存器：使能相位 mux 与 delay time（复位值）。 */
+#define DPM_DRP_POWER_ENABLE_PHASE 0xFFFFu
+
+/* ---- MMCM 寄存器编码（与 build/analysis/golden/mmcm_encode.py 逐步一致）----
+ *
+ * 位域依据官方 XAPP888 v1.8 的 Table 1/2，并用 clk_wiz 的 Write DRP 模式生成的
+ * 权威寄存器值逐点校验过（多分频 × 多相位共 14 个点全部一致）：
+ *
+ *   ClkReg1 = {PHASE_MUX[15:13], 1'b1, HIGH_TIME[11:6], LOW_TIME[5:0]}
+ *   ClkReg2 = {9'h000, EDGE[7], NO_COUNT[6], DELAY_TIME[5:0]}
+ *
+ * 其中：
+ *   HIGH_TIME = divide / 2，LOW_TIME = divide - HIGH_TIME（50% 占空比）
+ *   EDGE      = divide & 1（奇数分频才置位）
+ *   NO_COUNT  = 1 当且仅当 divide == 1
+ *   DELAY_TIME = round(phase_mdeg * divide / 360000) & 0x3F
+ *   PHASE_MUX  = (round(phase_mdeg * divide / 360000) >> 6) & 0x7
+ *
+ * 注：手册把 ClkReg1 的 bit12 标为 RSVD，但 clk_wiz 的生成器在该位**恒置 1**
+ * （div=20/40/80/100 实测全为 1）；编码以实测生成值为准，勿按手册改。
  */
-#define DPM_DRP_PHASE_WRITABLE 0
+
+/** 由分频比与相位（毫度）算出一个 CLKOUTx / CLKFBOUT 寄存器对。
+ *
+ * @param divide     输出分频比 D（1..128）
+ * @param phase_mdeg 相位，单位毫度（0..360000）
+ * @param clkreg1    输出：写入 MMCM 基地址（0x08/0x0A/0x14）的 16 位值
+ * @param clkreg2    输出：写入基地址 +1（0x09/0x0B/0x15）的 16 位值
+ */
+#define DPM_MMCM_ENCODE_CLKOUT(divide, phase_mdeg, clkreg1, clkreg2)                       \
+    do {                                                                                   \
+        uint32_t d_ = (uint32_t)(divide);                                                  \
+        uint32_t ht_ = d_ / 2u;                                                            \
+        uint32_t lt_ = d_ - ht_;                                                           \
+        uint32_t vco_ = ((uint32_t)(phase_mdeg) * d_ + 180000u) / 360000u;                 \
+        uint32_t ed_ = (d_ == 1u) ? 0u : (d_ & 1u);                                        \
+        uint32_t nc_ = (d_ == 1u) ? 1u : 0u;                                               \
+        (clkreg1) = (uint16_t)(0x1000u | (((vco_ >> 6) & 0x7u) << 13) |                     \
+                               ((ht_ & 0x3Fu) << 6) | (lt_ & 0x3Fu));                      \
+        (clkreg2) = (uint16_t)((ed_ << 7) | (nc_ << 6) | (vco_ & 0x3Fu));                  \
+    } while (0)
+
+/** 从 CLKOUTx / CLKFBOUT 的 ClkReg1 反推分频比。
+ *
+ * 布局：`{PHASE_MUX[15:13], MARK[12], HIGH_TIME[11:6], LOW_TIME[5:0]}`。
+ * MARK（bit12）在生成值里**恒为 1**，而 `divide == 1` 的计数器字是 `0x0041`
+ * （bit12 为 0），因此：bit12 == 0 即 divide == 1，否则 divide = HIGH_TIME + LOW_TIME。
+ */
+static inline uint32_t dpm_mmcm_decode_divide(uint32_t clkreg1)
+{
+    if (((clkreg1 >> 12) & 1u) == 0u) {
+        return 1u; /* divide == 1：HIGH/LOW_TIME 是占位的 1 */
+    }
+    return ((clkreg1 >> 6) & 0x3Fu) + (clkreg1 & 0x3Fu);
+}
+
+/** 由 DELAY_TIME 与输出分频反推相位（毫度）。
+ *
+ * DELAY_TIME 是 **VCO 周期**的整数倍，而 1 个输出周期 = `divide` 个 VCO 周期，
+ * 因此 `phase_mdeg = delay_time * 360000 / divide`。
+ * 与 `DPM_MMCM_ENCODE_CLKOUT` 的 `delay = round(phase * divide / 360000)` 互逆。
+ */
+static inline uint32_t dpm_mmcm_decode_phase_mdeg(uint32_t delay_time, uint32_t divide)
+{
+    if (divide == 0u) {
+        return 0u;
+    }
+    return (uint32_t)(((uint64_t)(delay_time & 0x3Fu) * 360000u) / (uint64_t)divide) % 360000u;
+}
+
+/** 从 DIVCLK 寄存器（MMCM 地址 0x16）反推 DIVCLK_DIVIDE。
+ *
+ * 布局与 ClkReg1 不同：`{2'b00, EDGE[13], NO_COUNT[12], HIGH_TIME[11:6], LOW_TIME[5:0]}`，
+ * 这里 bit12 是 NO_COUNT（divide == 1 时为 1）。
+ */
+static inline uint32_t dpm_mmcm_decode_divclk(uint32_t divreg)
+{
+    if (((divreg >> 12) & 1u) != 0u) {
+        return 1u;
+    }
+    return ((divreg >> 6) & 0x3Fu) + (divreg & 0x3Fu);
+}
+
+/** 由分频比算 DIVCLK 寄存器（MMCM 地址 0x16）。 */
+static inline uint16_t dpm_mmcm_encode_divclk(uint32_t divclk_divide)
+{
+    uint32_t d = divclk_divide;
+    uint32_t ht = (d == 1u) ? 1u : (d / 2u);
+    uint32_t lt = (d == 1u) ? 1u : (d - d / 2u);
+    uint32_t ed = (d == 1u) ? 0u : (d & 1u);
+    uint32_t nc = (d == 1u) ? 1u : 0u;
+    /* 布局：{2'b00, EDGE[13], NO_COUNT[12], HIGH_TIME[11:6], LOW_TIME[5:0]}
+     * 权威值 DIVCLK(divide=1) = 0x1041 = no_count(bit12) | high_time=1(bit6) | low_time=1 */
+    return (uint16_t)((ed << 13) | (nc << 12) | ((ht & 0x3Fu) << 6) | (lt & 0x3Fu));
+}
+
+/** **相位现在可写**：方案 A 由软件直接编码 MMCM 的 PHASE_MUX/DELAY_TIME，
+ *  不再经过 clk_wiz 那套只在 PHASE_DUTY_CONFIG=true 时才接通的语义寄存器。
+ *  上板语义待重新实测（见 spec/drp_semantics.json）。 */
+#define DPM_DRP_PHASE_WRITABLE 1
 
 #endif /* DPM_REGS_H */

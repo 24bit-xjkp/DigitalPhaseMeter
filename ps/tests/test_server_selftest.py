@@ -312,12 +312,14 @@ def test_identify_status(sv: Server) -> None:
           creg == 0x00030104, hex(creg))
     check("IDENTIFY 时钟频率", dsp == 400_000_000 and slow == 50_000_000, f"{dsp}/{slow}")
     check("IDENTIFY 版本号非 0", ver != 0, hex(ver))
-    check("IDENTIFY caps 与 flags 同组位（0x07：含片内源/连续/流）",
-          caps == flags and (caps & 0x07) == 0x07, f"caps={caps:#x} flags={flags:#x}")
+    check("IDENTIFY caps 含片内源/连续/流（0x07）",
+          (caps & 0x07) == 0x07, f"caps={caps:#x}")
+    check("IDENTIFY flags 至少含 caps 的位（flags 可能多出能力位，如 b4 phaseControllable）",
+          (flags & caps) == caps, f"caps={caps:#x} flags={flags:#x}")
     check("IDENTIFY flags b0 片内源", (flags & 1) == 1, hex(flags))
     check("IDENTIFY flags b1 连续 / b2 流", (flags & 0x06) == 0x06, hex(flags))
-    check("IDENTIFY flags b4 phaseControllable = 0（实测相位不可在线改）",
-          (flags & 0x10) == 0, hex(flags))
+    check("IDENTIFY flags b4 phaseControllable = 1（方案 A：软件直接编码 MMCM 相位位域）",
+          (flags & 0x10) == 0x10, hex(flags))
 
     pl = sv.expect_ok(CMD_GET_STATUS)
     check("GET_STATUS 长度 = 20", len(pl) == 20, f"实际 {len(pl)}")
@@ -396,7 +398,9 @@ def test_sig_and_golden(sv: Server, golden: dict, verbose: bool) -> None:
                   rf == v_solve["freq_hz"] and rvco == v_solve["vco_hz"] and rdiv == v_solve["div"],
                   f"f={rf} VCO={rvco} D={rdiv} vs golden f={v_solve['freq_hz']} "
                   f"VCO={v_solve['vco_hz']} D={v_solve['div']}")
-            check(f"{tag} phaseField = 0（相位不可在线改，字段无意义）", rfield == 0, str(rfield))
+            # 方案 A 下相位可在线改，phaseField = 吸附后的相位 / 45° 步长
+            check(f"{tag} phaseField = 相位/45° 步长",
+                  rfield == rp // unit, f"field={rfield} 期望 {rp // unit}（rp={rp}）")
             check(f"{tag} 回显的写入相位 = 吸附到 45° 网格后的值",
                   rp == v_solve["phase_requested_mdeg"] // unit * unit, f"{rp}")
 
@@ -440,7 +444,7 @@ def test_sig_and_golden(sv: Server, golden: dict, verbose: bool) -> None:
     # 22.5° 不在 45° 网格上：就近吸附（半点向上 → 45°）并回显实际写入值
     pl = sv.expect_ok(CMD_SET_SIG, u32(25_000_000) + u32(22_500))
     check("SET_SIG(22.5°) 吸附到 45° 网格（半点向上 → 45°）并回显",
-          rd_u32(pl, 4) == 45_000 and pl[14] == 0, pl.hex())
+          rd_u32(pl, 4) == 45_000 and pl[14] == 1, pl.hex())
 
 
 def test_result_clear(sv: Server) -> None:
