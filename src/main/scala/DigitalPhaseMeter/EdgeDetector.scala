@@ -3,8 +3,7 @@ package DigitalPhaseMeter
 import chisel3._
 import chisel3.util._
 
-/** 边沿类型
-  */
+/** 边沿类型 */
 object EdgeType extends Enumeration {
     type Type = Value
     val rising, falling, both = Value
@@ -35,11 +34,6 @@ class EdgeDetector(val n: Int = 3, val edgeType: EdgeType.Type = EdgeType.rising
 }
 
 object EdgeDetector {
-    // 边沿检测器内部默认延迟级数
-    val defaultN = 3
-    // 默认延迟
-    val defaultDelay = defaultN - 1
-
     def apply(sig: Bool, edgeType: EdgeType.Type = EdgeType.rising, async: Boolean = true): Bool = {
         val edgeDetector = Module(new EdgeDetector(edgeType = edgeType, async = async))
         edgeDetector.io.in := sig
@@ -47,6 +41,4 @@ object EdgeDetector {
     }
 }
 
-object EmitEdgeDetector extends Main {
-    emitSystemVerilog(new EdgeDetector)
-}
+object EmitEdgeDetector extends Main { emitSystemVerilog(new EdgeDetector) }

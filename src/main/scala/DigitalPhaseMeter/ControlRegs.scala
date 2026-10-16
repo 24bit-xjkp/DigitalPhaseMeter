@@ -231,6 +231,4 @@ class ControlRegs(
     )
 }
 
-object EmitControlRegs extends Main {
-    emitSystemVerilog(new ControlRegs)
-}
+object EmitControlRegs extends Main { emitSystemVerilog(new ControlRegs) }

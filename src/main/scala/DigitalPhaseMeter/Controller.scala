@@ -76,17 +76,16 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
     // 高速域复位：由本模块自己的复位同步链产生（异步置位、与 dspClock 同步释放）。
     // ResetSynchronizer 的输入是**低有效**复位（顶层接 PS 的 resetn），而隐式 reset 是高有效主复位，
     // 必须取反后接入；直接传 reset.asBool 会让 dsp 域在系统复位撤销后被永久按在复位里。
-    val dspReset = ResetSynchronizer(dspClock, !reset.asBool)
-
-    val phaseMeter = withClockAndReset(dspClock, dspReset) { Module(new PhaseMeter(edgeCntWidth, phaseCntWidth)) }
+    private val dspReset = ResetSynchronizer(dspClock, !reset.asBool)
+    private val phaseMeter = withClockAndReset(dspClock, dspReset) { PhaseMeter(edgeCntWidth, phaseCntWidth) }
 
     // io.sig 由上级在本域做完使能门控与二选一后送来，这里直接进测量核心的异步采样链
-    phaseMeter.io.sig.sig1 := io.sig.sig1
-    phaseMeter.io.sig.sig2 := io.sig.sig2
+    phaseMeter.sig.sig1 := io.sig.sig1
+    phaseMeter.sig.sig2 := io.sig.sig2
 
-    private val request = CdcToggleHandShake.send(phaseMeter.io.request)
-    private val responseReady = CdcToggleHandShake.send(phaseMeter.io.response.ready)
-    private val responseValid = CdcToggleHandShake.receive(phaseMeter.io.response.valid)
+    private val request = CdcToggleHandShake.send(phaseMeter.request)
+    private val responseReady = CdcToggleHandShake.send(phaseMeter.response.ready)
+    private val responseValid = CdcToggleHandShake.receive(phaseMeter.response.valid)
 
     private val gateCntClear = Reg(Bool())
     private val (gateCnt, _) = Counter(0 to (1 << gateCntWidth) - 1, true.B, gateCntClear)
@@ -120,7 +119,7 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
             is(waitStop) {
                 when(responseValid) {
                     stateReg := idle
-                    payload.waiveAllAs[PhaseMeterResponsePayload] :<= phaseMeter.io.response.bits
+                    payload.waiveAllAs[PhaseMeterResponsePayload] :<= phaseMeter.response.bits
                     payload.gateCnt := gateCnt
                     outValid := true.B
                     responseReady.send
@@ -130,6 +129,4 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
     }
 }
 
-object EmitController extends Main {
-    emitSystemVerilog(new Controller)
-}
+object EmitController extends Main { emitSystemVerilog(new Controller) }

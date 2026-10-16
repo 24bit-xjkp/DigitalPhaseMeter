@@ -51,6 +51,4 @@ class SignalInputMux extends RawModule {
     io.sig2 := Mux(io.selectInternal, src2, io.sig2External)
 }
 
-object EmitSignalInputMux extends Main {
-    emitSystemVerilog(new SignalInputMux)
-}
+object EmitSignalInputMux extends Main { emitSystemVerilog(new SignalInputMux) }

@@ -41,5 +41,5 @@ object CdcLevel {
       * @return
       *   目的时钟域的电平
       */
-    def apply(sig: Bool, n: Int = 3): Bool = { MyShiftRegister(sig, n) }
+    def apply(sig: Bool, n: Int = 3): Bool = MyShiftRegister(sig, n)
 }

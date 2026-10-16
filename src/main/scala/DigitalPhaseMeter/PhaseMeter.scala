@@ -83,6 +83,11 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
     io.response.bits.phaseCnt := DspCounter(phaseCntWidth, clearCnt, phaseCntEnable, false)
 }
 
-object EmitPhaseMeter extends Main {
-    emitSystemVerilog(new PhaseMeter)
+object PhaseMeter {
+    def apply(edgeCntWidth: Int = 32, phaseCntWidth: Int = 32) = {
+        val phaseMeter = Module(new PhaseMeter(edgeCntWidth, phaseCntWidth))
+        phaseMeter.io
+    }
 }
+
+object EmitPhaseMeter extends Main { emitSystemVerilog(new PhaseMeter) }

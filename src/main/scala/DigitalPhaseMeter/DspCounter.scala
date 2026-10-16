@@ -33,6 +33,4 @@ object DspCounter {
     }
 }
 
-object EmitDspCounter extends Main {
-    emitSystemVerilog(new DspCounter)
-}
+object EmitDspCounter extends Main { emitSystemVerilog(new DspCounter) }

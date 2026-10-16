@@ -116,6 +116,4 @@ class DigitalPhaseMeterTop(
     }
 }
 
-object EmitDigitalPhaseMeterTop extends Main {
-    emitSystemVerilog(new DigitalPhaseMeterTop)
-}
+object EmitDigitalPhaseMeterTop extends Main { emitSystemVerilog(new DigitalPhaseMeterTop) }

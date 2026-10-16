@@ -88,6 +88,4 @@ class Axi4LiteSlave(val addrWidth: Int = 32, val dataWidth: Int = 32) extends Mo
     }
 }
 
-object EmitAxi4LiteSlave extends Main {
-    emitSystemVerilog(new Axi4LiteSlave)
-}
+object EmitAxi4LiteSlave extends Main { emitSystemVerilog(new Axi4LiteSlave) }

@@ -243,6 +243,4 @@ class MmcmDrpController(val addrWidth: Int = 32, val dataWidth: Int = 32, val re
     }
 }
 
-object EmitMmcmDrpController extends Main {
-    emitSystemVerilog(new MmcmDrpController)
-}
+object EmitMmcmDrpController extends Main { emitSystemVerilog(new MmcmDrpController) }

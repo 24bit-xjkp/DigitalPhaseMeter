@@ -5,14 +5,6 @@ import chisel3.util._
 
 /** 复位同步器：异步置位、同步释放
   *
-  * 顶层**每个时钟域各例化一个**：把 PS 侧送来的低有效异步复位（FCLK_RESET0_N）转换成与**该域时钟**同步的复位 （主时钟域一个、`dspClock` 域一个）。输入拉低时输出立即置位（异步），输入释放后经过 n
-  * 个时钟周期才释放（同步）， 保证该时钟域内的寄存器在同一个时钟沿退出复位。
-  *
-  * 消费端把它当**同步复位**用（`withClockAndReset(clk, reset)` 里的 `Bool` 复位生成 `always @(posedge clk) if (reset)`）：
-  * 置位沿由本模块的异步复位寄存器立即给出，释放沿则与该域时钟对齐，两者都在同一域内，没有跨域释放的建立/保持问题。
-  *
-  * 本模块用 RawModule 显式声明时钟与复位：它本身就是复位的来源，不能依赖隐式复位。
-  *
   * @param n
   *   同步释放的延迟级数
   */
@@ -37,6 +29,4 @@ object ResetSynchronizer {
     }
 }
 
-object EmitResetSynchronizer extends Main {
-    emitSystemVerilog(new ResetSynchronizer)
-}
+object EmitResetSynchronizer extends Main { emitSystemVerilog(new ResetSynchronizer) }
