@@ -7,8 +7,10 @@ import chisel3.util._
   *
   * @param width
   *   宽度
+  * @param withReset
+  *   是否进行复位
   */
-class DspCounter(val width: Int = 48) extends Module {
+class DspCounter(val width: Int = 48, val withReset: Boolean = true) extends Module {
     assert(width <= 48)
     val io = IO(new Bundle {
         val clear = Input(Bool())
@@ -16,15 +18,15 @@ class DspCounter(val width: Int = 48) extends Module {
         val value = Output(UInt(width.W))
     })
 
-    val cnt = RegInit(0.U(width.W))
+    val cnt = if (withReset) RegInit(0.U(width.W)) else Reg(UInt(width.W))
     addAttribute(cnt, """use_dsp = "yes"""")
     cnt := Mux(io.clear, 0.U, cnt + io.enable)
     io.value := cnt
 }
 
 object DspCounter {
-    def apply(width: Int, clear: Bool, enable: Bool): UInt = {
-        val dspCounter = Module(new DspCounter(width))
+    def apply(width: Int, clear: Bool, enable: Bool, withReset: Boolean = true): UInt = {
+        val dspCounter = Module(new DspCounter(width, withReset))
         dspCounter.io.clear := clear
         dspCounter.io.enable := enable
         dspCounter.io.value

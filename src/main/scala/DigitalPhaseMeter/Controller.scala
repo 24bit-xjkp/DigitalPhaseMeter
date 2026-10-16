@@ -88,7 +88,7 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
     private val responseReady = CdcToggleHandShake.send(phaseMeter.io.response.ready)
     private val responseValid = CdcToggleHandShake.receive(phaseMeter.io.response.valid)
 
-    private val gateCntClear = RegInit(false.B)
+    private val gateCntClear = Reg(Bool())
     private val (gateCnt, _) = Counter(0 to (1 << gateCntWidth) - 1, true.B, gateCntClear)
 
     private object StateEnum extends ChiselEnum { val idle, waitStart, measuring, waitStop = Value }

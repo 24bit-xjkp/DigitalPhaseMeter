@@ -76,11 +76,11 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
     private val clearCnt = RegNext(stateReg === idle)
     private val pulseSig1Valid = RegNext(stateReg.isOneOf(waitStart, measuring) && pulseSig1)
     private val pulseSig2Valid = RegNext(stateReg.isOneOf(waitStart, measuring, waitStop) && pulseSig2)
-    private val phaseCntEnable = RegInit(false.B)
+    private val phaseCntEnable = Reg(Bool())
     when(pulseSig1Valid) { phaseCntEnable := true.B }.elsewhen(pulseSig2Valid) { phaseCntEnable := false.B }
 
-    io.response.bits.edgeCnt := DspCounter(edgeCntWidth, clearCnt, pulseSig1Valid)
-    io.response.bits.phaseCnt := DspCounter(phaseCntWidth, clearCnt, phaseCntEnable)
+    io.response.bits.edgeCnt := DspCounter(edgeCntWidth, clearCnt, pulseSig1Valid, false)
+    io.response.bits.phaseCnt := DspCounter(phaseCntWidth, clearCnt, phaseCntEnable, false)
 }
 
 object EmitPhaseMeter extends Main {
