@@ -13,7 +13,11 @@
 * `gui_stdout.txt`：每一步的实测状态（连接信息、频率/相位读数、结果表行数、扫描结果）。
 
 退出码 0 = 全部步骤通过。**这不是单元测试**（单元测试在 `host/tests/`），而是「界面真的能用」
-的可复现证据：它把 CLI 之外的那条 GUI 通路完整跑一遍。
+的可复现证据：它把 CLI 之外的那条 GUI 通路完整跑一遍，其中两项按硬件条件换算的行为是本次新增的：
+
+* **相位上界逐频点刷新**：25MHz（D=40）放开到 359.999° 并真的设到 225°（>180°）测出来；
+  8MHz（D=125）收窄到 184.139°；
+* **闸门时间按秒设置**：界面输入 40µs，状态里读回 `gateTarget=2000` 个低速周期。
 """
 
 from __future__ import annotations
@@ -175,9 +179,64 @@ def main() -> int:
                 window.phase_label.text(),
             ),
         )
+        smoke.add(
+            "相位上界随频点刷新（8MHz）",
+            0.3,
+            lambda: smoke.check(
+                "8MHz（D=125）相位上界收窄到 184.139°",
+                abs(window.phase_spin.maximum() - 184.139) < 1e-3,
+                f"max={window.phase_spin.maximum():.3f}°；{window.phase_limit_label.text()}",
+            ),
+        )
+        smoke.add(
+            "相位上界随频点刷新（25MHz）",
+            0.3,
+            lambda: (
+                window.freq_edit.setText("25MHz"),
+                smoke.check(
+                    "25MHz（D=40）相位上界放开到 359.999°（>180° 可设）",
+                    abs(window.phase_spin.maximum() - 359.999) < 1e-3,
+                    f"max={window.phase_spin.maximum():.3f}°；{window.phase_limit_label.text()}",
+                ),
+            ),
+        )
+        smoke.add(
+            "设置片内源 25MHz/225°（>180°）",
+            0.3,
+            lambda: (
+                window.phase_spin.setValue(225.0),
+                window.after_set_sig(),
+            ),
+        )
+        smoke.add("单次测量（25MHz/225°）", 1.5, window.after_single)
+        smoke.add(
+            "检查 225° 读数",
+            0.5,
+            lambda: smoke.check(
+                ">180° 相位可设可测（25MHz 请求 225° → 显示 ≈225°）",
+                abs(float(window.phase_label.text().replace("°", "")) - 225.0) < 3.0,
+                window.phase_label.text(),
+            ),
+        )
         smoke.add("切输入源", 0.8, lambda: (window.radio_ext.setChecked(True), window.after_set_source()))
         smoke.add("切回片内源", 0.8, lambda: (window.radio_int.setChecked(True), window.after_set_source()))
-        smoke.add("闸门设置", 0.8, lambda: (window.gate_spin.setValue(2000), window.after_set_gate()))
+        smoke.add(
+            "闸门设置（按秒：40µs）",
+            0.8,
+            lambda: (
+                window.gate_spin.setValue(4e-5),
+                window.after_set_gate(),
+            ),
+        )
+        smoke.add(
+            "检查闸门换算",
+            0.8,
+            lambda: smoke.check(
+                "闸门按秒下发（40µs → 2000 低速周期 @50MHz）",
+                "gateTarget=2000" in window.status_label.text(),
+                f"{window.gate_hint.text()}；{window.status_label.text()}",
+            ),
+        )
         smoke.add(
             "结果表",
             0.5,
@@ -192,18 +251,19 @@ def main() -> int:
                 "扫描",
                 0.3,
                 lambda: (
+                    # 8MHz（D=125）的相位上界只有 184.139° → 225° 那个点会被界面跳过（2×3-1=5 行）
                     window.scan_freqs_edit.setText("8,25"),
-                    window.scan_phases_edit.setText("0,90"),
+                    window.scan_phases_edit.setText("0,90,225"),
                     window.scan_settle_spin.setValue(0.05),
                     window.after_scan(),
                 ),
             )
             smoke.add(
                 "等扫描完成",
-                6.0,
+                8.0,
                 lambda: smoke.check(
-                    "扫描完成 4 个点并给出误差统计",
-                    len(window.last_rows) == 4,
+                    "扫描完成：6 个点里 8MHz/225° 越界被跳过，其余 5 点有结果",
+                    len(window.last_rows) == 5,
                     f"rows={len(window.last_rows)}，表 {window.table.rowCount()} 行",
                 ),
             )

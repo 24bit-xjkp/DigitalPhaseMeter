@@ -6,7 +6,7 @@
 - 状态灯：busy / MMCM 锁定（locked）/ 结果丢失（lost）/ sourceReady；
 - 频率显示（大字号 + `freqHz` 原值与周期）与**相位差 0~360°**（数字 + 仪表盘弧 + 0~360° 条形）；
 - 单次测量 / 连续测量开关，CLEAR 与统计复位；
-- 闸门目标设置；
+- **闸门时间**按**秒**设置（下发时按低速时钟换算成 `SET_GATE` 的周期数，见 :func:`gate_seconds_to_cycles`）；
 - 输入源单选（外部引脚 / 片内信号源）；
 - 片内源频率与相位输入 + 「设置」；扫描频点/相位列表 + 「扫描」（频点 × 相位 → 结果表 → CSV 导出）；
 - 结果表（最近 N 条：序号 / 频率 / 相位 / gate / edge / phaseCnt / DSP 周期）+ 导出 CSV + 清空表；
@@ -17,6 +17,12 @@
 
 相位可控性来自 `spec/drp_semantics.json`（方案 A 下为 true）；不可控时（旧 bitstream）相位输入会
 置灰并给出提示，而不是假装能改。
+
+**相位上界逐频点不同**：>180° 的相位差是合法请求（相位计测的是无符号间隔），但 MMCM 的相位码
+只有 9 位（`DELAY_TIME` 6 位 + `PHASE_MUX` 3 位），可请求上界是 `min(23017499/D, 359999)` 毫度
+（见 `docs/ps-protocol.md` §6.2 与 :func:`sig.phase_max_milli_deg`）：25MHz（D=40）能到
+359.999°，10MHz（D=100）到 230.174°，8MHz（D=125）只到 184.139°。因此频率输入框每次变化都会
+用 :func:`freq_phase_limit_milli_deg` 重算相位输入的上界（而不是写死 180°）。
 """
 
 from __future__ import annotations
@@ -59,12 +65,32 @@ from PySide6.QtWidgets import (
 from . import mathx as M
 from . import protocol as P
 from . import sig as S
+from .cli import parse_freq  # 频率写法（`25MHz` / `25e6` / `25M`）与 CLI 共用一套，见 host/README.md 第 4 节
 from .client import DpmClient, scan_rows_to_csv
 
-__all__ = ["DpmGuiApp", "main"]
+__all__ = [
+    "DpmGuiApp",
+    "main",
+    "format_seconds",
+    "parse_freq_hz",
+    "gate_seconds_to_cycles",
+    "gate_cycles_to_seconds",
+    "freq_phase_limit_milli_deg",
+]
 
 #: 结果表最多保留的行数。
 MAX_ROWS = 200
+#: 相位输入的满量程（度）：0° 与 360° 同义，满量程不接收（协议字段是毫度 0..359999）。
+PHASE_MAX_DEG = 359.999
+#: 闸门时间（秒）输入范围：下限 1µs，上限 2s。
+#:
+#: 上限沿用旧界面「闸门(低速周期) ≤ 1e8」的能力（50MHz 下正好 2s；RTL 的闸门计数器是 28 位，
+#: 理论上限 2²⁸-1 ≈ 5.37s，这里不放开，避免闸门时间长到几十秒时用户等不到结果）。
+GATE_MIN_SECONDS = 1e-6
+GATE_MAX_SECONDS = 2.0
+#: 闸门计数（低速周期）的合法范围，与协议 `SET_GATE` 的 u32 字段及旧界面同界。
+GATE_MIN_CYCLES = 1
+GATE_MAX_CYCLES = 100_000_000
 #: 相位仪表盘的最小尺寸（逻辑像素）。
 GAUGE_SIZE = 150
 #: 相位条形的高度。
@@ -78,6 +104,78 @@ COLOR_WARN = "#e67e22"
 COLOR_BAD = "#e74c3c"
 COLOR_GAUGE = "#3498db"
 COLOR_INFO = "#9ad0f5"
+
+
+# --------------------------------------------------------------- 单位换算
+#
+# 界面上的两个「单位」都在这里换算，避免 Qt 控件里散落魔数：
+#
+# * 闸门时间：界面按**秒**输入，协议 `SET_GATE` 的字段是**低速时钟周期数**
+#   （`gateCnt = gateTarget + ceil(T_sig/T_slow)`，见 docs/ps-protocol.md 第 5 节）；
+# * 相位上界：逐频点不同的 MMCM 9 位相位码上界（见模块 docstring）。
+
+
+def format_seconds(seconds: float) -> str:
+    """把秒格式化成人类可读的 µs / ms / s（日志与提示标签用）。"""
+    value = float(seconds)
+    if abs(value) >= 1.0:
+        return f"{value:.6g} s"
+    if abs(value) >= 1e-3:
+        return f"{value * 1e3:.6g} ms"
+    return f"{value * 1e6:.6g} µs"
+
+
+def parse_freq_hz(text: str) -> int:
+    """解析频率输入框的文本 → 整数 Hz（写法与 CLI 的 `--freq` 共用 :func:`cli.parse_freq`）。
+
+    `25MHz` / `25e6` / `25M` / `25000000` / `25 kHz` 都接受。这里把 `float('inf')`、
+    `float('nan')`（`OverflowError`）与空串这类输入统一成 `ValueError`，让 Qt 槽只兜一种异常。
+    """
+    try:
+        return parse_freq(str(text))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"无法识别的频率写法：{text!r}") from exc
+
+
+def gate_seconds_to_cycles(seconds: float, slow_hz: int) -> int:
+    """闸门时间（秒）→ 低速周期数（= `SET_GATE` 字段值）。
+
+    换算只差一个低速时钟比例：`gateTarget = round(seconds × f_slow)`。结果夹到
+    `1..1e8`（协议 u32 字段与旧界面同界），保证不会下发 0 周期这种无意义的闸门。
+    """
+    hz = int(slow_hz)
+    if hz <= 0:
+        raise ValueError(f"低速时钟必须为正数，实际 {slow_hz}")
+    cycles = int(round(float(seconds) * hz))
+    return max(GATE_MIN_CYCLES, min(GATE_MAX_CYCLES, cycles))
+
+
+def gate_cycles_to_seconds(cycles: int, slow_hz: int) -> float:
+    """低速周期数 → 闸门时间（秒）；用于把 `STATUS.gateTarget` 回显到秒输入框。"""
+    hz = int(slow_hz)
+    if hz <= 0:
+        raise ValueError(f"低速时钟必须为正数，实际 {slow_hz}")
+    return int(cycles) / float(hz)
+
+
+def freq_phase_limit_milli_deg(
+    freq_hz: int,
+    slow_hz: int = M.SLOW_HZ_DEFAULT,
+    semantics: S.DrpSemantics | None = None,
+) -> tuple[int, int]:
+    """某频点在 MMCM 约束下的**可请求**相位上界（毫度）与输出分频 `D`。
+
+    返回 ``(上界毫度, D)``；该频点在 MMCM 约束内无解时返回 ``(0, 0)``。
+
+    上界由 9 位相位码决定（`sig.phase_max_milli_deg`），而 `D` 由频率的冻结求解规则给出
+    （`sig.solve_sig`，与 PS 固件/金标准同一套），因此**上界逐频点不同**：
+    25MHz（D=40）→ 359999（整个 0~360°）、10MHz（D=100）→ 230174、
+    8MHz（D=125）→ 184139（只能略超 180°）。相位不影响 `D`，所以这里按请求相位 0° 求解。
+    """
+    sol = S.solve_sig(int(freq_hz), 0, int(slow_hz), semantics)
+    if not sol.ok or sol.div <= 0:
+        return 0, 0
+    return S.phase_max_milli_deg(sol.div), int(sol.div)
 
 
 class _Worker(QThread):
@@ -335,14 +433,20 @@ class DpmGuiApp(QMainWindow):
         sig_box = QGroupBox("片内信号源（MMCM）")
         form = QFormLayout(sig_box)
         self.freq_edit = QLineEdit("25MHz")
+        self.freq_edit.setToolTip("写法：25MHz / 25e6 / 25M / 25000000（Hz）；与 CLI 的 --freq 一致")
         self.phase_spin = QDoubleSpinBox()
-        self.phase_spin.setRange(0.0, 179.999)
+        # 上界不是固定 180°：它由频点的 D 决定（9 位相位码），在 _refresh_phase_limit() 里刷新。
+        self.phase_spin.setRange(0.0, PHASE_MAX_DEG)
         self.phase_spin.setDecimals(3)
         self.phase_spin.setSingleStep(1.0)
         self.phase_spin.setValue(90.0)
         self.phase_spin.setSuffix(" °")
         form.addRow("频率:", self.freq_edit)
         form.addRow("相位差:", self.phase_spin)
+        self.phase_limit_label = QLabel("相位上界：-")
+        self.phase_limit_label.setWordWrap(True)
+        self.phase_limit_label.setStyleSheet(f"color: {COLOR_INFO};")
+        form.addRow(self.phase_limit_label)
         self.sig_set_btn = QPushButton("设置片内源")
         form.addRow("", self.sig_set_btn)
         self.semantics_label = QLabel("")
@@ -372,17 +476,27 @@ class DpmGuiApp(QMainWindow):
         self.cont_btn = QPushButton("连续测量：关")
         self.clear_btn = QPushButton("CLEAR")
         self.reset_btn = QPushButton("复位统计")
-        self.gate_spin = QSpinBox()
-        self.gate_spin.setRange(1, 100_000_000)
-        self.gate_spin.setValue(2000)
+        self.gate_spin = QDoubleSpinBox()
+        # 闸门时间按**秒**输入：6 位小数（1µs）比测量需要的粒度还细（50MHz 下 1 个低速周期 = 20ns），
+        # 下发时按低速时钟换算成周期数（见 gate_seconds_to_cycles）。
+        self.gate_spin.setRange(GATE_MIN_SECONDS, GATE_MAX_SECONDS)
+        self.gate_spin.setDecimals(6)
+        self.gate_spin.setSingleStep(1e-5)
+        self.gate_spin.setValue(gate_cycles_to_seconds(P.DEFAULT_GATE_TARGET, M.SLOW_HZ_DEFAULT))
+        self.gate_spin.setSuffix(" s")
+        self.gate_spin.setToolTip("闸门时间（秒）：= 低速周期数 / 低速时钟；下发时换算成 SET_GATE 的周期数")
+        self.gate_hint = QLabel("")
+        self.gate_hint.setWordWrap(True)
+        self.gate_hint.setStyleSheet(f"color: {COLOR_INFO};")
         self.gate_btn = QPushButton("设置闸门")
         grid.addWidget(self.single_btn, 0, 0)
         grid.addWidget(self.cont_btn, 0, 1)
         grid.addWidget(self.clear_btn, 1, 0)
         grid.addWidget(self.reset_btn, 1, 1)
-        grid.addWidget(QLabel("闸门(低速周期):"), 2, 0)
+        grid.addWidget(QLabel("闸门时间:"), 2, 0)
         grid.addWidget(self.gate_spin, 2, 1)
-        grid.addWidget(self.gate_btn, 3, 0, 1, 2)
+        grid.addWidget(self.gate_hint, 3, 0, 1, 2)
+        grid.addWidget(self.gate_btn, 4, 0, 1, 2)
         lay.addWidget(ctl_box)
         lay.addStretch(1)
         return panel
@@ -486,6 +600,9 @@ class DpmGuiApp(QMainWindow):
         self.scan_btn.clicked.connect(self.after_scan)
         self.export_btn.clicked.connect(self.after_export)
         self.clear_table_btn.clicked.connect(self.after_clear_table)
+        # 单位换算的联动：频率变了 → 相位上界跟着变（逐频点不同）；闸门秒值变了 → 提示周期数
+        self.freq_edit.textChanged.connect(self._refresh_phase_limit)
+        self.gate_spin.valueChanged.connect(self._refresh_gate_hint)
 
         self.sig_log.connect(self.log)
         self.sig_conn_state.connect(self._apply_connected)
@@ -521,6 +638,15 @@ class DpmGuiApp(QMainWindow):
             return None
         return self.client
 
+    def _slow_hz(self) -> int:
+        """当前低速时钟频率（未连接/未 `IDENTIFY` 时用默认 50MHz）。
+
+        闸门秒值换算与相位上界求解都要用它；`DpmClient` 的 `IDENTIFY` 会覆盖默认值。
+        """
+        if self.client is not None and self.client.slow_hz:
+            return int(self.client.slow_hz)
+        return M.SLOW_HZ_DEFAULT
+
     def _refresh_semantics_note(self) -> None:
         """按 `spec/drp_semantics.json` 的结论刷新片内源提示与相位输入可用性。"""
         sem = self.semantics
@@ -532,6 +658,50 @@ class DpmGuiApp(QMainWindow):
             self.semantics_label.setText(
                 f"⚠ 当前 bitstream 相位固定 {sem.phase_static_milli_deg / 1000:.3f}°，相位输入已置灰；来源 {sem.source}"
             )
+        self._refresh_phase_limit()
+
+    @Slot(str)
+    def _refresh_phase_limit(self, _text: str = "") -> None:
+        """按频率输入框刷新相位输入的上界与说明（上界逐频点不同，见模块 docstring）。
+
+        相位不影响 MMCM 的输出分频 `D`，所以用请求相位 0° 求解即可。频率写法还没写完
+        （如 `2`、`25MH` 打了一半）时只更新提示，不动上界，免得输入过程中上界乱跳。
+        """
+        if not self.semantics.phase_controllable:
+            self.phase_limit_label.setText("相位不可控：相位输入已置灰")
+            return
+        try:
+            freq_hz = parse_freq_hz(self.freq_edit.text())
+        except ValueError:
+            self.phase_limit_label.setText("相位上界：频率写好后自动刷新")
+            return
+        limit_mdeg, div = freq_phase_limit_milli_deg(freq_hz, self._slow_hz(), self.semantics)
+        if div <= 0:
+            self.phase_limit_label.setText(f"⚠ {freq_hz / 1e6:g}MHz 在 MMCM 约束内无解，相位上界：-")
+            return
+        grid = S.mmcm_phase_grid_milli_deg(div)
+        limit_deg = limit_mdeg / 1000.0
+        new_max = min(PHASE_MAX_DEG, limit_deg)
+        old_value = float(self.phase_spin.value())
+        self.phase_spin.setMaximum(new_max)
+        if float(self.phase_spin.value()) < old_value - 1e-9:
+            # setMaximum() 会把超出的当前值夹住：这不是用户改的，要写一条日志说明原因
+            new_value = float(self.phase_spin.value())
+            self.log(f"相位输入按 MMCM 上界收窄：{old_value:.3f}° → {new_value:.3f}°（{freq_hz / 1e6:g}MHz 的 D={div}）")
+        if new_max >= PHASE_MAX_DEG:
+            note = f"相位上界 {PHASE_MAX_DEG:.3f}°（整个 0~360° 都可请求）"
+        else:
+            # D ≤ 126 时上界恒 > 180°（23017499/126 = 182.678°），所以这里只说「到不了 360°」
+            note = f"相位上界 {new_max:.3f}°（>180° 可请求，但不到 360°）"
+        self.phase_limit_label.setText(f"{note}；D={div}，网格 {float(grid) / 1000:.4f}°")
+
+    @Slot(float)
+    def _refresh_gate_hint(self, _value: float = 0.0) -> None:
+        """把秒输入框换算成低速周期数显示出来（下发的就是这个周期数）。"""
+        slow = self._slow_hz()
+        cycles = gate_seconds_to_cycles(self.gate_spin.value(), slow)
+        resolution_hz = slow / cycles
+        self.gate_hint.setText(f"= {cycles} 低速周期 @ {slow / 1e6:g}MHz（频率分辨率 ≈ {resolution_hz / 1000:.4g} kHz）")
 
     # ------------------------------------------------------------ 连接
 
@@ -587,6 +757,9 @@ class DpmGuiApp(QMainWindow):
         color = COLOR_ON if connected else COLOR_FG
         self.conn_label.setText(text)
         self.conn_label.setStyleSheet(f"color: {color}; font-weight: bold;")
+        # 连接/断开都会改变低速时钟（`IDENTIFY` 才知道真实值），闸门秒值换算与相位上界都要跟着刷新
+        self._refresh_phase_limit()
+        self._refresh_gate_hint()
         for widget in (
             self.single_btn,
             self.cont_btn,
@@ -653,7 +826,8 @@ class DpmGuiApp(QMainWindow):
         self.radio_int.setChecked(bool(st.sig_select))
         self.radio_ext.setChecked(not bool(st.sig_select))
         if st.gate_target and not self.gate_spin.hasFocus():
-            self.gate_spin.setValue(int(st.gate_target))
+            # 秒输入框回显状态里的周期数（正常情况下就是刚下发的那次换算，回到同一个秒值）
+            self.gate_spin.setValue(gate_cycles_to_seconds(st.gate_target, self._slow_hz()))
 
     @Slot(object, object)
     def _show_meas(self, meas: P.Meas, calc: M.Meas) -> None:
@@ -796,11 +970,18 @@ class DpmGuiApp(QMainWindow):
         self.submit(job)
 
     def after_set_gate(self) -> None:
-        """设置闸门目标（低速周期数）。"""
+        """设置闸门目标：界面按**秒**输入，这里换算成低速周期数（`SET_GATE` 的字段单位）下发。"""
         client = self._require_client()
         if client is None:
             return
-        value = int(self.gate_spin.value())
+        seconds = float(self.gate_spin.value())
+        slow = client.slow_hz or M.SLOW_HZ_DEFAULT
+        value = gate_seconds_to_cycles(seconds, slow)
+        if seconds * slow > GATE_MAX_CYCLES:
+            self.log(
+                f"闸门时间 {format_seconds(seconds)} 超过 {GATE_MAX_CYCLES} 个低速周期的上界，"
+                f"按 {format_seconds(gate_cycles_to_seconds(GATE_MAX_CYCLES, slow))} 下发"
+            )
 
         def job() -> None:
             try:
@@ -808,7 +989,8 @@ class DpmGuiApp(QMainWindow):
             except Exception as exc:
                 self.sig_log.emit(f"设置闸门失败：{type(exc).__name__}: {exc}")
                 return
-            self.sig_log.emit(f"gateTarget = {got}（{got / client.slow_hz * 1e6:.1f} µs）")
+            actual = format_seconds(got / slow)
+            self.sig_log.emit(f"闸门时间 {format_seconds(seconds)} → gateTarget = {got} 低速周期（实际 {actual} @ {slow / 1e6:g}MHz）")
             self._job_status()
 
         self.submit(job)
@@ -833,15 +1015,18 @@ class DpmGuiApp(QMainWindow):
         self.submit(job)
 
     def after_set_sig(self) -> None:
-        """设置片内源频率与相位差：先本地求解（打印 VCO/MULT/D 与量化提示）再写。"""
+        """设置片内源频率与相位差：先本地求解（打印 VCO/MULT/D 与量化提示）再写。
+
+        相位 >180° 是合法请求，但不能超过该频点 `D` 给出的 9 位相位码上界；越界会被 MMCM
+        的字段截断（相位回绕）并让协议回 `ERR_PARAM`，所以这里先判掉并说明上界。
+        """
         client = self._require_client()
         if client is None:
             return
-        text = self.freq_edit.text().strip().replace("MHz", "e6").replace("mhz", "e6")
         try:
-            freq_hz = int(float(text))
+            freq_hz = parse_freq_hz(self.freq_edit.text())
         except ValueError:
-            self._show_error("参数错误", f"频率写法无法识别：{text!r}（例：25MHz / 25e6 / 25000000）")
+            self._show_error("参数错误", f"频率写法无法识别：{self.freq_edit.text()!r}（例：25MHz / 25e6 / 25M / 25000000）")
             return
         phase_mdeg = int(round(self.phase_spin.value() * 1000))
         semantics = self.semantics
@@ -851,6 +1036,20 @@ class DpmGuiApp(QMainWindow):
             if not sol.ok:
                 self.sig_log.emit(f"求解失败：{sol.describe()}")
                 self.sig_error.emit("设置片内源失败", sol.describe())
+                return
+            if not S.phase_code_fits(phase_mdeg, sol.div):
+                # 判据与 PS 固件（`dpm_cmd.c` 的 `dpm_mmcm_phase_code_fits`）和仿真后端同一条：
+                # 与相位是否可控无关——越界的请求服务端一律回 ERR_PARAM。
+                limit_mdeg = S.phase_max_milli_deg(sol.div)
+                message = (
+                    f"相位 {phase_mdeg / 1000:.3f}° 超出该频点的 MMCM 上界 {limit_mdeg / 1000:.3f}°"
+                    f"（D={sol.div}，9 位相位码 m ≤ {S.PHASE_CODE_MAX}；越界不是吸附而是字段截断回绕）"
+                )
+                self.sig_log.emit("设置片内源失败：" + message)
+                self.sig_error.emit(
+                    "设置片内源失败",
+                    message + "\n\n请降低相位，或换一个 D 更小的频点（上界 = min(23017499/D, 359.999) 毫度）。",
+                )
                 return
             self.sig_log.emit("求解：" + sol.describe())
             for note in sol.notes:
@@ -939,11 +1138,23 @@ class DpmGuiApp(QMainWindow):
                 self.sig_scan_done.emit([], "扫描未开始")
                 return
             for freq in freqs:
+                # 该频点的相位上界（9 位相位码，逐频点不同）：越界的点直接跳过，
+                # 与 DpmClient.scan / CLI 扫描计划一致——它是「该点不可实现」，不是链路故障。
+                limit_mdeg, div = freq_phase_limit_milli_deg(freq, client.slow_hz or S.F_IN_HZ, self.semantics)
+                if div <= 0:
+                    self.sig_log.emit(f"{freq / 1e6:g}MHz 在 MMCM 约束内无解，整列跳过")
                 for phase_deg in phases_deg:
                     if self._scan_cancel.is_set():
                         self.sig_scan_done.emit(rows, "扫描已取消")
                         return
                     phase_mdeg = int(round(phase_deg * 1000))
+                    if div > 0 and not S.phase_code_fits(phase_mdeg, div):
+                        # 判据与 PS 固件、仿真后端同一条：越界请求服务端一律回 ERR_PARAM（与相位是否可控无关）
+                        limit_deg = limit_mdeg / 1000.0
+                        self.sig_log.emit(f"跳过 {freq / 1e6:g}MHz/{phase_deg:g}°：超出该频点相位上界 {limit_deg:.3f}°（D={div}）")
+                        done += 1
+                        self.sig_scan_progress.emit(done, total)
+                        continue
                     try:
                         info = client.set_sig(freq, phase_mdeg)
                         if settle:

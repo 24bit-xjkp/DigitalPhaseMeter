@@ -7,7 +7,7 @@
 （AXI4 接口与顶层 IP）验证。测量输入有两条来源，由 PL 内的选择寄存器切换：**外部引脚**（`sig1` → W18、
 `sig2` → W19）与**片内信号源**（PL 内 MMCM 的两路输出，**频率与相位差都由 MMCM 的动态重配置在线设定**，
 两路输出直接作为被测信号）。**PS 侧软件与 PC 侧上位机已完成**：PS 侧是 freestanding 裸机 C 串口服务端（读写 AXI 寄存器与
-MMCM 的 DRP 口），PC 侧是 Python 上位机（CLI + Tk GUI，相位差 0~360° 与频率显示、单次/连续、
+MMCM 的 DRP 口），PC 侧是 Python 上位机（CLI + PySide6 GUI，相位差 0~360° 与频率显示、单次/连续、
 片内源频率与相位、输入源切换、多频点多相位扫描）。协议见 [`docs/ps-protocol.md`](docs/ps-protocol.md)，
 验证结果见 [`docs/verify-report.md`](docs/verify-report.md)（第 10 节是 2026-10-16 的复验：
 **相位在线设定已上板验证**，`onboard_accept.py` 44/44、扫描 32/32，端到端 28/28；
@@ -196,7 +196,7 @@ sim/                                Vivado xsim 的 SystemVerilog 测试激励�
 vivado/                             Vivado IP 打包、block design、综合实现脚本与顶层约束
 build/chisel/<Name>/                Chisel 生成的 SystemVerilog 与 filelist.f（构建产物，不入库）
 ps/                                 PS 侧裸机 C 服务端（串口协议、AXI/DRP 驱动、startup/linker）
-host/                               PC 侧 Python 上位机（协议、CLI、Tk GUI、仿真后端）
+host/                               PC 侧 Python 上位机（协议、CLI、PySide6 GUI、仿真后端）
 docs/                               协议、验证计划、验证报告、上板 bring-up
 spec/                               金标准向量、独立仿真服务端、规格自检（三方实现交叉校验）
 .agents/skills/                     项目级 skill：RTL 生成、测试、测量模型、AXI/Vivado、交付前检查
@@ -259,7 +259,7 @@ vivado -mode batch -source vivado/build_bitstream.tcl  # 综合 / 实现 / bitst
 3. ~~**片内信号源** —— 用 PLL/MMCM 生成两路同频不同相的信号，对电路做片内测试。~~（PL 内 MMCM 的两个输出同频、相位差可调，两路输出直接作为被测信号；频率与相位差由 PS 通过 MMCM 的动态重配置口在线设定，外部/内部输入切换寄存器在测量 IP 的 AXI 寄存器区）
 4. ~~**PS 侧软件** —— 基于串口的交互系统：接受 PC 指令、驱动 PL 侧测量、回传结果。~~ 已实现，
    见 [`ps/`](ps/README.md)（Zynq PS 侧 freestanding 裸机 C 服务端）与 [`host/`](host/README.md)
-   （PC 侧 Python 上位机：CLI + Tk GUI）。支持可变闸门时间、连续/单次测量、片内/片外信号源切换、
+   （PC 侧 Python 上位机：CLI + PySide6 GUI）。支持可变闸门时间、连续/单次测量、片内/片外信号源切换、
    片内源频率与相位设定、流模式上报；协议见 [`docs/ps-protocol.md`](docs/ps-protocol.md)。
    验证结果见 [`docs/verify-report.md`](docs/verify-report.md)（测量点全部通过，
    但**相位扫描未真正生效**，见下）。

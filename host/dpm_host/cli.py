@@ -19,7 +19,7 @@
     reset       RESET_COUNTERS
     scan        多频点 × 多相位扫描，写 CSV
     sigtable    打印相位字段语义与冻结频点表（离线，不连串口）
-    gui         启动 Tk 图形界面
+    gui         启动 PySide6 图形界面
 
 `--port` 既可以是真串口（`/dev/ttyUSB0`）也可以是 pty 路径（`/dev/pts/N`，配合
 `python3 -m dpm_host.sim_server --pty` 使用）。
@@ -658,7 +658,7 @@ def cmd_scan(args: argparse.Namespace, client: DpmClient) -> int:
 
 
 def cmd_gui(args: argparse.Namespace, client: DpmClient | None) -> int:
-    """转交给 Tk 界面（不在这里建连接，避免占用端口）。"""
+    """转交给 PySide6 界面（不在这里建连接，避免占用端口）。"""
     from . import gui
 
     argv: list[str] = []
@@ -769,7 +769,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("sigtable", help="打印相位字段语义与冻结频点表（离线）")
     p.set_defaults(func=cmd_sigtable)
 
-    p = sub.add_parser("gui", help="启动 Tk 图形界面")
+    p = sub.add_parser("gui", help="启动 PySide6 图形界面")
     # 这三个选项在 `gui` 前后都能写（子解析器用 SUPPRESS，避免默认值覆盖主解析器的值）
     p.add_argument("--port", metavar="PORT", default=argparse.SUPPRESS, help="串口或 pty 路径（启动后自动连接）")
     p.add_argument("--baud", type=int, default=argparse.SUPPRESS, help="波特率")

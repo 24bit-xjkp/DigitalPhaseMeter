@@ -9,7 +9,7 @@
 - :mod:`dpm_host.sim_fpga`  寄存器级 + 测量级 PL 模型（无硬件时验证上位机）；
 - :mod:`dpm_host.sim_server` 把 PL 模型接到串口（含 `--pty` 虚拟串口模式）上，模拟 PS 侧固件；
 - :mod:`dpm_host.cli`       `python3 -m dpm_host <子命令>` 命令行界面；
-- :mod:`dpm_host.gui`       Tk 图形界面。
+- :mod:`dpm_host.gui`       PySide6 图形界面。
 
 所有文档与代码注释使用中文。默认时钟为低速 50MHz、高速（DSP）400MHz。
 """

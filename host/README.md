@@ -110,7 +110,7 @@ python3 -m dpm_host --port /dev/pts/2 gui --port /dev/pts/2
 | `clear` / `reset` | `CLEAR` / `RESET_COUNTERS` |
 | `scan --freqs ... --phases ... --out CSV` | 多频点 × 多相位扫描 → CSV |
 | `sigtable` | 离线：相位语义 + 冻结频点表 + 求解器自校验（不连串口） |
-| `gui [--port ...]` | 启动 Tk 界面 |
+| `gui [--port ...]` | 启动 PySide6 界面 |
 
 全局选项：`--port`（串口或 pty 路径）、`--baud 115200`、`--timeout`（单次请求超时）、
 `--result-timeout`（等测量结果的总超时）、`--retries`、`--json`（机器可读输出）、`--debug`。
@@ -124,9 +124,13 @@ python3 -m dpm_host --port /dev/pts/2 gui --port /dev/pts/2
 - **连接/断开**：串口路径、波特率、超时、连接状态（给出 `--port` 时启动后自动连接并 `IDENTIFY`）；
 - **状态灯**：busy / MMCM 锁定 / 结果丢失 / sourceReady（绿=有效、橙=忙、红=丢失）；
 - **频率显示**（大字号 + `freqHz` 原值与周期）与**相位差 0~360°**：数字 + 仪表盘弧（指针）+ 0~360° 条形；
-- **测量控制**：单次测量、连续测量开关、CLEAR、复位统计、闸门目标设置；
+- **测量控制**：单次测量、连续测量开关、CLEAR、复位统计、**闸门时间按秒设置**（输入框写 `40µs` 就填
+  `0.00004`，下方实时显示等价的低速周期数与频率分辨率；下发时按低速时钟换算成 `SET_GATE` 的周期数）；
 - **输入源单选**：外部引脚 / 片内信号源；
 - **片内源**：频率与相位差输入 + 「设置」；扫描频点/相位列表 + 「扫描」；相位不可控时相位输入**置灰**并提示；
+  **相位上界逐频点刷新**（>180° 的相位差是合法请求，上界 = `min(23017499/D, 359999)` 毫度：
+  25MHz/D=40 → 359.999°，10MHz/D=100 → 230.174°，8MHz/D=125 → 184.139°），越界的请求会被界面先拦下
+  并说明上界（否则 MMCM 的字段会截断回绕）；
 - **结果表**（最近 200 条：序号/频率/相位差/gate/edge/phaseCnt/DSP 周期）+ **导出 CSV** + 清空表；
 - **日志区**（带时间戳，含求解出的 VCO/MULT/D、量化提示、错误信息）。
 
@@ -138,13 +142,15 @@ python3 -m dpm_host --port /dev/pts/2 gui --port /dev/pts/2
 
 ```bash
 uv run python host/tools/gui_smoke.py            # 自动起 pty 仿真后端 → 连接/测量/切源/表格
-uv run python host/tools/gui_smoke.py --scan     # 再跑一次 2×2 扫描并导出 CSV
+uv run python host/tools/gui_smoke.py --scan     # 再跑一次 2×3 扫描（含一个越界点）并导出 CSV
 # 产物：build/gui_smoke/gui.png、gui_final.png、gui_stdout.txt、scan.csv
 # 无显示环境（CI）加 QT_QPA_PLATFORM=offscreen 也能跑，截图用 QWidget.grab() 不依赖窗口系统
 ```
 
-该脚本把「界面真的能用」变成可复现证据：连接、单次测量、22.5° 细调相位、输入源切换、闸门设置、
-扫描与 CSV 导出逐项断言，最后用 `QWidget.grab()` 直接抓窗口（不依赖 `import`/`spectacle` 等截图工具）。
+该脚本把「界面真的能用」变成可复现证据：连接、单次测量、22.5° 细调相位、**>180° 相位（25MHz/225°）**、
+相位上界逐频点刷新（25MHz → 359.999°、8MHz → 184.139°）、**闸门按秒下发（40µs → 2000 个低速周期）**、
+输入源切换、扫描（越界点被跳过）与 CSV 导出逐项断言，最后用 `QWidget.grab()` 直接抓窗口
+（不依赖 `import`/`spectacle` 等截图工具）。界面换算的单元测试在 `host/tests/test_gui.py`。
 
 ## 6. 仿真后端模型：假设与不覆盖的东西
 
