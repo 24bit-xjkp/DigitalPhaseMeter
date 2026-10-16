@@ -246,14 +246,10 @@ class SimFpga:
             if self._meas_deadline is None:
                 active, freq_hz, phase_mdeg = self.current_signal()
                 if active and freq_hz > 0:
-                    gate_cnt, edge_cnt, phase_cnt = self.measurement_model(
-                        self.active_target_gate, freq_hz, phase_mdeg
-                    )
+                    gate_cnt, edge_cnt, phase_cnt = self.measurement_model(self.active_target_gate, freq_hz, phase_mdeg)
                     self._meas_counts = (gate_cnt, edge_cnt, phase_cnt)
                     span = gate_cnt / self.slow_hz if self.slow_hz > 0 else 0.0
-                    self._meas_deadline = (
-                        self._meas_started_at if self._meas_started_at is not None else t
-                    ) + span + self.meas_latency_s
+                    self._meas_deadline = (self._meas_started_at if self._meas_started_at is not None else t) + span + self.meas_latency_s
             if self._meas_deadline is not None and t >= self._meas_deadline:
                 gate_cnt, edge_cnt, phase_cnt = self._meas_counts
                 self._commit_result(gate_cnt, edge_cnt, phase_cnt)
@@ -519,9 +515,16 @@ class SimFpga:
                     self.drp_write_while_busy += 1
                 self._reload_mmcm()
             return
-        if off in (S.DRP_OFF_CLKFBOUT, S.DRP_OFF_CLKFBOUT2, S.DRP_OFF_CLKOUT0,
-                   S.DRP_OFF_CLKOUT0_2, S.DRP_OFF_CLKOUT1, S.DRP_OFF_CLKOUT1_2,
-                   S.DRP_OFF_DIVCLK, S.DRP_OFF_POWER):
+        if off in (
+            S.DRP_OFF_CLKFBOUT,
+            S.DRP_OFF_CLKFBOUT2,
+            S.DRP_OFF_CLKOUT0,
+            S.DRP_OFF_CLKOUT0_2,
+            S.DRP_OFF_CLKOUT1,
+            S.DRP_OFF_CLKOUT1_2,
+            S.DRP_OFF_DIVCLK,
+            S.DRP_OFF_POWER,
+        ):
             self.drp[off] = int(data) & U16_MASK
         # 窗口外的写被忽略（与 RTL 的页内译码一致）
 
@@ -578,7 +581,7 @@ class SimFpga:
             self.int_phase_milli_deg = S.mmcm_decode_phase_mdeg(clkout1, clkout1_2, div)
         else:
             self.int_phase_milli_deg = int(self.semantics.phase_static_milli_deg)
-        self.phase_field = (clkout1_2 & 0x3F)  # MMCM 的 DELAY_TIME 字段
+        self.phase_field = clkout1_2 & 0x3F  # MMCM 的 DELAY_TIME 字段
         self.mmcm_locked = False
         self.mmcm_reconfiguring = True
         # 重配置期间两路输出停止（先恢复输出，再等锁定）

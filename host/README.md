@@ -32,7 +32,8 @@ host/
     ├── test_mathx.py           # 定点换算 + 金标准向量逐位比对（95 项）
     ├── test_sig.py             # 冻结求解规则、方案 A 的 DRP 寄存器镜像、相位码与 45/D 网格、金标准相位字段（137 项）
     ├── test_sim.py             # 寄存器语义、测量模型 vs golden、假 MMCM/DRP 镜像、PS 固件逻辑、流通知（60 项）
-    └── test_client_over_pty.py # pty 交互（sim_server 10 项 + 参数化 12 项 + 超时 4 项 + 外来对端通知分流 3 项 = 20 项）
+    ├── test_gate_timeout.py    # 长闸门的等待预算（纯单元：预算换算 + 闸门缓存 + 超时诊断 + CLI 接线）
+    └── test_client_over_pty.py # pty 交互（sim_server 10 项 + 参数化 12 项 + 超时 4 项 + 长闸门 5 项 + 外来对端通知分流 3 项 = 25 项）
 └── tools/
     ├── interop_host_main.py    # 验收 4 的可复跑互通脚本（--spawn ./ps/build/host_main）
     └── gui_smoke.py            # GUI 冒烟 + 截图（自动起 pty 仿真后端，产出 gui.png 与步骤日志）
@@ -55,6 +56,14 @@ cd /home/luo/DigitalPhaseMeter && uv run pytest -q          # 仓库根目录：
 cd /home/luo/DigitalPhaseMeter/host && uv run pytest -q     # host 目录：同样全量
 uv run pytest -q -m slow                                    # 只看标记用例（slow/pty 默认也执行）
 uv run pytest --collect-only -q | tail -3                   # 用例数
+```
+
+**格式检查**（覆盖整棵 Python 脚本树：`host/`、`spec/`、`ps/tests`、`ps/tools`；参数取自仓库根
+`pyproject.toml` 的 `[tool.black] line-length = 140` 与 `[tool.isort] profile = "black"`）：
+
+```bash
+uv run black --check host/ spec/ ps/          # 期望：N files would be left unchanged
+uv run isort --check-only host/ spec/ ps/     # 期望：无输出
 ```
 
 ## 3. 无硬件：`sim_server` + CLI
@@ -115,6 +124,15 @@ python3 -m dpm_host --port /dev/pts/2 gui --port /dev/pts/2
 全局选项：`--port`（串口或 pty 路径）、`--baud 115200`、`--timeout`（单次请求超时）、
 `--result-timeout`（等测量结果的总超时）、`--retries`、`--json`（机器可读输出）、`--debug`。
 
+**超时随闸门时间自动放大（长闸门不误报超时）**：`--timeout` / `--result-timeout` 都是**下限**，
+实际预算不小于 `2 × 闸门窗口 + 0.25s`（闸门窗口 = `gateTarget / f_slow`，`gate` 子命令会把它打印出来）。
+理由：一次测量的时长就是闸门窗口（`docs/ps-protocol.md` 第 5 节），真机固件还会在 `GET_RESULT` /
+`GET_MEAS` 命令**内部**等结果（协议 §3.0 的有界等待，`ps/src/dpm_cmd.c`），因此固定超时在长闸门下
+必然误报「等待测量结果超时」。闸门目标由 `GET_STATUS.gateTarget` / `SET_GATE` 回显自动缓存
+（`DpmClient.gate_wait_budget`）；闸门很短（默认 2000 周期 = 40µs）时预算 ≈0.25s，行为与改动前一致。
+回归用例：`tests/test_gate_timeout.py`（纯单元）与 `tests/test_client_over_pty.py` 的「长闸门」四项
+（含 `sim_server --gate 120000000` 的 2.4s 端到端测量）。
+
 频率/相位参数写法：`--freq 25e6`、`--freq 25MHz`、`--freq 25000000`；`--phase 22.5`、`--phase 22.5deg`。
 
 ## 5. GUI（`python3 -m dpm_host gui`）
@@ -125,7 +143,9 @@ python3 -m dpm_host --port /dev/pts/2 gui --port /dev/pts/2
 - **状态灯**：busy / MMCM 锁定 / 结果丢失 / sourceReady（绿=有效、橙=忙、红=丢失）；
 - **频率显示**（大字号 + `freqHz` 原值与周期）与**相位差 0~360°**：数字 + 仪表盘弧（指针）+ 0~360° 条形；
 - **测量控制**：单次测量、连续测量开关、CLEAR、复位统计、**闸门时间按秒设置**（输入框写 `40µs` 就填
-  `0.00004`，下方实时显示等价的低速周期数与频率分辨率；下发时按低速时钟换算成 `SET_GATE` 的周期数）；
+  `0.00004`，下方实时显示等价的低速周期数、频率分辨率与**等结果等待预算**；下发时按低速时钟换算成
+  `SET_GATE` 的周期数。上限是 28 位闸门计数器的真实上界 ≈5.37s @50MHz——长闸门换更高的频率分辨率，
+  等待预算随之自动放大，不会因此误报超时）；
 - **输入源单选**：外部引脚 / 片内信号源；
 - **片内源**：频率与相位差输入 + 「设置」；扫描频点/相位列表 + 「扫描」；相位不可控时相位输入**置灰**并提示；
   **相位上界逐频点刷新**（>180° 的相位差是合法请求，上界 = `min(23017499/D, 359999)` 毫度：
@@ -233,16 +253,17 @@ uv run python host/tools/gui_smoke.py --scan     # 再跑一次 2×3 扫描（�
 ```console
 $ cd /home/luo/DigitalPhaseMeter && uv run pytest -q
 [test_mathx] 金标准向量来源：/home/luo/DigitalPhaseMeter/spec/golden/vectors.json（79 组）
-667 passed in 5.65s
+    720 passed in 11.88s
 
 $ cd /home/luo/DigitalPhaseMeter/host && uv run pytest -q
 [test_mathx] 金标准向量来源：/home/luo/DigitalPhaseMeter/spec/golden/vectors.json（79 组）
-667 passed in 5.65s
+720 passed in 11.97s
 ```
 
-（667 项 = 协议 58 + mathx 248 + pty 端到端 29 + sig 221 + sim 111；两种调用目录都在仓库根
-`pyproject.toml` 下收集到同一批用例（`rootdir: /home/luo/DigitalPhaseMeter`，`configfile: pyproject.toml`）。
-五个测试文件都是 pytest 原生写法，`unittest` 的 `subTest` 已全部换成 `parametrize` 展开的独立用例。
+（720 项 = 协议 58 + mathx 248 + sig 221 + sim 111 + pty 端到端 38 + GUI 30 + 长闸门超时 14；
+两种调用目录都在仓库根 `pyproject.toml` 下收集到同一批用例（`rootdir: /home/luo/DigitalPhaseMeter`，
+`configfile: pyproject.toml`）。七个测试文件都是 pytest 原生写法，`unittest` 的 `subTest` 已全部换成
+`parametrize` 展开的独立用例。
 金标准向量从 28 条扩到 **79 条**（10 频点 × 逐频点相位点，含 31 个 ≥180° 的点），
 `test_mathx` / `test_sim` 因此大幅增加——这是扩表的直接结果，见 `docs/verify-report.md` §11。
 D=127 的 `xfail` 已随 `DIV_MAX` 收到 126 变成普通断言，不再有预期失败项。）
@@ -522,5 +543,11 @@ EXIT=0
   上位机对两种表达都容错）；`STREAM` 通知在 C 侧需要持续请求推进其模型时间才会到点（见验收 4 说明）。
 - `sim_fpga` 不含 MMCM 抖动/相位噪声、真实布线延迟差与 CDC 亚稳态（见第 6 节）；
   它的相位模型与真实 bitstream 的差异由 `--phase-model` 显式选择，默认跟随实测结论。
+- **长闸门的超时语义**只在仿真后端上验证过：结果级预算（等满 2.4s 闸门）用 `sim_server --gate
+  120000000` 的墙钟模型验证；请求级预算（对端在 `GET_RESULT` 内部阻塞一个闸门窗口）用
+  `tests/test_client_over_pty.py` 的 `LongGatePeer` 按协议 §3.0 的语义复现验证；C 验证台
+  （`ps/build/host_main`，同一份 `dpm_cmd.c`）上 `gate 120000000` + 测量也通过
+  （`gateCnt=120000002`、`timeouts=0`），但它的**虚拟时间与墙钟解耦**，长闸门只花 ~12ms 墙钟，
+  因此证明不了「请求级超时被闸门拖爆」这一条，真机仍需实测。
 - `--phase-model controllable` 是**假设**（"补丁后相位字可用"），真实行为需重建 IP/BD 后实测。
 - GUI 没有做视觉回归（无截图工具链），只有"启动无 traceback + 服务端日志可见命令流"的冒烟证据。

@@ -39,9 +39,28 @@ except ImportError:  # pragma: no cover
 
 #: 默认候选波特率：覆盖常见值 + 常见参考时钟（25/50/54/62.5/83.33/86.4/100MHz）算出的结果。
 DEFAULT_BAUDS = [
-    9600, 19200, 38400, 57600, 76800, 115200, 128000, 153600, 230400, 460800, 921600,
+    9600,
+    19200,
+    38400,
+    57600,
+    76800,
+    115200,
+    128000,
+    153600,
+    230400,
+    460800,
+    921600,
     # 参考时钟 86.4MHz（AX7010 实测）、分频比 432/500/750/1000/1728 等
-    86400, 100000, 115200, 125000, 172800, 200000, 43200, 50000, 1000000, 2000000,
+    86400,
+    100000,
+    115200,
+    125000,
+    172800,
+    200000,
+    43200,
+    50000,
+    1000000,
+    2000000,
 ]
 
 
@@ -86,8 +105,9 @@ def main() -> int:
     ap.add_argument("port", help="串口设备，例如 /dev/ttyUSB0")
     ap.add_argument("--baud", type=int, default=None, help="只测这一个波特率")
     ap.add_argument("--seconds", type=float, default=1.2, help="每个候选波特率听多久（默认 1.2s）")
-    ap.add_argument("--assumed-ref-hz", type=int, default=50000000,
-                    help="固件里 DPM_UART_REF_HZ 的当前值（默认 50000000），用于反推真实参考时钟")
+    ap.add_argument(
+        "--assumed-ref-hz", type=int, default=50000000, help="固件里 DPM_UART_REF_HZ 的当前值（默认 50000000），用于反推真实参考时钟"
+    )
     ap.add_argument("--target-baud", type=int, default=115200, help="固件期望的波特率（默认 115200）")
     args = ap.parse_args()
 

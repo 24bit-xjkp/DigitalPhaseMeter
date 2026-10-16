@@ -50,9 +50,9 @@ from typing import Iterable, Sequence
 
 # ------------------------------------------------------------------ 冻结默认值
 
-F_SLOW_HZ = 50_000_000       # 低速（AXI/闸门）时钟：PS 的 FCLK_CLK0
-F_DSP_HZ = 400_000_000       # 高速（DSP/测量）时钟：PL 内 MMCM 倍频
-TARGET_GATE = 2000           # 默认闸门目标（低速周期数）→ 40µs
+F_SLOW_HZ = 50_000_000  # 低速（AXI/闸门）时钟：PS 的 FCLK_CLK0
+F_DSP_HZ = 400_000_000  # 高速（DSP/测量）时钟：PL 内 MMCM 倍频
+TARGET_GATE = 2000  # 默认闸门目标（低速周期数）→ 40µs
 
 # 冻结的验证频点（Hz），与 docs/ps-protocol.md 第 6 节的频点表一致。
 # 要求信号周期既是整数 ps、也是 DSP 周期（2.5ns）的整数倍（8D/MULT 为整数），
@@ -134,8 +134,8 @@ class Vector:
     phase_step_mdeg: int = 0
     phase_cnt_per_edge_milli: int = 0
     phase_cycles_float: float = 0.0
-    phase_expected_mdeg: int = 0      # 量化到 DSP 网格后的期望相位（毫度）
-    phase_quant_error_mdeg: int = 0   # 请求相位与量化期望之差（毫度）
+    phase_expected_mdeg: int = 0  # 量化到 DSP 网格后的期望相位（毫度）
+    phase_quant_error_mdeg: int = 0  # 请求相位与量化期望之差（毫度）
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -197,7 +197,7 @@ def predict(
     t_dsp = 1.0 / f_dsp
     t_sig = 1.0 / f_sig
 
-    ratio_sig_slow = t_sig / t_slow                      # = f_slow / f_sig
+    ratio_sig_slow = t_sig / t_slow  # = f_slow / f_sig
     # 1) 闸门：Controller 数到 target_gate 后还要等被测信号的下一个上升沿
     gate_cnt = target_gate + _ceil_div(int(round(t_sig * 1e18)), int(round(t_slow * 1e18)))
     # 2) 参考沿数：窗口长度 ÷ 被测周期
@@ -348,9 +348,9 @@ def selftest() -> int:
 
     # 25MHz、40µs 闸门、90°、50MHz/400MHz
     p = predict(F_SLOW_HZ, F_DSP_HZ, 25_000_000, 90.0, 2000)
-    check("gate_cnt(25MHz,gate=2000)", p.gate_cnt, 2002)      # 2000 + ceil(40ns/20ns)
-    check("edge_cnt(25MHz)", p.edge_cnt, 1001)                # round(2002*20/40)
-    check("phase_cnt(90°@25MHz)", p.phase_cnt, 4004)          # round(0.25*16*1001)
+    check("gate_cnt(25MHz,gate=2000)", p.gate_cnt, 2002)  # 2000 + ceil(40ns/20ns)
+    check("edge_cnt(25MHz)", p.edge_cnt, 1001)  # round(2002*20/40)
+    check("phase_cnt(90°@25MHz)", p.phase_cnt, 4004)  # round(0.25*16*1001)
     check("phase_step_mdeg(25MHz)", p.phase_step_mdeg, 22500)  # 360*25/400 = 22.5°
     check("freq_milli_hz(25MHz)", p.freq_milli_hz, 25_000_000_000)
     check("phase_milli_deg(90°@25MHz)", p.phase_milli_deg, 90_000)
@@ -358,10 +358,10 @@ def selftest() -> int:
 
     # 10MHz、22.5°：量化步长 9°，22.5/9 = 2.5 个 DSP 周期（半格，落在量化下界内）
     q = predict(F_SLOW_HZ, F_DSP_HZ, 10_000_000, 22.5, 2000)
-    check("gate_cnt(10MHz)", q.gate_cnt, 2005)                # 2000 + ceil(100ns/20ns)
-    check("edge_cnt(10MHz)", q.edge_cnt, 401)                 # round(2005*20/100)
+    check("gate_cnt(10MHz)", q.gate_cnt, 2005)  # 2000 + ceil(100ns/20ns)
+    check("edge_cnt(10MHz)", q.edge_cnt, 401)  # round(2005*20/100)
     check("phase_step_mdeg(10MHz)", q.phase_step_mdeg, 9000)
-    check("phase_cnt(22.5°@10MHz)", q.phase_cnt, 1003)        # round(0.0625*40*401) = round(1002.5)
+    check("phase_cnt(22.5°@10MHz)", q.phase_cnt, 1003)  # round(0.0625*40*401) = round(1002.5)
 
     # 无符号相位差口径：180° 与 270° 都是可测点，只有 360°（与 0° 同义）必须报错
     for deg, want in ((180.0, 180.0), (270.0, 270.0)):
@@ -421,8 +421,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         json.dump(doc, fh, ensure_ascii=False, indent=2)
         fh.write("\n")
 
-    print(f"已写入 {out_path}：{doc['vector_count']} 条向量"
-          f"（{len(doc['freq_points_hz'])} 个频点 × {len(doc['phase_points_mdeg'])} 个相位点）")
+    print(
+        f"已写入 {out_path}：{doc['vector_count']} 条向量"
+        f"（{len(doc['freq_points_hz'])} 个频点 × {len(doc['phase_points_mdeg'])} 个相位点）"
+    )
     if args.do_print:
         for vec in doc["vectors"]:
             print(

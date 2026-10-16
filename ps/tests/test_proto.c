@@ -190,6 +190,35 @@ static void test_payload_codecs(void)
     }
 }
 
+/** 命令层的等待上限：`50ms + 4 × 闸门时间（秒）`（量纲修复，见 `docs/verify-report.md` §14）。
+ *
+ * 旧实现把闸门时间的**微秒数值**当毫秒用，长闸门下放大 1000 倍（2.4s 闸门 → 9600s）。
+ * 这里钉住「上限与闸门秒数同量级、且始终有界」这条性质，避免再退回去。 */
+static void test_wait_budget(void)
+{
+    printf("== 命令层等待上限（闸门时间的量纲）\n");
+    /* 默认闸门 2000 周期 @50MHz = 40µs：50ms + 4 × 0.04ms → 50ms（整除截断） */
+    CHECK(DPM_WAIT_TIMEOUT_MS(2000u, 50000000u) == 50u, "默认闸门应为 50ms，实际 %u",
+          (unsigned)DPM_WAIT_TIMEOUT_MS(2000u, 50000000u));
+    /* 100ms 闸门（5e6 周期 @50MHz）：50ms + 4 × 100ms = 450ms */
+    CHECK(DPM_WAIT_TIMEOUT_MS(5000000u, 50000000u) == 450u, "100ms 闸门应为 450ms，实际 %u",
+          (unsigned)DPM_WAIT_TIMEOUT_MS(5000000u, 50000000u));
+    /* 2.4s 闸门（1.2e8 周期 @50MHz）：50ms + 4 × 2.4s = 9650ms（旧实现给 9600050ms） */
+    CHECK(DPM_WAIT_TIMEOUT_MS(120000000u, 50000000u) == 9650u, "2.4s 闸门应为 9650ms，实际 %u",
+          (unsigned)DPM_WAIT_TIMEOUT_MS(120000000u, 50000000u));
+    /* 28 位闸门上界（≈5.37s）：50ms + 4 × 5.3687s ≈ 21524ms——与闸门同量级、仍有界 */
+    CHECK(DPM_WAIT_TIMEOUT_MS(0x0FFFFFFFu, 50000000u) == 21524u, "最大闸门应为 21524ms，实际 %u",
+          (unsigned)DPM_WAIT_TIMEOUT_MS(0x0FFFFFFFu, 50000000u));
+    CHECK(DPM_WAIT_TIMEOUT_MS(0x0FFFFFFFu, 50000000u) < 30000u, "最大闸门下的上限必须仍然有界");
+    /* slow_hz = 0 不能除零（非法配置只需不崩） */
+    CHECK(DPM_WAIT_TIMEOUT_MS(2000u, 0u) >= 50u, "slow_hz = 0 时应退化为固定底数");
+    /* 兜底轮询上限是**慢时钟周期**意义上的界（不含时间换算）：随闸门线性增长 */
+    CHECK(DPM_WAIT_POLL_LIMIT(2000u) == 208000u, "默认闸门的轮询上限应为 208000，实际 %u",
+          (unsigned)DPM_WAIT_POLL_LIMIT(2000u));
+    CHECK(DPM_WAIT_POLL_LIMIT(120000000u) == 480200000u, "长闸门的轮询上限应随闸门线性增长，实际 %u",
+          (unsigned)DPM_WAIT_POLL_LIMIT(120000000u));
+}
+
 int main(void)
 {
     printf("== test_proto（帧层与 PAYLOAD）\n");
@@ -197,6 +226,7 @@ int main(void)
     test_roundtrip();
     test_bad_frames();
     test_payload_codecs();
+    test_wait_budget();
     printf("== %d 项检查，%d 项失败\n", g_checks, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

@@ -220,7 +220,7 @@ def mmcm_decode_divclk(word: int) -> int:
 
 def mmcm_decode_phase_mdeg(clkreg1: int, clkreg2: int, divide: int) -> int:
     """从一对 CLKOUTx 寄存器反推相位（毫度）。与 :func:`mmcm_encode_clkout` 互逆。"""
-    code = (((int(clkreg2) & 0x3F) << 3) | ((int(clkreg1) >> 13) & 0x7))
+    code = ((int(clkreg2) & 0x3F) << 3) | ((int(clkreg1) >> 13) & 0x7)
     return mmcm_phase_code_to_mdeg(code, divide)
 
 
@@ -254,14 +254,8 @@ class DrpSemantics:
     def describe(self) -> str:
         """一行描述，供 CLI / 日志输出。"""
         if not self.phase_controllable:
-            return (
-                f"相位不可控：clk_out2 固定 {self.phase_static_milli_deg / 1000:.3f}°"
-                f"（写 DRP 不改变输出）；来源：{self.source}"
-            )
-        return (
-            f"相位可控：写 MMCM 的 PHASE_MUX/DELAY_TIME，网格 45°/D（1/8 VCO 周期）；"
-            f"来源：{self.source}"
-        )
+            return f"相位不可控：clk_out2 固定 {self.phase_static_milli_deg / 1000:.3f}°" f"（写 DRP 不改变输出）；来源：{self.source}"
+        return f"相位可控：写 MMCM 的 PHASE_MUX/DELAY_TIME，网格 45°/D（1/8 VCO 周期）；" f"来源：{self.source}"
 
 
 def repo_root() -> Path:
@@ -300,8 +294,7 @@ def parse_semantics_json(data: dict[str, Any], path: str | None) -> DrpSemantics
         for key, value in sub.items():
             scope.setdefault(key, value)
 
-    source = str(data.get("source") or data.get("measured_by") or data.get("generated_by")
-                 or (path or "spec/drp_semantics.json"))
+    source = str(data.get("source") or data.get("measured_by") or data.get("generated_by") or (path or "spec/drp_semantics.json"))
     controllable = bool(scope.get("phase_controllable", True))
     static_mdeg = int(scope.get("phase_static_deg_milli", scope.get("phase_static_mdeg", 90_000)) or 90_000)
     return DrpSemantics(
@@ -442,10 +435,7 @@ def phase_code_value(
     del vco_hz  # 相位码与 VCO 无关：网格只由输出分频 D 决定
     if grid is None:
         actual = int(sem.phase_static_milli_deg)
-        notes.append(
-            f"相位不可控（phase_controllable=false）：写 DRP 不改变输出，"
-            f"实际相位恒为 {actual / 1000:.3f}°"
-        )
+        notes.append(f"相位不可控（phase_controllable=false）：写 DRP 不改变输出，" f"实际相位恒为 {actual / 1000:.3f}°")
         return 0, actual, None, tuple(notes)
     code = mmcm_phase_code(requested, div)
     if code > PHASE_CODE_MAX:
@@ -457,8 +447,7 @@ def phase_code_value(
     actual = mmcm_phase_code_to_mdeg(code, div)
     if actual != requested:
         notes.append(
-            f"相位量化：请求 {requested / 1000:.3f}°，网格 {float(grid) / 1000:.4f}°（45/D，D={div}），"
-            f"实际 {actual / 1000:.3f}°"
+            f"相位量化：请求 {requested / 1000:.3f}°，网格 {float(grid) / 1000:.4f}°（45/D，D={div}），" f"实际 {actual / 1000:.3f}°"
         )
     return code, actual, phase_quantum_milli_deg(div, sem), tuple(notes)
 
@@ -562,13 +551,15 @@ class SigSolution:
             f"→ f_out={self.actual_freq_hz / 1e6:.6f}MHz"
             + ("" if self.exact else f"（误差 {self.error_milli_hz / 1000:.3f}Hz）")
             + f"，相位码 {self.phase_code}（DELAY_TIME={self.phase_field}、PHASE_MUX={self.phase_code & 0x7}，"
-              f"实际 {self.phase_actual_milli_deg / 1000:.3f}°）"
+            f"实际 {self.phase_actual_milli_deg / 1000:.3f}°）"
         )
 
 
 #: BD 初始工作点（选择规则的参考点）。
 BD_VCO_HZ = 1_000_000_000
 BD_DIV = 40
+
+
 def select_cost(vco_hz: int, div: int) -> Fraction:
     """冻结规则的代价：`|VCO-1000MHz|/1MHz + |D-40|`（精确有理数，不用浮点）。"""
     return Fraction(abs(int(vco_hz) - BD_VCO_HZ), 1_000_000) + abs(int(div) - BD_DIV)
@@ -610,10 +601,20 @@ def solve_sig(
     target = int(freq_hz)
     if target <= 0 or slow_hz <= 0:
         return SigSolution(
-            ok=False, freq_hz=target, actual_freq_hz=0, error_milli_hz=0,
-            phase_milli_deg=int(phase_milli_deg), phase_actual_milli_deg=0,
-            vco_hz=0, mult=0, divclk=DIVCLK_DEFAULT, div=0, phase_field=0,
-            phase_step_ps=Fraction(0), notes=("目标频率必须为正数",), semantics_source=sem.source,
+            ok=False,
+            freq_hz=target,
+            actual_freq_hz=0,
+            error_milli_hz=0,
+            phase_milli_deg=int(phase_milli_deg),
+            phase_actual_milli_deg=0,
+            vco_hz=0,
+            mult=0,
+            divclk=DIVCLK_DEFAULT,
+            div=0,
+            phase_field=0,
+            phase_step_ps=Fraction(0),
+            notes=("目标频率必须为正数",),
+            semantics_source=sem.source,
         )
 
     best: tuple[tuple, int, int, int, int] | None = None  # (排序键, vco, mult, div, divclk)
@@ -629,10 +630,20 @@ def solve_sig(
 
     if best is None:
         return SigSolution(
-            ok=False, freq_hz=target, actual_freq_hz=0, error_milli_hz=0,
-            phase_milli_deg=int(phase_milli_deg), phase_actual_milli_deg=0,
-            vco_hz=0, mult=0, divclk=DIVCLK_DEFAULT, div=0, phase_field=0,
-            phase_step_ps=Fraction(0), notes=("约束内没有 (MULT, D) 组合",), semantics_source=sem.source,
+            ok=False,
+            freq_hz=target,
+            actual_freq_hz=0,
+            error_milli_hz=0,
+            phase_milli_deg=int(phase_milli_deg),
+            phase_actual_milli_deg=0,
+            vco_hz=0,
+            mult=0,
+            divclk=DIVCLK_DEFAULT,
+            div=0,
+            phase_field=0,
+            phase_step_ps=Fraction(0),
+            notes=("约束内没有 (MULT, D) 组合",),
+            semantics_source=sem.source,
         )
 
     _, vco, mult, div, divclk = best
@@ -703,7 +714,7 @@ class DrpWords:
     #: 9 位相位码（单位 1/8 VCO 周期）与它拆出的两个 MMCM 字段。
     phase_code: int = 0
     phase_field: int = 0  # DELAY_TIME（整数 VCO 周期）
-    phase_mux: int = 0    # PHASE_MUX（1/8 VCO 周期）
+    phase_mux: int = 0  # PHASE_MUX（1/8 VCO 周期）
 
     def as_pairs(self) -> tuple[tuple[int, int], ...]:
         """`(偏移, 值)` 序列，按 PS 侧写入顺序（8 个寄存器镜像 + LOAD）。"""
@@ -831,8 +842,7 @@ FROZEN_POINTS: tuple[FrozenPoint, ...] = (
 #: 180° 在所有合法 D（≤126）下都合法（`m = 4D <= 504`）；225°/270°/315° 只在
 #: `7D <= 511`（D ≤ 73）/`6D <= 511`（D ≤ 85）/`5D <= 511`（D ≤ 102）时合法。
 #: 25MHz（D=40）与 20MHz（D=50）能覆盖到 315°，8MHz（D=125）只能到 184.139°。
-FROZEN_PHASES_DEG: tuple[float, ...] = (0, 22.5, 45, 67.5, 90, 112.5, 135, 157.5, 180, 202.5, 225,
-                                        270, 315)
+FROZEN_PHASES_DEG: tuple[float, ...] = (0, 22.5, 45, 67.5, 90, 112.5, 135, 157.5, 180, 202.5, 225, 270, 315)
 
 #: 冻结相位点（1e-3 度）。
 FROZEN_PHASES_MILLI_DEG: tuple[int, ...] = tuple(int(round(p * 1000)) for p in FROZEN_PHASES_DEG)

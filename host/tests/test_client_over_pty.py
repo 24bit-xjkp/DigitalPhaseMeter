@@ -185,8 +185,7 @@ def test_set_sig_and_measure(client: DpmClient, freq_hz: int, phase_mdeg: int) -
 @CONTROLLABLE
 @pytest.mark.parametrize(
     "freq_hz, phase_mdeg, div",
-    [(25_000_000, 315_000, 40), (8_000_000, 183_960, 125), (5_000_000, 191_625, 120),
-     (12_500_000, 270_000, 80)],
+    [(25_000_000, 315_000, 40), (8_000_000, 183_960, 125), (5_000_000, 191_625, 120), (12_500_000, 270_000, 80)],
     ids=["25MHz-315", "8MHz-183.96", "5MHz-191.625", "12.5MHz-270"],
 )
 def test_over_180_deg_is_accepted(client: DpmClient, freq_hz: int, phase_mdeg: int, div: int) -> None:
@@ -251,8 +250,11 @@ def test_scan_skips_unrepresentable_points(client: DpmClient) -> None:
     # 越界点：8MHz/225°（D=125 → 需要相位码 625）；其余 5 点可实现
     assert len(rows) == 5
     assert [(r["freq_nominal"], r["phase_nominal"]) for r in rows] == [
-        (8_000_000, 0.0), (8_000_000, 90.0),
-        (25_000_000, 0.0), (25_000_000, 90.0), (25_000_000, 225.0),
+        (8_000_000, 0.0),
+        (8_000_000, 90.0),
+        (25_000_000, 0.0),
+        (25_000_000, 90.0),
+        (25_000_000, 225.0),
     ]
     assert any("跳过 8MHz/225" in line for line in logs)
 
@@ -406,6 +408,206 @@ def test_write_error_on_closed_pty(no_sig_server: SimServerProcess, timeout_clie
     time.sleep(0.2)
     with pytest.raises(P.DpmError):
         timeout_client.ping()
+
+
+# ------------------------------------------- 长闸门：等待预算随闸门时间放大（不误报超时）
+
+#: 长闸门：120000000 个低速周期 @50MHz = 2.4s（超过旧的固定「等结果 2.0s」预算）。
+LONG_GATE_TARGET = 120_000_000
+
+
+class LongGatePeer:
+    """模拟长闸门真机的两个阻塞点（语义对齐 `ps/src/dpm_cmd.c`）。
+
+    - `GET_STATUS` 立刻回，`gateTarget` = `gate_target`（上位机靠它算等待预算）；
+    - `GET_RESULT` / `GET_MEAS` 在**命令内部**先阻塞 `hold_s`（真机是 `50 + 4×闸门时间` 的
+      有界等待，协议 §3.0 允许），再按「本次测量是否已经跑完一个闸门窗口」决定回
+      `valid=1` 还是 `valid=0`；
+    - `START` 记下测量起点，结果要等 `window_s` 才就绪。
+
+    用它复现两类真实的超时误报：闸门 0.6s 而单次请求超时 0.1s（请求级），
+    以及闸门 0.6s 而等结果预算 0.2s（结果级）。
+    """
+
+    def __init__(self, *, gate_target: int, window_s: float, hold_s: float | None = None) -> None:
+        self.master, slave = pty.openpty()
+        self.port = os.ttyname(slave)
+        self.gate_target = int(gate_target)
+        self.window_s = float(window_s)
+        #: 命令内部阻塞（0 = 立刻回，由上位机自己轮询；None = 等同闸门窗口）
+        self.hold_s = float(window_s if hold_s is None else hold_s)
+        self.ready_at: float | None = None
+        self.counts: dict[int, int] = {}
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._peer_loop, daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2.0)
+        os.close(self.master)
+
+    @property
+    def result_ready(self) -> bool:
+        return self.ready_at is not None and time.monotonic() >= self.ready_at
+
+    def _peer_loop(self) -> None:
+        parser = P.FrameParser()
+        while not self._stop.is_set():
+            try:
+                ready, _, _ = select.select([self.master], [], [], 0.02)
+            except OSError:  # pragma: no cover - pty 关闭
+                return
+            if not ready:
+                continue
+            try:
+                chunk = os.read(self.master, 256)
+            except OSError:  # pragma: no cover
+                return
+            if not chunk:
+                continue
+            for ev in parser.feed(chunk):
+                if not isinstance(ev, P.Frame):
+                    continue
+                reply = self._handle(ev)
+                if reply:
+                    os.write(self.master, reply)
+
+    def _handle(self, frame: P.Frame) -> bytes:
+        cmd = int(frame.cmd)
+        self.counts[cmd] = self.counts.get(cmd, 0) + 1
+        if cmd == P.Cmd.GET_STATUS:
+            # busy=1（测量进行中）、resultValid=0：结果还没到，请继续问 GET_RESULT
+            st = P.Status(int(P.STATUS_BUSY), 0, self.gate_target, 0, 0)
+            return P.encode_frame(P.Cmd.GET_STATUS.response, P.encode_status(st))
+        if cmd == P.Cmd.START:
+            self.ready_at = time.monotonic() + self.window_s
+            return P.encode_frame(P.Cmd.START.response)
+        if cmd in (P.Cmd.GET_RESULT, P.Cmd.GET_MEAS):
+            if self.hold_s > 0:
+                # 真机在命令内部等结果：单次请求超时必须容得下这一等
+                time.sleep(self.hold_s)
+            if self.result_ready:
+                if cmd == P.Cmd.GET_RESULT:
+                    result = P.Result(True, 1, self.gate_target, 8, 16)
+                    return P.encode_frame(P.Cmd.GET_RESULT.response, P.encode_result(result))
+                meas = P.Meas(1, self.gate_target, 8, 16, 0, 0)
+                return P.encode_frame(P.Cmd.GET_MEAS.response, P.encode_meas(meas))
+            if cmd == P.Cmd.GET_RESULT:
+                return P.encode_frame(P.Cmd.GET_RESULT.response, P.encode_result(P.Result(False, 0, 0, 0, 0)))
+            return P.encode_frame(P.Cmd.ERR_BUSY)
+        return P.encode_frame(cmd | 0x80)
+
+
+def test_long_gate_single_request_timeout_is_scaled() -> None:
+    """对端在 `GET_RESULT` 内部阻塞一个闸门窗口：单次请求超时 0.1s 必须被放大到预算。
+
+    闸门 0.6s（`slow_hz=1MHz` × `gateTarget=600000`）→ 预算 = 2×0.6+0.25 = 1.45s。
+    修复前：请求级超时 0.1s 先到，`wait_result` 直接抛 `DpmTimeoutError`（测量其实没问题）。
+    """
+    peer = LongGatePeer(gate_target=600_000, window_s=0.6)
+    client = DpmClient(port=peer.port, timeout=0.1, retries=0, slow_hz=1_000_000, log=lambda _m: None)
+    try:
+        client.get_status()  # 学到 gateTarget，之后的预算按它算
+        assert client.gate_wait_budget() == pytest.approx(1.45)
+        client.start()
+        t0 = time.monotonic()
+        result = client.wait_result(timeout=0.2, poll_interval=0.02)
+        elapsed = time.monotonic() - t0
+    finally:
+        client.close()
+        peer.close()
+    assert result.valid
+    assert elapsed >= 0.5  # 真的等满了闸门窗口，而不是提前放弃
+    assert client.stats.timeouts == 0  # 一次请求超时都没有（旧代码在 0.1s 就超时）
+
+
+def test_long_gate_result_budget_is_scaled() -> None:
+    """结果按闸门窗口锁存、对端立刻回 `valid=0`：等结果预算 0.2s 也要放大。
+
+    修复前：`wait_result(timeout=0.2)` 在 0.2s 就抛超时，而结果 0.6s 才就绪。
+    """
+    peer = LongGatePeer(gate_target=600_000, window_s=0.6, hold_s=0.0)
+    client = DpmClient(port=peer.port, timeout=0.1, retries=0, slow_hz=1_000_000, log=lambda _m: None)
+    try:
+        client.get_status()
+        client.start()
+        t0 = time.monotonic()
+        meas = client.wait_meas(timeout=0.2, poll_interval=0.01)
+        elapsed = time.monotonic() - t0
+    finally:
+        client.close()
+        peer.close()
+    assert meas.gate_cnt == 600_000
+    assert elapsed >= 0.5
+    # 是「轮询到结果」而不是「一次请求阻塞着等」：对端立刻回 valid=0
+    assert peer.counts.get(int(P.Cmd.GET_RESULT), 0) >= 2
+
+
+def test_long_gate_budget_is_learned_inside_wait() -> None:
+    """闸门未知时也要在等待开始前学会它：`start --wait` / `meas` 这类路径不会先读一次状态。
+
+    客户端只知道自己给的基线（这里 0.2s），设备上的闸门却是 0.6s——等待一开始就得先读
+    `GET_STATUS` 把闸门目标补上，否则预算仍按基线算，照旧误报超时。
+    """
+    peer = LongGatePeer(gate_target=600_000, window_s=0.6, hold_s=0.0)
+    client = DpmClient(port=peer.port, timeout=0.1, retries=0, slow_hz=1_000_000, log=lambda _m: None)
+    try:
+        assert client.gate_target is None  # 还没读过状态
+        client.start()  # 只发 START（协议里它不阻塞），不读状态
+        t0 = time.monotonic()
+        meas = client.wait_meas(timeout=0.2, poll_interval=0.01)
+        elapsed = time.monotonic() - t0
+    finally:
+        client.close()
+        peer.close()
+    assert client.gate_target == 600_000  # 等待过程中学会了闸门目标
+    assert meas.gate_cnt == 600_000
+    assert elapsed >= 0.5  # 按学会后的预算等满了一个闸门窗口
+
+
+def test_default_gate_keeps_short_timeout() -> None:
+    """回归：默认闸门（2000 周期 = 40µs）不放大等待——该报超时还是要报，而且快。
+
+    否则「长闸门不误报」会变成「所有等待都拖到最长」，源没有边沿时用户要白等好几秒。
+    """
+    peer = LongGatePeer(gate_target=P.DEFAULT_GATE_TARGET, window_s=30.0, hold_s=0.0)
+    client = DpmClient(port=peer.port, timeout=0.1, retries=0, log=lambda _m: None)
+    try:
+        client.get_status()
+        client.start()
+        t0 = time.monotonic()
+        with pytest.raises(P.DpmTimeoutError) as excinfo:
+            client.wait_result(timeout=0.2, poll_interval=0.01)
+        elapsed = time.monotonic() - t0
+    finally:
+        client.close()
+        peer.close()
+    assert 0.2 <= elapsed < 1.0
+    assert "等待测量结果超时" in str(excinfo.value)
+
+
+@pytest.mark.slow
+def test_long_gate_measurement_does_not_time_out(sim_server) -> None:
+    """端到端：`sim_server --gate 120000000`（2.4s 闸门）的测量正常读回，不报超时。
+
+    修复前：等结果预算固定 2.0s < 2.4s 闸门窗口 → `wait_meas(timeout=2.0)` 必然抛
+    `DpmTimeoutError`「等待测量结果超时」，而测量本身完全正常。
+    """
+    server = sim_server("--gate", str(LONG_GATE_TARGET))
+    client = DpmClient(port=server.slave, timeout=0.5, retries=0)
+    try:
+        client.get_status()
+        assert client.gate_wait_budget() > 2.4  # 预算已按闸门放大（> 旧的 2.0s 固定值）
+        client.start()
+        t0 = time.monotonic()
+        meas = client.wait_meas(timeout=2.0, poll_interval=0.02)
+        elapsed = time.monotonic() - t0
+    finally:
+        client.close()
+    assert elapsed >= 2.3  # 闸门窗口 2.4s，真的等满了
+    assert meas.gate_cnt >= LONG_GATE_TARGET
+    assert meas.edge_cnt > 0
 
 
 # ------------------------------------------------------------------ 通知帧分流的**独立**验证

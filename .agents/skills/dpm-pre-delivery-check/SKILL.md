@@ -88,20 +88,32 @@ sim/run_xsim.sh        # xsim：AXI4 接口与顶层 IP（SystemVerilog 激励�
 环境由 **uv** 管理（`uv.lock` + `.venv`），不要手工 `pip install`；测试是 **pytest** 原生写法：
 
 ```bash
-uv run pytest -q                      # 全量（testpaths = host/tests，仓库根或 host/ 下都能跑）
-uv run black --check --line-length 140 host/ spec/ ps/tests/   # 已改的 .py 文件
-uv run isort --check-only --profile black --line-length 140 <改动的 .py>
-uv run python spec/selftest_spec.py   # 文档 ↔ 头文件 ↔ 金标准的一致性自检
-uv run python host/tools/gui_smoke.py # 改了 GUI 时跑：连接/测量/扫描 + 截图（QT_QPA_PLATFORM=offscreen 可无头）
+uv run pytest -q                       # 全量（testpaths = host/tests，仓库根或 host/ 下都能跑）
+uv run black --check host/ spec/ ps/   # 全部 Python 脚本（行宽 140 来自 pyproject 的 [tool.black]）
+uv run isort --check-only host/ spec/ ps/  # 导入顺序（profile/行宽来自 pyproject 的 [tool.isort]）
+uv run python spec/selftest_spec.py    # 文档 ↔ 头文件 ↔ 金标准的一致性自检
+uv run python host/tools/gui_smoke.py  # 改了 GUI 时跑：连接/测量/扫描 + 截图（QT_QPA_PLATFORM=offscreen 可无头）
 ```
+
+- 格式化的范围是**整个 Python 脚本树**（`host/`、`spec/`、`ps/tests`、`ps/tools`），不是只格式化改动
+  的文件：`pyproject.toml` 里已配好 `[tool.black] line-length = 140` 与 `[tool.isort] profile = "black"`，
+  两条命令不必带额外参数。2026-10-16 起这棵树是干净的（此前 18 个文件不合 black、5 个不合 isort），
+  提交前保持干净，并尽量把纯格式化改动与功能改动分开。
+- **C 源码不做整体格式化**：`ps/**/*.c|h` 的风格与仓库根 `.clang-format` 并不完全一致，整体重排会
+  淹没功能改动；只要求新增/改动处与周围风格一致，且交叉编译在 `-Wall -Wextra -Werror` 下零警告。
 
 改了 C 服务端（`ps/`）还要重建验证台并跑端到端：
 
 ```bash
 bash ps/build.sh && cmake --build ps/build/cmake -j8
 ctest --test-dir ps/build/cmake --output-on-failure
-bash ps/tools/onboard_accept_sim.sh                # 离线验收演练（C 验证台，44 项）
+bash ps/tools/onboard_accept_sim.sh                # 离线验收演练（C 验证台，93 项）
 ```
+
+改了固件命令处理的时间/超时口径时，另外确认：`DPM_WAIT_TIMEOUT_MS` 是**毫秒**界
+（`50ms + 4 × 闸门时间（秒）`，量纲见 `docs/verify-report.md` §14），`DPM_WAIT_POLL_LIMIT`
+是**慢时钟周期**界，两者不要混用；`ps/tests/test_proto.c::test_wait_budget` 与
+`ps/tests/test_server_selftest.py::test_long_gate_bounded_wait` 钉住这两条。
 
 ## 4. 交付范围
 

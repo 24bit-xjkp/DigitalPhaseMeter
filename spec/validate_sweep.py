@@ -26,9 +26,9 @@ import select
 import signal
 import struct
 import subprocess
-import tty
 import sys
 import time
+import tty
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -208,9 +208,16 @@ class SerialLink:
         if len(p) != 30:
             raise ProtocolError(f"IDENTIFY 响应长度 {len(p)} != 30")
         fields = struct.unpack("<IIIIIIIH", p)
-        return dict(ver=fields[0], git_rev=fields[1], caps=fields[2], version_reg=fields[3],
-                    caps_reg=fields[4], dsp_clk_hz=fields[5], slow_clk_hz=fields[6],
-                    flags=fields[7])
+        return dict(
+            ver=fields[0],
+            git_rev=fields[1],
+            caps=fields[2],
+            version_reg=fields[3],
+            caps_reg=fields[4],
+            dsp_clk_hz=fields[5],
+            slow_clk_hz=fields[6],
+            flags=fields[7],
+        )
 
     def status(self) -> dict:
         p = self.request(CMD_GET_STATUS)
@@ -236,8 +243,7 @@ class SerialLink:
             raise ProtocolError(f"GET_MEAS 响应长度 {len(p)} != 24")
         seq, gate, edge, phase, freq_hz, pmdeg = struct.unpack("<IIIIII", p)
         # 注意：协议字段名是 freqMilliHz，但**单位是 Hz**（毫赫兹会溢出 u32），见 docs/ps-protocol.md
-        return dict(seq=seq, gate_cnt=gate, edge_cnt=edge, phase_cnt=phase,
-                    freq_hz=freq_hz, phase_milli_deg=pmdeg)
+        return dict(seq=seq, gate_cnt=gate, edge_cnt=edge, phase_cnt=phase, freq_hz=freq_hz, phase_milli_deg=pmdeg)
 
     def set_gate(self, gate: int) -> int:
         return struct.unpack("<I", self.request(CMD_SET_GATE, struct.pack("<I", gate)))[0]
@@ -289,8 +295,9 @@ class ServerProcess:
         self.slave_name = os.ttyname(self.slave)
         cmd = cmdline.replace("{device}", self.slave_name)
         self.log = open(log_path, "wb")
-        self.proc = subprocess.Popen(cmd, shell=True, stdout=self.log, stderr=subprocess.STDOUT,
-                                     stdin=subprocess.DEVNULL, start_new_session=True)
+        self.proc = subprocess.Popen(
+            cmd, shell=True, stdout=self.log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True
+        )
         self.cmdline = cmd
         self.link = SerialLink(self.master)
 
@@ -303,7 +310,7 @@ class ServerProcess:
             try:
                 self.link.ping()
                 return
-            except (TimeoutError, ProtocolError):
+            except TimeoutError, ProtocolError:
                 time.sleep(0.1)
         raise TimeoutError("服务端在超时时间内未响应 PING")
 
@@ -369,14 +376,13 @@ def measure_once(link: SerialLink, gate: int, timeout: float = 5.0) -> dict:
         except BusyError:
             if time.monotonic() >= deadline:
                 raise TimeoutError("START 一直被回 ERR_BUSY（等待超时）") from None
-            link.status()          # 用一次读推动后端模型时间
+            link.status()  # 用一次读推动后端模型时间
             time.sleep(0.002)
     wait_idle(link, timeout)
     return link.get_meas()
 
 
-def run_point(link: SerialLink, vec: dict, gate: int, repeat: int, timeout: float,
-              phase_controllable: bool, fixed_phase_mdeg: int) -> dict:
+def run_point(link: SerialLink, vec: dict, gate: int, repeat: int, timeout: float, phase_controllable: bool, fixed_phase_mdeg: int) -> dict:
     """跑一个测量点：设源 → 确认就绪 → 重复测量 → 汇总。
 
     相位判据分两种（见 docs/verify-plan.md 第 3 节）：
@@ -403,8 +409,7 @@ def run_point(link: SerialLink, vec: dict, gate: int, repeat: int, timeout: floa
     # 频率判据：与标称值比（容限见金标准）
     f_nom = vec["freq_hz"]
     f_err = [abs(smp["freq_hz"] - f_nom) for smp in samples]
-    ok_freq = all(e <= vec["freq_tol_milli_hz"] and e <= max(1000, f_nom // 1000)
-                  for e in f_err)
+    ok_freq = all(e <= vec["freq_tol_milli_hz"] and e <= max(1000, f_nom // 1000) for e in f_err)
     # 相位判据
     if phase_controllable:
         p_exp = vec["phase_milli_deg"]
@@ -432,14 +437,25 @@ def run_point(link: SerialLink, vec: dict, gate: int, repeat: int, timeout: floa
         "phase_requested_mdeg": vec["phase_requested_mdeg"],
         "vco_hz": vec["vco_hz"],
         "div": vec["div"],
-        "expected": {k: vec[k] for k in ("gate_cnt", "edge_cnt", "phase_cnt", "freq_hz",
-                                         "phase_milli_deg", "phase_dsp_cycles", "phase_step_mdeg",
-                                         "freq_tol_milli_hz", "phase_tol_mdeg",
-                                         "phase_quant_error_mdeg")},
+        "expected": {
+            k: vec[k]
+            for k in (
+                "gate_cnt",
+                "edge_cnt",
+                "phase_cnt",
+                "freq_hz",
+                "phase_milli_deg",
+                "phase_dsp_cycles",
+                "phase_step_mdeg",
+                "freq_tol_milli_hz",
+                "phase_tol_mdeg",
+                "phase_quant_error_mdeg",
+            )
+        },
         "phase_mode": phase_mode,
         "phase_expected_mdeg": p_exp,
         "phase_expected_is_quantized": (phase_mode == "fixed"),
-        "expected_freq_milli_hz": vec["freq_hz"],   # 兼容旧字段名（单位是 Hz）
+        "expected_freq_milli_hz": vec["freq_hz"],  # 兼容旧字段名（单位是 Hz）
         "expected_phase_milli_deg": p_exp,
         "samples": samples,
         "freq_err_max_hz": max(f_err),
@@ -455,19 +471,20 @@ def fmt(v: dict) -> str:
     e = v["expected"]
     s0 = v["samples"][0]
     tag = "" if v["phase_mode"] == "controllable" else "（相位固定）"
-    return (f"{v['freq_hz']/1e6:>7.4f}MHz 请求φ={v['phase_requested_mdeg']/1000:>6.1f}°{tag} | "
-            f"gate={s0['gate_cnt']:>5} edge={s0['edge_cnt']:>5} phaseCnt={s0['phase_cnt']:>7} | "
-            f"f={s0['freq_hz']/1e6:>10.4f}MHz (Δ{v['freq_err_max_hz']:>6}Hz≤"
-            f"{max(1000, v['freq_hz']//1000)}Hz) | "
-            f"φ={s0['phase_milli_deg']/1000:>8.3f}° (Δ{v['phase_err_max_mdeg']/1000:.3f}≤"
-            f"{v['expected']['phase_tol_mdeg']/1000:.3f}/实测容限, 期望"
-            f"{v['phase_expected_mdeg']/1000:.3f}°) | {'PASS' if v['pass'] else 'FAIL'}")
+    return (
+        f"{v['freq_hz']/1e6:>7.4f}MHz 请求φ={v['phase_requested_mdeg']/1000:>6.1f}°{tag} | "
+        f"gate={s0['gate_cnt']:>5} edge={s0['edge_cnt']:>5} phaseCnt={s0['phase_cnt']:>7} | "
+        f"f={s0['freq_hz']/1e6:>10.4f}MHz (Δ{v['freq_err_max_hz']:>6}Hz≤"
+        f"{max(1000, v['freq_hz']//1000)}Hz) | "
+        f"φ={s0['phase_milli_deg']/1000:>8.3f}° (Δ{v['phase_err_max_mdeg']/1000:.3f}≤"
+        f"{v['expected']['phase_tol_mdeg']/1000:.3f}/实测容限, 期望"
+        f"{v['phase_expected_mdeg']/1000:.3f}°) | {'PASS' if v['pass'] else 'FAIL'}"
+    )
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="端到端扫描验证")
-    ap.add_argument("--server", default="ps/build/host_main --device {device}",
-                    help="服务端命令行，{device} 会替换为 pty slave 路径")
+    ap.add_argument("--server", default="ps/build/host_main --device {device}", help="服务端命令行，{device} 会替换为 pty slave 路径")
     ap.add_argument("--golden", default=os.path.join(HERE, "golden", "vectors.json"))
     ap.add_argument("--out", default=os.path.join(HERE, "verify_results.json"))
     ap.add_argument("--repeat", type=int, default=1)
@@ -482,16 +499,25 @@ def main() -> int:
     srv = ServerProcess(args.server, log_path)
     print(f"服务端：{srv.cmdline}")
     print(f"pty：{srv.slave_name}（服务端日志 {log_path}）")
-    result = {"server": srv.cmdline, "golden": args.golden, "gate": gate,
-              "repeat": args.repeat, "points": [], "passed": 0, "failed": 0,
-              "notes": []}
+    result = {
+        "server": srv.cmdline,
+        "golden": args.golden,
+        "gate": gate,
+        "repeat": args.repeat,
+        "points": [],
+        "passed": 0,
+        "failed": 0,
+        "notes": [],
+    }
     rc = 0
     try:
         srv.wait_ready()
         ident = srv.link.identify()
-        print(f"IDENTIFY：ver=0x{ident['ver']:08X} caps=0x{ident['caps']:08X} "
-              f"versionReg=0x{ident['version_reg']:08X} dsp={ident['dsp_clk_hz']/1e6:.0f}MHz "
-              f"slow={ident['slow_clk_hz']/1e6:.0f}MHz flags=0x{ident['flags']:X}")
+        print(
+            f"IDENTIFY：ver=0x{ident['ver']:08X} caps=0x{ident['caps']:08X} "
+            f"versionReg=0x{ident['version_reg']:08X} dsp={ident['dsp_clk_hz']/1e6:.0f}MHz "
+            f"slow={ident['slow_clk_hz']/1e6:.0f}MHz flags=0x{ident['flags']:X}"
+        )
         result["identify"] = ident
 
         # 相位是否可控：优先读 spec/drp_semantics.json（实测结论），缺省按「不可控」
@@ -505,19 +531,23 @@ def main() -> int:
             fixed_phase_mdeg = int(sem.get("static_phase_mdeg", 90_000))
         result["phase_controllable"] = phase_controllable
         result["fixed_phase_mdeg"] = fixed_phase_mdeg
-        print(f"相位可控 = {phase_controllable}"
-              + ("" if phase_controllable
-                 else f"（DRP 相位字不生效，实测相位固定 {fixed_phase_mdeg/1000:.1f}°）"))
+        print(
+            f"相位可控 = {phase_controllable}"
+            + ("" if phase_controllable else f"（DRP 相位字不生效，实测相位固定 {fixed_phase_mdeg/1000:.1f}°）")
+        )
 
-        srv.link.set_mode(0)          # 单次模式
-        srv.link.stream(0, 100)       # 关流
+        srv.link.set_mode(0)  # 单次模式
+        srv.link.stream(0, 100)  # 关流
         for vec in golden["vectors"]:
             try:
-                pt = run_point(srv.link, vec, gate, args.repeat, args.timeout,
-                               phase_controllable, fixed_phase_mdeg)
+                pt = run_point(srv.link, vec, gate, args.repeat, args.timeout, phase_controllable, fixed_phase_mdeg)
             except (TimeoutError, ProtocolError, BusyError, ParamError) as exc:
-                pt = {"freq_hz": vec["freq_hz"], "phase_requested_mdeg": vec["phase_requested_mdeg"],
-                      "pass": False, "error": f"{type(exc).__name__}: {exc}"}
+                pt = {
+                    "freq_hz": vec["freq_hz"],
+                    "phase_requested_mdeg": vec["phase_requested_mdeg"],
+                    "pass": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
             result["points"].append(pt)
             if pt.get("pass"):
                 result["passed"] += 1
@@ -525,8 +555,10 @@ def main() -> int:
             else:
                 result["failed"] += 1
                 rc = 1
-                print(f"  FAIL {pt.get('freq_hz', 0)/1e6:.4f}MHz φ={pt.get('phase_requested_mdeg',0)/1000:.1f}°"
-                      f" → {pt.get('error') or json.dumps(pt, ensure_ascii=False)[:200]}")
+                print(
+                    f"  FAIL {pt.get('freq_hz', 0)/1e6:.4f}MHz φ={pt.get('phase_requested_mdeg',0)/1000:.1f}°"
+                    f" → {pt.get('error') or json.dumps(pt, ensure_ascii=False)[:200]}"
+                )
         result["link_stats"] = srv.link.stats
     finally:
         srv_rc = srv.close()
@@ -535,8 +567,10 @@ def main() -> int:
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(result, fh, ensure_ascii=False, indent=2)
         fh.write("\n")
-    print(f"\n通过 {result['passed']} / 失败 {result['failed']}（共 {len(result['points'])} 点）"
-          f"，串口统计 {result.get('link_stats')}，服务端退出码 {srv_rc}")
+    print(
+        f"\n通过 {result['passed']} / 失败 {result['failed']}（共 {len(result['points'])} 点）"
+        f"，串口统计 {result.get('link_stats')}，服务端退出码 {srv_rc}"
+    )
     print(f"结果写入 {args.out}")
     return rc
 

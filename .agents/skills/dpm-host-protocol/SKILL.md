@@ -49,6 +49,17 @@ Python（`host/dpm_host/mathx.py`、`sig.py`、`protocol.py`）、金标准（`s
    不要在工作线程里碰控件，也不要在主线程里做阻塞请求。
 6. **CLI/GUI 的 DRP 字只是「预演」**：真正的换算在 PS 固件里做（`SET_SIG(freq, phase)`），
    上位机本地求解只用于显示 VCO/MULT/D 与量化提示。因此两侧公式必须一致，否则「显示」与「实测」会对不上。
+7. **超时按闸门时间放大（长闸门不误报超时）**：一次测量的时长就是闸门窗口
+   `T_gate = gateTarget / f_slow`（28 位闸门计数器 @50MHz ⇒ 最长 ≈5.37s），而真机固件还可能在
+   `GET_RESULT`/`GET_MEAS` **命令内部**等一个闸门窗口（协议 §3.0，固件侧上限
+   `DPM_WAIT_TIMEOUT_MS = 50ms + 4 × T_gate`，注意是**秒**的量纲、别再退回「µs 当 ms」的旧写法）。
+   因此调用方给的超时只是下限：
+   `DpmClient` 实际预算 ≥ `2×T_gate + 0.25s`（`gate_wait_budget()`；闸门目标由
+   `GET_STATUS.gateTarget` / `SET_GATE` 回显缓存），单次请求超时只当「这一拍没问出结果」继续轮询。
+   改超时相关代码时别退回固定值，否则 `gate 120000000`（2.4s）这种正常测量必报超时；
+   回归入口：`host/tests/test_gate_timeout.py` 与 `test_client_over_pty.py` 的长闸门用例
+   （pty 对端 + `sim_server --gate 120000000`）。GUI 的闸门上限就是 28 位计数器对应的 5.37s，
+   不再压到 2s。
 
 ## 无硬件验证（pty 仿真后端）
 
@@ -73,7 +84,7 @@ uv run python -m dpm_host --port /tmp/dpm_pty gui
 # C 服务端（与固件同一份 dpm_cmd.c）经 pty：28 点扫描 + 补充用例
 uv run python spec/validate_sweep.py --server "./ps/build/host_main --device {device}"
 uv run python spec/verify_extras.py  --server "./ps/build/host_main --device {device}"
-# 离线验收演练（44 项，含流上报）
+# 离线验收演练（93 项，含流上报与长闸门有界等待）
 bash ps/tools/onboard_accept_sim.sh
 # 上板（JTAG 冷启动 + 验收 + 扫描）
 xsdb -quiet ps/tools/jtag_boot.tcl

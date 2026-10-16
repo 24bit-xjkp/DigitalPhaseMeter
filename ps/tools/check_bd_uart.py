@@ -40,10 +40,18 @@ def read_text(path: str) -> str:
 def find_props(text: str) -> dict:
     """从 XCI（JSON）或 HWH（XML）里抽出感兴趣的属性。"""
     props: dict[str, str] = {}
-    for key in ("PCW_EN_UART0", "PCW_EN_UART1", "PCW_UART0_PERIPHERAL_ENABLE",
-                "PCW_UART1_PERIPHERAL_ENABLE", "PCW_UART0_UART0_IO", "PCW_UART1_UART1_IO",
-                "PCW_UART0_BAUD_RATE", "PCW_UART1_BAUD_RATE",
-                "PCW_MIO_TREE_PERIPHERALS", "PCW_MIO_TREE_SIGNALS"):
+    for key in (
+        "PCW_EN_UART0",
+        "PCW_EN_UART1",
+        "PCW_UART0_PERIPHERAL_ENABLE",
+        "PCW_UART1_PERIPHERAL_ENABLE",
+        "PCW_UART0_UART0_IO",
+        "PCW_UART1_UART1_IO",
+        "PCW_UART0_BAUD_RATE",
+        "PCW_UART1_BAUD_RATE",
+        "PCW_MIO_TREE_PERIPHERALS",
+        "PCW_MIO_TREE_SIGNALS",
+    ):
         # JSON: "KEY": [ { "value": "...", ... } ]
         m = re.search(rf'"{key}"\s*:\s*\[\s*\{{\s*"value"\s*:\s*"([^"]*)"', text)
         if m:
@@ -76,16 +84,14 @@ def main() -> int:
         io = props.get(f"PCW_{uart}_{uart}_IO", "?")
         baud = props.get(f"PCW_{uart}_BAUD_RATE", "?")
         on = en == "1" or periph == "1"
-        print(f"  {uart}: EN={en} PERIPHERAL_ENABLE={periph} IO={io} BAUD={baud}"
-              f" → {'使能' if on else '未使能'}")
+        print(f"  {uart}: EN={en} PERIPHERAL_ENABLE={periph} IO={io} BAUD={baud}" f" → {'使能' if on else '未使能'}")
         if on:
             enabled.append((uart, io, baud))
 
     mio_periph = (props.get("PCW_MIO_TREE_PERIPHERALS") or "").split("#")
     mio_sig = (props.get("PCW_MIO_TREE_SIGNALS") or "").split("#")
     if len(mio_periph) == MIO_COUNT:
-        used = [(i, mio_periph[i], mio_sig[i] if i < len(mio_sig) else "?")
-                for i in range(MIO_COUNT) if mio_periph[i] != "unassigned"]
+        used = [(i, mio_periph[i], mio_sig[i] if i < len(mio_sig) else "?") for i in range(MIO_COUNT) if mio_periph[i] != "unassigned"]
         if used:
             print(f"  MIO 已分配 {len(used)} 个：")
             for i, per, sig in used:
@@ -96,8 +102,7 @@ def main() -> int:
         print(f"  MIO：树长度 {len(mio_periph)} != {MIO_COUNT}，无法解析")
 
     if not enabled:
-        print("PS_UART: none（BD 里没配串口：用 vivado/create_bd.tcl -uart uart1 重建，"
-              "见 docs/bringup.md 第 0 节）")
+        print("PS_UART: none（BD 里没配串口：用 vivado/create_bd.tcl -uart uart1 重建，" "见 docs/bringup.md 第 0 节）")
         return 1
     for uart, io, baud in enabled:
         if baud not in ("115200", "?"):

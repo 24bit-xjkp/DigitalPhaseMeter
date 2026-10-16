@@ -24,6 +24,7 @@ import time
 
 import pytest
 from dpm_host import gui as G
+from dpm_host import mathx as M
 from dpm_host import protocol as P
 from dpm_host import sig as S
 
@@ -48,10 +49,18 @@ def test_gate_seconds_to_cycles_round_trip() -> None:
 
 
 def test_gate_cycles_clamped_to_protocol_range() -> None:
-    """0 与超过 1e8 的请求都被夹回合法区间（协议 u32 字段与旧界面同界）。"""
+    """0 与超过闸门计数上界的请求都被夹回合法区间（协议/RTL 的 28 位闸门计数器）。"""
     assert G.gate_seconds_to_cycles(0.0, SLOW_HZ) == G.GATE_MIN_CYCLES
-    assert G.gate_seconds_to_cycles(3.0, SLOW_HZ) == G.GATE_MAX_CYCLES
-    assert G.GATE_MAX_SECONDS == pytest.approx(2.0)
+    assert G.gate_seconds_to_cycles(10.0, SLOW_HZ) == G.GATE_MAX_CYCLES
+    assert G.GATE_MAX_CYCLES == M.GATE_TARGET_MAX
+    assert G.GATE_MAX_SECONDS == pytest.approx(M.GATE_TARGET_MAX / SLOW_HZ)
+
+
+def test_gate_max_seconds_covers_long_gate() -> None:
+    """上限放开到 RTL 的真实上界（50MHz 下 ≈5.37s），长闸门在界面上能设进去。"""
+    assert G.GATE_MAX_SECONDS > 5.0
+    assert G.gate_seconds_to_cycles(5.0, SLOW_HZ) == 250_000_000
+    assert G.gate_seconds_to_cycles(5.3, SLOW_HZ) == 265_000_000
 
 
 def test_gate_conversion_uses_slow_clock() -> None:
@@ -197,14 +206,21 @@ def test_window_phase_limit_no_solution(window) -> None:
 
 
 def test_window_gate_is_seconds(window) -> None:
-    """闸门输入框是秒（后缀 s），并实时显示等价周期数。"""
+    """闸门输入框是秒（后缀 s），并实时显示等价周期数与等结果的等待预算。"""
     window.gate_spin.setValue(4e-5)
     assert window.gate_spin.suffix().strip() == "s"
     assert window.gate_spin.decimals() == 6
     assert "2000 低速周期" in window.gate_hint.text()
+    # 默认闸门（40µs）的预算 ≈ 2×40µs + 0.25s，远小于界面的等结果基线
+    assert "等待预算" in window.gate_hint.text()
 
     window.gate_spin.setValue(1e-3)
     assert "50000 低速周期" in window.gate_hint.text()
+
+    # 长闸门：预算随闸门线性放大（5s 闸门 → ≈10.25s）
+    window.gate_spin.setValue(5.0)
+    assert "250000000 低速周期" in window.gate_hint.text()
+    assert "10.25 s" in window.gate_hint.text()
 
 
 def test_window_gate_echo_from_status(window) -> None:

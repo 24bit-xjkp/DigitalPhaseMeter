@@ -66,19 +66,35 @@ def main() -> int:
         v90 = by[(v["freq_hz"], 90000)]
         rows.append(
             "    {%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d},\n"
-            % (v["freq_hz"], v["vco_hz"], v["mult"], v["div"], v["phase_requested_mdeg"],
-               v["phase_field"], v["phase_mux"], v90["gate_cnt"], v90["edge_cnt"],
-               v90["phase_cnt"], v["phase_cnt"], v["freq_milli_hz"], v["phase_milli_deg"],
-               v["phase_step_mdeg"]))
+            % (
+                v["freq_hz"],
+                v["vco_hz"],
+                v["mult"],
+                v["div"],
+                v["phase_requested_mdeg"],
+                v["phase_field"],
+                v["phase_mux"],
+                v90["gate_cnt"],
+                v90["edge_cnt"],
+                v90["phase_cnt"],
+                v["phase_cnt"],
+                v["freq_milli_hz"],
+                v["phase_milli_deg"],
+                v["phase_step_mdeg"],
+            )
+        )
     with open(DST, "w", encoding="utf-8") as fh:
-        fh.write(HEADER % {
-            "slow": data["clocks"]["f_slow_hz"],
-            "dsp": data["clocks"]["f_dsp_hz"],
-            "gate": data["target_gate"],
-            "grid": data["phase_grid_mdeg_num"],
-            "count": len(data["vectors"]),
-            "rows": "".join(rows),
-        })
+        fh.write(
+            HEADER
+            % {
+                "slow": data["clocks"]["f_slow_hz"],
+                "dsp": data["clocks"]["f_dsp_hz"],
+                "gate": data["target_gate"],
+                "grid": data["phase_grid_mdeg_num"],
+                "count": len(data["vectors"]),
+                "rows": "".join(rows),
+            }
+        )
     print(f"写入 {DST}：{len(data['vectors'])} 条向量")
     return 0
 

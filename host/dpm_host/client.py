@@ -8,6 +8,9 @@
   （`0xE1 STREAM_DATA` / `0xE2 EVENT`，协议 v1.1）交给注册的回调，坏帧只计数不抛异常；
 - **超时与重试**：等待超时抛 :class:`~dpm_host.protocol.DpmTimeoutError`；`retries` 控制重发次数，
   重发前会清空未匹配的残留帧（避免把上一次的迟到响应当成本次的响应）；
+- **超时随闸门时间自动放大**（长闸门不误报超时）：调用方给出的超时只当**下限**，实际预算不小于
+  `2 × 闸门窗口 + 0.25s`（闸门窗口 = `gateTarget / f_slow`，见 :meth:`DpmClient.gate_wait_budget`）。
+  闸门目标由 `GET_STATUS` / `SET_GATE` 自动缓存；
 - **错误响应**：`0xFE ERR_PARAM` / `0xFF ERR_BUSY` 抛 :class:`~dpm_host.protocol.DpmError`；
   需要把「无结果」当正常情况处理时用 `accept_busy=True`（返回原始帧）或 :meth:`DpmClient.try_get_meas`。
 
@@ -30,19 +33,53 @@ from .protocol import (
     Cmd,
     DpmError,
     DpmTimeoutError,
+    Event,
     Frame,
     FrameParser,
+    Identify,
     Meas,
     ParseError,
     Result,
     SigInfo,
     Status,
-    Identify,
     StreamData,
-    Event,
 )
 
-__all__ = ["DpmClient", "SerialTransport", "ClientStats", "SCAN_CSV_FIELDS", "scan_rows_to_csv"]
+__all__ = [
+    "DpmClient",
+    "SerialTransport",
+    "ClientStats",
+    "SCAN_CSV_FIELDS",
+    "scan_rows_to_csv",
+    "GATE_TIMEOUT_FACTOR",
+    "GATE_TIMEOUT_SLACK_S",
+    "gate_wait_budget_seconds",
+]
+
+
+#: 长闸门下的等待预算系数：预算 = `GATE_TIMEOUT_FACTOR × 闸门窗口 + GATE_TIMEOUT_SLACK_S`。
+#:
+#: 依据（`docs/ps-protocol.md` 第 5 节）：一次测量的时长就是闸门窗口
+#: `T_gate = gateCnt / f_slow ≈ gateTarget / f_slow`（`gateCnt = gateTarget + ceil(T_sig/T_slow)`，
+#: 多出的一个信号周期可忽略）。旧的固定超时（单次请求 0.5s、`--result-timeout` 2.0s）在闸门
+#: 时间接近或超过它时，**测量本身没问题也会报超时**：闸门 2.4s 时必然超过 2.0s 的等结果预算。
+#: ×2 覆盖「等到一半时结果才锁存」「连续模式读完立刻重启下一次」这类最坏情况，固定余量再吸收
+#: 命令往返与结果锁存延迟。
+GATE_TIMEOUT_FACTOR = 2.0
+GATE_TIMEOUT_SLACK_S = 0.25
+
+
+def gate_wait_budget_seconds(gate_target: int | None, slow_hz: int) -> float:
+    """闸门目标 + 低速时钟 → 等一次结果的等待预算（秒）。
+
+    = `GATE_TIMEOUT_FACTOR × gateTarget/f_slow + GATE_TIMEOUT_SLACK_S`；闸门目标未知或设备
+    报 0 时返回 0（不放大，沿用调用方给的超时）。做成模块级函数是为了让 GUI/CLI 在还没连上
+    设备（或还没读到 `GET_STATUS`）时也能把预算显示出来；:meth:`DpmClient.gate_wait_budget`
+    是它在当前连接上的快捷方式。
+    """
+    if not gate_target or int(slow_hz) <= 0:
+        return 0.0
+    return GATE_TIMEOUT_FACTOR * (float(gate_target) / float(slow_hz)) + GATE_TIMEOUT_SLACK_S
 
 
 class Transport:
@@ -160,6 +197,9 @@ class DpmClient:
         self.retry_delay = float(retry_delay)
         self.slow_hz = int(slow_hz)
         self.dsp_hz = int(dsp_hz)
+        #: 设备当前的目标闸门计数（`GET_STATUS.gateTarget` / `SET_GATE` 回显）：等待预算按它换算；
+        #: 未知或设备报 0 时为 ``None``（此时不放大，只用调用方给的超时）。
+        self.gate_target: int | None = None
         self.stats = ClientStats()
         #: 通知帧回调（在读线程里执行）。
         self.on_stream_data: Callable[[StreamData], None] | None = None
@@ -305,6 +345,60 @@ class DpmClient:
         except Exception as exc:  # pragma: no cover - 回调异常不能拖垮读线程
             self._log(f"回调异常：{exc!r}")
 
+    # ------------------------------------------------------------ 闸门时间与等待预算
+
+    def gate_window_s(self) -> float | None:
+        """当前闸门目标对应的测量窗口时长（秒）：`gateTarget / f_slow`；未知返回 ``None``。
+
+        `gateCnt = gateTarget + ceil(T_sig / T_slow)`（协议第 5 节），多出的一个信号周期
+        相对整个窗口可以忽略，因此这就是「启动一次测量到结果锁存」的时长。
+        """
+        gate = self.gate_target
+        if not gate or self.slow_hz <= 0:
+            return None
+        return float(gate) / float(self.slow_hz)
+
+    def gate_wait_budget(self) -> float:
+        """长闸门下的等待预算（秒）：`GATE_TIMEOUT_FACTOR × 闸门窗口 + GATE_TIMEOUT_SLACK_S`。
+
+        闸门目标未知时返回 0（不放大，沿用调用方给的超时）。它是**下限**：调用方给的超时比它
+        长时以调用方为准，比它短时按它放大——否则长闸门下必然误报「等待测量结果超时」。
+        """
+        return gate_wait_budget_seconds(self.gate_target, self.slow_hz)
+
+    def effective_timeout(self, requested: float | None = None, *, gate_aware: bool = True) -> float:
+        """把调用方给的超时放大到「不小于等待预算」的值（`requested=None` 用 `self.timeout`）。
+
+        `gate_aware=False` 时原样返回：只用于**不会**被闸门拖住的诊断请求（如
+        :meth:`DpmClient._status_or_none` 的 `GET_STATUS`），避免链路已死时还要多等一个闸门窗口。
+        """
+        base = float(self.timeout if requested is None else requested)
+        if not gate_aware:
+            return base
+        return max(base, self.gate_wait_budget())
+
+    def refresh_gate_target(self) -> int | None:
+        """读一次 `GET_STATUS` 刷新缓存的闸门目标（`GET_STATUS` 不阻塞，可在等结果前放心调用）。
+
+        读不到时沿用缓存并记一条日志：调用方随后要发的请求自己会带上放大后的超时，
+        这里的失败不该盖住真正的原因。
+        """
+        try:
+            return self.get_status().gate_target
+        except Exception as exc:  # pragma: no cover - 诊断/前置路径
+            self._log(f"读取闸门目标失败（沿用缓存 {self.gate_target}）：{exc!r}")
+            return self.gate_target
+
+    def _ensure_gate_target(self) -> None:
+        """闸门目标未知时先读一次 `GET_STATUS` 学会它——否则等待预算会按「未知」算成不放大。
+
+        典型场景：`start --wait` / `meas` 这类**没有先读过状态**的调用路径——设备上闸门是
+        2.4s，而上位机只知道自己的基线 2.0s，必然误报超时。`GET_STATUS` 不会被闸门拖住，
+        因此这一次额外往返很便宜；目标已知时直接返回，不额外发请求。
+        """
+        if self.gate_target is None:
+            self.refresh_gate_target()
+
     # ------------------------------------------------------------ 事务
 
     def _clear_pending(self) -> None:
@@ -326,18 +420,22 @@ class DpmClient:
         raise_on_error: bool = True,
         accept_busy: bool = False,
         accept_param: bool = False,
+        gate_aware: bool = True,
     ) -> Frame:
         """发一条请求并等它的响应（`cmd | 0x80`，或错误响应码）。
 
         - 超时（含 `retries` 次重发后仍无响应）抛 :class:`DpmTimeoutError`；
         - 收到 `0xFE/0xFF` 抛 :class:`DpmError`，除非 `accept_busy` / `accept_param` 对应打开
-          （此时返回原始帧，由调用方判断）。
+          （此时返回原始帧，由调用方判断）；
+        - `timeout` 只是**下限**：闸门时间更长时按 :meth:`DpmClient.effective_timeout` 放大
+          （对端可能在命令内部等一个闸门窗口，见 `docs/ps-protocol.md` §3.0）；
+          `gate_aware=False` 可关掉放大（诊断请求用）。
         """
         if self._transport is None:
             raise RuntimeError("客户端未连接（先 connect()）")
         cmd_enum = Cmd(int(cmd) & 0xFF)
         expected = cmd_enum.response
-        timeout = self.timeout if timeout is None else float(timeout)
+        timeout = self.effective_timeout(timeout, gate_aware=gate_aware)
         retries = self.retries if retries is None else int(retries)
         attempt = 0
         while True:
@@ -419,9 +517,12 @@ class DpmClient:
         return info
 
     def get_status(self, **kw: object) -> Status:
-        """`GET_STATUS`。"""
+        """`GET_STATUS`（顺带把 `gateTarget` 记进缓存，供长闸门的等待预算使用）。"""
         frame = self.request(Cmd.GET_STATUS, **kw)  # type: ignore[arg-type]
-        return P.decode_status(frame.payload)
+        st = P.decode_status(frame.payload)
+        if st.gate_target > 0:
+            self.gate_target = int(st.gate_target)
+        return st
 
     def start(self, *, accept_busy: bool = True, **kw: object) -> bool:
         """`START`：启动一次测量，返回「是否真的发出了新的启动」。
@@ -454,9 +555,12 @@ class DpmClient:
         return P.decode_meas(frame.payload)
 
     def set_gate(self, gate_target: int, **kw: object) -> int:
-        """`SET_GATE`：返回生效的目标闸门计数。"""
+        """`SET_GATE`：返回生效的目标闸门计数（顺带更新本地缓存，之后的等待预算按它换算）。"""
         frame = self.request(Cmd.SET_GATE, P.encode_set_gate(gate_target), **kw)  # type: ignore[arg-type]
-        return P.decode_set_gate(frame.payload)
+        got = P.decode_set_gate(frame.payload)
+        if got > 0:
+            self.gate_target = int(got)
+        return got
 
     def set_mode(self, mode: int | str, **kw: object) -> int:
         """`SET_MODE`：0/single、1/continuous。"""
@@ -496,15 +600,22 @@ class DpmClient:
     # ------------------------------------------------------------ 等待/采样
 
     def wait_idle(self, timeout: float = 2.0, poll_interval: float = 0.002) -> Status:
-        """等到 `STATUS.busy = 0`（配置 DRP / SET_SIG 前必须空闲）。"""
-        deadline = time.monotonic() + timeout
+        """等到 `STATUS.busy = 0`（配置 DRP / SET_SIG 前必须空闲）。
+
+        `timeout` 是**下限**：长闸门下一次测量本来就要跑一个闸门窗口（对端在 `SET_SIG`/
+        `CLEAR` 内部也会等到空闲，见协议 §3.0），因此实际按 :meth:`DpmClient.effective_timeout`
+        放大。
+        """
+        self._ensure_gate_target()
+        budget = self.effective_timeout(timeout)
+        deadline = time.monotonic() + budget
         last: Status | None = None
         while True:
             last = self.get_status()
             if not last.busy:
                 return last
             if time.monotonic() >= deadline:
-                raise DpmTimeoutError(None, timeout, "等待 STATUS.busy=0 超时")
+                raise DpmTimeoutError(None, budget, "等待 STATUS.busy=0 超时")
             time.sleep(poll_interval)
 
     def _no_result_detail(self, st: Status | None) -> str:
@@ -515,6 +626,13 @@ class DpmClient:
         为什么等不到、以及怎么恢复——否则调用方只会看到一句无信息量的「超时」。
         """
         parts = ["等待测量结果超时（源没有边沿时测量永不完成）"]
+        window = self.gate_window_s()
+        if window is not None:
+            parts.append(
+                f"当前闸门目标 {self.gate_target} 低速周期 = {window:g}s，"
+                f"已按 {self.gate_wait_budget():g}s 的预算等待"
+                f"（{GATE_TIMEOUT_FACTOR:g}×闸门 + {GATE_TIMEOUT_SLACK_S:g}s）"
+            )
         if st is not None:
             source = "片内信号源" if st.sig_select else "外部引脚 sig1/sig2"
             parts.append(
@@ -538,9 +656,13 @@ class DpmClient:
         return "；".join(parts)
 
     def _status_or_none(self) -> Status | None:
-        """诊断用：尽量读一次 `GET_STATUS`，读不到就返回 ``None``（不掩盖原来的错误）。"""
+        """诊断用：尽量读一次 `GET_STATUS`，读不到就返回 ``None``（不掩盖原来的错误）。
+
+        这里显式 `gate_aware=False`：`GET_STATUS` 不会被闸门拖住，链路已经出问题时不该再按
+        闸门预算多等一个窗口才把诊断信息交出去。
+        """
         try:
-            return self.get_status(timeout=min(float(self.timeout), 0.2), retries=0)
+            return self.get_status(timeout=min(float(self.timeout), 0.2), retries=0, gate_aware=False)
         except Exception as exc:  # pragma: no cover - 诊断路径，失败不影响原错误
             self._log(f"诊断用 GET_STATUS 失败：{exc!r}")
             return None
@@ -568,14 +690,24 @@ class DpmClient:
         当唯一依据——PS 侧实现可能是「事件驱动」的（例如每次 AXI 事务才推进一次模型时间），
         状态位与结果锁存之间存在时序差；本方法对两种实现都成立。
         超时抛 :class:`DpmTimeoutError`（带输入源诊断），**不**把「暂无结果」当设备错误。
+
+        `timeout` 是**下限**：实际预算还会按闸门时间放大（见 :meth:`gate_wait_budget`），
+        否则长闸门下必然误报超时。单次 `GET_RESULT` 请求超时也只当「这一拍没问出结果」
+        （对端可能在命令内部等闸门窗口），继续轮询到总预算再报超时 + 诊断。
         """
-        deadline = time.monotonic() + timeout
+        self._ensure_gate_target()  # 先学一次闸门目标，好把预算算对（GET_STATUS 不阻塞）
+        budget = self.effective_timeout(timeout)
+        deadline = time.monotonic() + budget
         while True:
-            result = self._poll_result()
+            try:
+                result = self._poll_result()
+            except DpmTimeoutError as exc:
+                self._log(f"GET_RESULT 单次请求超时（{exc.timeout:g}s），继续等结果……")
+                result = None
             if result is not None:
                 return result
             if time.monotonic() >= deadline:
-                raise DpmTimeoutError(None, timeout, self._no_result_detail(self._status_or_none()))
+                raise DpmTimeoutError(None, budget, self._no_result_detail(self._status_or_none()))
             time.sleep(poll_interval)
 
     def wait_meas(self, timeout: float = 2.0, poll_interval: float = 0.002) -> Meas:
@@ -588,18 +720,29 @@ class DpmClient:
         两条路径上的 `ERR_BUSY` 都只表示「**还没有结果**」（`GET_MEAS` 没有 `valid`
         字段，只能用错误码表达同一件事），一律继续轮询到 `timeout` 再抛
         :class:`DpmTimeoutError`——「源没有边沿」是正常的输入状态，不是设备错误。
+
+        `timeout` 是**下限**：实际预算按闸门时间放大，长闸门下不会因为闸门比预算长而误报。
         """
-        deadline = time.monotonic() + timeout
+        self._ensure_gate_target()
+        budget = self.effective_timeout(timeout)
+        deadline = time.monotonic() + budget
         status_miss_logged = False
         while True:
-            st = self.get_status()
+            st = self.get_status()  # 顺带刷新闸门目标
             if st.result_valid:
                 try:
                     return self.get_meas()
+                except DpmTimeoutError as exc:
+                    # 单次请求超时 = 这一拍没问出来（对端可能正阻塞在闸门等待里），继续轮询
+                    self._log(f"GET_MEAS 单次请求超时（{exc.timeout:g}s），继续等结果……")
                 except DpmError as exc:
                     if exc.code != int(Cmd.ERR_BUSY):
                         raise
-            result = self._poll_result()
+            try:
+                result = self._poll_result()
+            except DpmTimeoutError as exc:
+                self._log(f"GET_RESULT 单次请求超时（{exc.timeout:g}s），继续等结果……")
+                result = None
             if result is not None:
                 if not status_miss_logged and not st.result_valid:
                     self._log(
@@ -617,12 +760,18 @@ class DpmClient:
                     phase_milli_deg=calc.phase_milli_deg,
                 )
             if time.monotonic() >= deadline:
-                raise DpmTimeoutError(None, timeout, self._no_result_detail(self._status_or_none()))
+                raise DpmTimeoutError(None, budget, self._no_result_detail(self._status_or_none()))
             time.sleep(poll_interval)
 
     def wait_source_ready(self, timeout: float = 2.0, poll_interval: float = 0.002) -> Status:
-        """等到 `SIG_STATUS.sourceReady = 1`（配置快照送达 + MMCM 锁定）。"""
-        deadline = time.monotonic() + timeout
+        """等到 `SIG_STATUS.sourceReady = 1`（配置快照送达 + MMCM 锁定）。
+
+        `timeout` 是**下限**：切换输入源/改片内源时对端可能先等当前测量结束（`SET_SOURCE` /
+        `SET_SIG` 的有界等待，见协议 §3.0），长闸门下这一步也要一个闸门窗口。
+        """
+        self._ensure_gate_target()
+        budget = self.effective_timeout(timeout)
+        deadline = time.monotonic() + budget
         last: Status | None = None
         while True:
             last = self.get_status()
@@ -630,13 +779,17 @@ class DpmClient:
                 return last
             if time.monotonic() >= deadline:
                 raise DpmTimeoutError(
-                    None, timeout,
+                    None,
+                    budget,
                     f"等待 sourceReady 超时（status=0x{last.status:08X} sigStatus=0x{last.sig_status:08X}）",
                 )
             time.sleep(poll_interval)
 
     def measure_once(self, timeout: float = 2.0, *, start: bool = True) -> tuple[Result, Meas, M.Meas]:
-        """启动一次测量并读回 (Result, Meas, 本地换算结果)。"""
+        """启动一次测量并读回 (Result, Meas, 本地换算结果)。
+
+        `timeout` 是等结果的下限，实际按闸门时间放大（见 :meth:`wait_meas`）。
+        """
         if start:
             self.start()
         meas = self.wait_meas(timeout=timeout)
@@ -677,12 +830,14 @@ class DpmClient:
         """连续测量 N 次或指定时长，返回 [(Meas, 换算结果)]。
 
         - `use_stream=True` 时打开 `STREAM`，用通知帧回调收集数据；
-        - 否则用 `GET_MEAS` 轮询（连续模式下 PS 会在结果读走后立即重启下一次）。
+        - 否则用 `GET_MEAS` 轮询（连续模式下 PS 会在结果读走后立即重启下一次）；
+        - `timeout` 是每次等结果的下限，长闸门下自动放大（见 :meth:`wait_meas`）。
         """
         samples: list[tuple[Meas, M.Meas]] = []
         deadline = None if duration is None else time.monotonic() + duration
 
         if use_stream:
+
             def _on_stream(data: StreamData) -> None:  # 读线程回调
                 meas = data.meas
                 calc = M.meas_calc(meas.gate_cnt, meas.edge_cnt, meas.phase_cnt, self.slow_hz, self.dsp_hz)
@@ -747,6 +902,9 @@ class DpmClient:
         `GET_MEAS`。`gate_target` 给出时先 `SET_GATE`；`max_error_milli_hz` 给出时，
         `SET_SIG` 后的实际频率偏差超过它就跳过该行并记一条日志（避免把「实现不了的频点」
         混进 CSV）。
+
+        `timeout` / `result_timeout` 都是**下限**：设置了长闸门时，等空闲、等 `sourceReady`
+        与等结果都会按闸门时间自动放大（见 :meth:`gate_wait_budget`），不会误报超时。
         """
         emit = log or (lambda _msg: None)
         rows: list[dict] = []
@@ -780,10 +938,7 @@ class DpmClient:
                     # 其它错误码（如 ERR_BUSY）仍然抛出。
                     if exc.code != P.Cmd.ERR_PARAM:
                         raise
-                    emit(
-                        f"跳过 {freq_hz / 1e6:g}MHz/{phase_mdeg / 1000:g}°："
-                        f"SET_SIG 回 ERR_PARAM（相位超出该频点的 9 位相位码上界）"
-                    )
+                    emit(f"跳过 {freq_hz / 1e6:g}MHz/{phase_mdeg / 1000:g}°：" f"SET_SIG 回 ERR_PARAM（相位超出该频点的 9 位相位码上界）")
                     continue
                 if max_error_milli_hz is not None and abs(info.freq_hz - freq_hz) * 1000 > max_error_milli_hz:
                     emit(f"跳过 {freq_hz / 1e6:g}MHz：实现频率 {info.freq_hz / 1e6:g}MHz 偏差过大")

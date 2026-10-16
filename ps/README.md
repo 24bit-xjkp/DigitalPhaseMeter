@@ -120,6 +120,11 @@ $ ./ps/build/cmake/test_sig
 == 192 项检查，0 项失败        （exit=0）
 ```
 
+> 上面的数字是 `spec/ps_selftest/host_tests.log`（2026-10-15 那一轮）的存档。随后的几轮扩充了金标准
+> 向量与用例，**当前**同一组目标是 `test_calc` 325 / `test_proto` 128 / `test_sig` 579 项检查，
+> 全部 0 失败（`test_proto` 新增的 8 项是命令层等待上限的量纲判据，见第 5 节与
+> `docs/verify-report.md` §14）。
+
 覆盖点：
 - `test_calc`：28 条金标准的定点输出逐位一致、`gate/edge = 0` 不除零、32 位大数不溢出、
   相位归一化与周期换算；
@@ -137,11 +142,14 @@ $ python3 ps/tests/test_server_selftest.py
 == 结果: 256/256 项通过 ==        （exit=0）
 ```
 
-256 项覆盖：帧层负向（CRC 错/LEN 越界/噪声重同步/未知命令/方向位）、
+> 同样地，`256/256` 是 2026-10-15 存档的数字；**当前**是 **624/624**（新增的用例含
+> 「长闸门 + 无信号时 `GET_RESULT` 的有界等待」，见第 5 节与 `docs/verify-report.md` §14）。
+
+624 项覆盖：帧层负向（CRC 错/LEN 越界/噪声重同步/未知命令/方向位）、
 全部命令码 `0x01..0x0E`、通知帧 `0xE1/0xE2`、错误路径（非法 mode/source/freq/相位/
 PAYLOAD 长度 → `0xFE`；测量中 START、片内源未锁定、外部无信号 → `0xFF`）、
 7 频点 × 4 相位点与金标准逐位对照、结果覆盖丢失（`lostCount`/`EVENT(1)`）、
-单次/连续模式与流上报、外部源两条路径、`--unlock` 失锁实例。
+单次/连续模式与流上报、外部源两条路径、`--unlock` 失锁实例、长闸门下的有界等待。
 
 ### 3.3 pty 会话记录（`spec/ps_selftest/pty_session.log`，节选）
 
@@ -226,8 +234,8 @@ $ python3 spec/validate_sweep.py --server "./ps/build/host_main --device {device
 | 项 | 状态 |
 | --- | --- |
 | 交叉编译 + 链接 + `nm -u` 无未定义符号 | **已验证**（本机，见 1 节输出） |
-| 宿主机单元测试 433 项 + pty 端到端 256 项 | **已验证**（见 3.1/3.2） |
-| 与独立参考实现（`spec/validate_sweep.py`）28/28 一致 | **已验证**（见 3.4） |
+| 宿主机单元测试 1032 项（325+128+579）+ pty 端到端 624 项 | **已验证**（见 3.1/3.2；数字为 2026-10-16 当前值） |
+| 与独立参考实现（`spec/validate_sweep.py`）79/79 一致 | **已验证**（见 3.4，本轮复跑 79 点全 PASS） |
 | 片内源相位在线可改 | **未上板验证**：上一版 clk_wiz 方案的实测结论是「相位字没接到 MMCM，`clk_out2` 恒为静态 90.000°」（`spec/drp_semantics.json`、`docs/verify-drp.md`）；当前方案（裸 MMCM + 极简 DRP 控制器）改由 PS 直接写 MMCM 相位寄存器，但这条通路仍只有 DRP 从端模型与 `validate_bd_design` 的证据，上板前不要当成已生效 |
 | 真实 PL 上的 DRP 重配置时序（等 `locked` 0→1、Safe Clock Startup） | **未上板验证**：旧方案的逻辑按当时的实测结论实现（`0x004` 状态位 + `0x25C` Load=0x07）；当前方案见 `vivado/package_src_ip.tcl` |
 | UART 中断路径、GIC 中断号 61/59 | **未上板验证**（轮询路径已通过 pty 验证） |

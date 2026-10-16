@@ -334,8 +334,15 @@ def test_protocol_phase_range_is_driven_by_phase_code() -> None:
 
 @pytest.mark.parametrize(
     "freq_hz, phase_mdeg",
-    [(25_000_000, 270_000), (25_000_000, 225_000), (25_000_000, 180_000), (20_000_000, 315_000),
-     (10_000_000, 225_000), (8_000_000, 180_000), (5_000_000, 191_250)],
+    [
+        (25_000_000, 270_000),
+        (25_000_000, 225_000),
+        (25_000_000, 180_000),
+        (20_000_000, 315_000),
+        (10_000_000, 225_000),
+        (8_000_000, 180_000),
+        (5_000_000, 191_250),
+    ],
     ids=["25M-270", "25M-225", "25M-180", "20M-315", "10M-225", "8M-180", "5M-191.25"],
 )
 def test_over_180_is_exact_on_the_grid(freq_hz: int, phase_mdeg: int) -> None:
@@ -534,10 +541,7 @@ def test_grid_is_45_over_d() -> None:
 #: 冻结相位点 × 偶 D（22.5° 是 45°/D 的整数倍要求 D 为偶数），再按 9 位相位码上界裁剪：
 #: D=120（5MHz）在 202.5° 以上越界、D=100（10MHz）在 270° 越界、D=80（12.5MHz）在 315° 越界。
 _FROZEN_GRID_CASES = [
-    (div, phase)
-    for div in (40, 50, 80, 100, 120)
-    for phase in S.FROZEN_PHASES_MILLI_DEG
-    if S.phase_code_fits(phase, div)
+    (div, phase) for div in (40, 50, 80, 100, 120) for phase in S.FROZEN_PHASES_MILLI_DEG if S.phase_code_fits(phase, div)
 ]
 _FROZEN_GRID_IDS = [f"D{div}-{phase / 1000:g}deg" for div, phase in _FROZEN_GRID_CASES]
 

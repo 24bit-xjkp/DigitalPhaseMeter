@@ -41,18 +41,16 @@ from .sim_fpga import (
     CTRL_START,
     GATE_TARGET_MAX,
     IRQ_LOST_CLEAR,
-    REG_SIG_CTRL,
     REG_GATE_TARGET,
-    SimFpga,
+    REG_SIG_CTRL,
     VERSION_VALUE,
+    SimFpga,
 )
 
 __all__ = ["SimPs", "SimServer", "ServerOptions", "main", "serve_pty", "serve_device"]
 
 #: `IDENTIFY.flags`：片内源可用 + 连续模式 + 流模式 + 中断驱动。
-DEFAULT_FLAGS = (
-    P.FLAG_SIGNAL_SOURCE | P.FLAG_CONTINUOUS | P.FLAG_STREAM | P.FLAG_IRQ
-)
+DEFAULT_FLAGS = P.FLAG_SIGNAL_SOURCE | P.FLAG_CONTINUOUS | P.FLAG_STREAM | P.FLAG_IRQ
 
 
 @dataclass
@@ -227,7 +225,7 @@ class SimPs:
             gate_cnt=result.gate_cnt,
             edge_cnt=result.edge_cnt,
             phase_cnt=result.phase_cnt,
-            freq_milli_hz=calc.freq_hz,          # 字段名沿用协议，值 = Hz
+            freq_milli_hz=calc.freq_hz,  # 字段名沿用协议，值 = Hz
             phase_milli_deg=calc.phase_milli_deg,
         )
 
@@ -343,9 +341,7 @@ class SimPs:
             out.append(P.encode_frame(P.Cmd.STREAM_DATA, P.encode_stream_data(data)))
             self.notifications_sent += 1
             if lost_delta:
-                out.append(
-                    P.encode_frame(P.Cmd.EVENT, P.encode_event(P.Event(1, self.fpga.lost_count)))
-                )
+                out.append(P.encode_frame(P.Cmd.EVENT, P.encode_event(P.Event(1, self.fpga.lost_count))))
             self._after_result_read()
             self._last_stream_at = t
 
@@ -628,7 +624,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=("auto", "controllable", "static"),
         default="auto",
         help="片内源相位模型：auto=跟随 spec/drp_semantics.json（当前为 static，相位恒 90°）；"
-             "controllable=假装相位字已接线（上位机相位通路自测）；static=固定静态相位",
+        "controllable=假装相位字已接线（上位机相位通路自测）；static=固定静态相位",
     )
     ap.add_argument("--git-rev", type=lambda s: int(s, 0), default=0, help="IDENTIFY 返回的 gitRev")
     ap.add_argument("--version", type=lambda s: int(s, 0), default=0x00010000, help="IDENTIFY 返回的 ver")

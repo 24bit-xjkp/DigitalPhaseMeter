@@ -45,7 +45,6 @@ def record(name: str, ok: bool, detail: str) -> None:
     print(f"  [{'PASS' if ok else 'FAIL'}] {name}: {detail}")
 
 
-
 def _recover_source(link) -> bool:
     """返回 True 表示已恢复到可继续测量的状态。"""
     """从「外部输入无信号 → 测量挂在等参考沿」恢复到可用状态。
@@ -72,24 +71,26 @@ def _recover_source(link) -> bool:
             except vs.BusyError:
                 pass
             st2 = link.status()
-            record("从无信号状态恢复（切回片内源）", True,
-                   f"模型差异：切回片内源后 busy 仍为 1（STATUS=0x{st2['status']:X}）——"
-                   "真实 PL 会在边沿恢复后完成测量；本后端未实现，后续用例跳过")
+            record(
+                "从无信号状态恢复（切回片内源）",
+                True,
+                f"模型差异：切回片内源后 busy 仍为 1（STATUS=0x{st2['status']:X}）——"
+                "真实 PL 会在边沿恢复后完成测量；本后端未实现，后续用例跳过",
+            )
             return False
         # 把可能残留的结果读走，避免影响后续用例
         try:
             if st["status"] & vs.STATUS_RESULT_VALID:
                 link.get_meas()
-        except (vs.BusyError, TimeoutError, vs.ParamError):
+        except vs.BusyError, TimeoutError, vs.ParamError:
             pass
         try:
             link.clear()
         except vs.BusyError:
-            pass                      # busy 期间 clear 被拒是协议允许的
-        record("从无信号状态恢复（切回片内源）", True,
-               f"busy 已落，STATUS=0x{st['status']:X}")
+            pass  # busy 期间 clear 被拒是协议允许的
+        record("从无信号状态恢复（切回片内源）", True, f"busy 已落，STATUS=0x{st['status']:X}")
         return True
-    except Exception as exc:                      # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         record("从无信号状态恢复（切回片内源）", False, f"{type(exc).__name__}: {exc}")
         return False
 
@@ -104,10 +105,11 @@ def case_gate_independence(link) -> None:
         m = vs.measure_once(link, gate, 10.0)
         c = m["phase_cnt"] // m["edge_cnt"] if m["edge_cnt"] else 0
         cyc.append(c)
-        print(f"    gate={gate:>6} → gateCnt={m['gate_cnt']:>6} edgeCnt={m['edge_cnt']:>5} "
-              f"phaseCnt={m['phase_cnt']:>7} cycles={c} φ={m['phase_milli_deg']/1000:.3f}°")
-    record("闸门独立性", cyc[0] == cyc[1] and cyc[0] > 0,
-           f"2000 与 20000 闸门下 phaseCnt/edgeCnt 都是 {cyc[0]}")
+        print(
+            f"    gate={gate:>6} → gateCnt={m['gate_cnt']:>6} edgeCnt={m['edge_cnt']:>5} "
+            f"phaseCnt={m['phase_cnt']:>7} cycles={c} φ={m['phase_milli_deg']/1000:.3f}°"
+        )
+    record("闸门独立性", cyc[0] == cyc[1] and cyc[0] > 0, f"2000 与 20000 闸门下 phaseCnt/edgeCnt 都是 {cyc[0]}")
 
 
 def case_modes(link) -> None:
@@ -120,8 +122,8 @@ def case_modes(link) -> None:
         got = link.set_mode(mode)
         record(f"SET_MODE {mode}", got == mode, f"回读 {got}")
     seqs = []
-    link.set_mode(0)          # 单次：只有显式 START 才测
-    link.clear()              # 先复位结果区与标志，再断言「本次运行没有新增丢失」
+    link.set_mode(0)  # 单次：只有显式 START 才测
+    link.clear()  # 先复位结果区与标志，再断言「本次运行没有新增丢失」
     for _ in range(3):
         m = vs.measure_once(link, 2000, 10.0)
         seqs.append(m["seq"])
@@ -140,34 +142,37 @@ def case_errors(link) -> None:
     # 25MHz（D=40）能表示整个 0~360°，而 8MHz（D=125）在 184.139° 以上越界
     # （MMCM 的 PHASE_MUX/DELAY_TIME 字段会截断、相位回绕成另一个值）。
     try:
-        link.set_sig(8_000_000, 200_000)       # 相位码 556 > 511
+        link.set_sig(8_000_000, 200_000)  # 相位码 556 > 511
         record("相位码越界（8MHz/200°）→ ERR_PARAM", False, "未报错")
     except vs.ParamError:
         record("相位码越界（8MHz/200°）→ ERR_PARAM", True, "相位码 556 > 511 被拒")
     try:
-        link.set_sig(25_000_000, 360_000)      # 满量程（与 0° 同义）
+        link.set_sig(25_000_000, 360_000)  # 满量程（与 0° 同义）
         record("相位满量程（360°）→ ERR_PARAM", False, "未报错")
     except vs.ParamError:
         record("相位满量程（360°）→ ERR_PARAM", True, "360° 被拒")
     # 反向确认：>180° 的请求现在是**合法**的（旧固件一律拒 ≥180°，属过度保守）
     try:
         echo = link.set_sig(25_000_000, 270_000)
-        record("相位 270°@25MHz 合法（>180° 用例）", echo["div"] == 40 and echo["phase_mdeg"] == 270_000,
-               f"D={echo['div']} 回显相位={echo['phase_mdeg'] / 1000:g}° phaseField={echo['phase_field']}")
+        record(
+            "相位 270°@25MHz 合法（>180° 用例）",
+            echo["div"] == 40 and echo["phase_mdeg"] == 270_000,
+            f"D={echo['div']} 回显相位={echo['phase_mdeg'] / 1000:g}° phaseField={echo['phase_field']}",
+        )
     except vs.ParamError as exc:
         record("相位 270°@25MHz 合法（>180° 用例）", False, f"被拒：{exc}")
     try:
-        link.set_sig(3_000_000, 90_000)        # 低于可实现的频点
+        link.set_sig(3_000_000, 90_000)  # 低于可实现的频点
         record("非法频率 → ERR_PARAM", False, "未报错")
     except vs.ParamError:
         record("非法频率 → ERR_PARAM", True, "3MHz 被拒")
     try:
-        link.set_mode(2)                        # 非法模式
+        link.set_mode(2)  # 非法模式
         record("非法模式 → ERR_PARAM", False, "未报错")
     except vs.ParamError:
         record("非法模式 → ERR_PARAM", True, "mode=2 被拒")
     try:
-        link.request(vs.CMD_SET_GATE, b"\x01\x02")   # 字长不符
+        link.request(vs.CMD_SET_GATE, b"\x01\x02")  # 字长不符
         record("SET_GATE 字长不符 → ERR_PARAM", False, "未报错")
     except vs.ParamError:
         record("SET_GATE 字长不符 → ERR_PARAM", True, "2 字节参数被拒")
@@ -189,8 +194,7 @@ def case_external_no_signal(link) -> None:
     try:
         link.start()
     except vs.BusyError:
-        record("外部无信号：START 被拒（A：ERR_BUSY）", True,
-               "sourceReady=0 时拒绝启动，属于允许的实现")
+        record("外部无信号：START 被拒（A：ERR_BUSY）", True, "sourceReady=0 时拒绝启动，属于允许的实现")
         return _recover_source(link)
 
     deadline = time.monotonic() + 1.0
@@ -208,17 +212,18 @@ def case_external_no_signal(link) -> None:
                 # 已知差异：ps/sim/fpga_model.c 在外部输入模式下仍按上次 SET_SIG 的频率给结果
                 # （真实 PL 会停在等参考沿）。这里记为「已知差异」而不是协议失败：
                 # 协议本身没被违反（固件照实报寄存器），是仿真后端缺少「外部无信号」的建模。
-                record("外部无信号：仿真后端仍给出结果（已知差异，非协议错误）", True,
-                       f"edge_cnt={m['edge_cnt']}、f={m['freq_hz']}Hz —— 真实 PL 应停在 busy；"
-                       "已在 docs/verify-report.md 记录该差异")
+                record(
+                    "外部无信号：仿真后端仍给出结果（已知差异，非协议错误）",
+                    True,
+                    f"edge_cnt={m['edge_cnt']}、f={m['freq_hz']}Hz —— 真实 PL 应停在 busy；" "已在 docs/verify-report.md 记录该差异",
+                )
                 return _recover_source(link)
             break
         time.sleep(0.01)
     if behavior is None:
         st = link.status()
         if st["seq"] == seq_before and not (st["status"] & vs.STATUS_BUSY):
-            behavior = ("B/模型简化：START 未产生新结果（RESULT_SEQ 未变），"
-                        "仍在等参考沿或已放弃本次测量")
+            behavior = "B/模型简化：START 未产生新结果（RESULT_SEQ 未变），" "仍在等参考沿或已放弃本次测量"
         else:
             behavior = "B: 1s 内既没有结果也没有退出 busy（视为停在等待态）"
     record("外部无信号：不应给出正常读数", True, behavior)
@@ -236,9 +241,11 @@ def case_phase_fixed(link) -> None:
         m = vs.measure_once(link, 2000, 10.0)
         got.append((phase // 1000, m["phase_milli_deg"] / 1000))
     all_fixed = all(abs(p - 90.0) <= 1.0 for _, p in got)
-    record("相位读数与请求无关（恒 90°）", all_fixed,
-           "请求 " + "/".join(f"{r}°" for r, _ in got)
-           + " → 实测 " + "/".join(f"{p:.1f}°" for _, p in got))
+    record(
+        "相位读数与请求无关（恒 90°）",
+        all_fixed,
+        "请求 " + "/".join(f"{r}°" for r, _ in got) + " → 实测 " + "/".join(f"{p:.1f}°" for _, p in got),
+    )
 
 
 def main() -> int:
@@ -255,16 +262,14 @@ def main() -> int:
         srv.wait_ready()
         link = srv.link
         link.ping()
-        for fn in (case_gate_independence, case_modes, case_errors,
-                   case_external_no_signal, case_phase_fixed):
+        for fn in (case_gate_independence, case_modes, case_errors, case_external_no_signal, case_phase_fixed):
             try:
                 ok = fn(link)
-            except Exception as exc:                      # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 record(fn.__name__, False, f"{type(exc).__name__}: {exc}")
                 ok = True
             if ok is False:
-                record(fn.__name__ + "（后续用例）", True,
-                       "上一步因仿真后端差异无法恢复到可测状态，跳过（不是协议失败）")
+                record(fn.__name__ + "（后续用例）", True, "上一步因仿真后端差异无法恢复到可测状态，跳过（不是协议失败）")
                 break
         link.set_mode(0)
         link.set_source(1)
@@ -275,9 +280,18 @@ def main() -> int:
     if failed:
         rc = 1
     with open(args.out, "w", encoding="utf-8") as fh:
-        json.dump({"server": srv.cmdline, "cases": RESULTS, "passed": len(RESULTS) - len(failed),
-                   "failed": len(failed), "server_exit_code": srv_rc}, fh,
-                  ensure_ascii=False, indent=2)
+        json.dump(
+            {
+                "server": srv.cmdline,
+                "cases": RESULTS,
+                "passed": len(RESULTS) - len(failed),
+                "failed": len(failed),
+                "server_exit_code": srv_rc,
+            },
+            fh,
+            ensure_ascii=False,
+            indent=2,
+        )
         fh.write("\n")
     print(f"\n补充用例：通过 {len(RESULTS) - len(failed)} / 失败 {len(failed)}；结果写入 {args.out}")
     return rc

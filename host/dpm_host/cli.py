@@ -36,7 +36,7 @@ from typing import Any, Callable, Sequence
 from . import mathx as M
 from . import protocol as P
 from . import sig as S
-from .client import DpmClient, SCAN_CSV_FIELDS, scan_rows_to_csv
+from .client import GATE_TIMEOUT_FACTOR, GATE_TIMEOUT_SLACK_S, SCAN_CSV_FIELDS, DpmClient, scan_rows_to_csv
 from .protocol import DpmError, DpmTimeoutError, Meas, Result
 
 __all__ = ["main", "build_parser"]
@@ -104,15 +104,23 @@ def fmt_meas(meas: Meas, client: DpmClient) -> str:
     step = M.phase_quant_milli_deg(calc.freq_hz, client.dsp_hz)
     extra = ""
     if meas.freq_milli_hz != calc.freq_hz:
-        extra = (
-            f"  [wire freqMilliHz={meas.freq_milli_hz} 与本地换算 {calc.freq_hz} 不同："
-            f"对端字段单位口径差异，显示以本地换算为准]"
-        )
+        extra = f"  [wire freqMilliHz={meas.freq_milli_hz} 与本地换算 {calc.freq_hz} 不同：" f"对端字段单位口径差异，显示以本地换算为准]"
     return (
         f"seq={meas.seq:<5d} f={M.format_freq_hz(calc.freq_hz):>14s} "
         f"phase={M.format_milli_deg(calc.phase_milli_deg):>10s} "
         f"gate={meas.gate_cnt:<6d} edge={meas.edge_cnt:<7d} phaseCnt={meas.phase_cnt:<10d} "
         f"phaseCycles={cycles:.4f} 量化步长={step / 1000:.3f}°" + extra
+    )
+
+
+def fmt_gate_budget(client: DpmClient) -> str:
+    """超时提示里的一句闸门预算说明（长闸门时用户才知道等了多久、为什么这么等）。"""
+    window = client.gate_window_s()
+    if window is None:
+        return "闸门目标未知（还没读到 GET_STATUS.gateTarget），只能按给定的超时等待"
+    return (
+        f"当前闸门 {client.gate_target} 低速周期 = {window:g}s，本次等待预算 "
+        f"{client.gate_wait_budget():g}s（{GATE_TIMEOUT_FACTOR:g}×闸门 + {GATE_TIMEOUT_SLACK_S:g}s）"
     )
 
 
@@ -246,6 +254,7 @@ def cmd_start(args: argparse.Namespace, client: DpmClient) -> int:
     except DpmTimeoutError as exc:
         print(f"测量未完成：{exc}", file=sys.stderr)
         print("提示：片内源未使能/未锁定，或外部输入没有边沿时，测量永远不会完成。", file=sys.stderr)
+        print(f"      {fmt_gate_budget(client)}", file=sys.stderr)
         return EXIT_ERROR
     result = Result(True, meas.seq, meas.gate_cnt, meas.edge_cnt, meas.phase_cnt)
     if args.json:
@@ -279,11 +288,11 @@ def cmd_meas(args: argparse.Namespace, client: DpmClient) -> int:
         except DpmTimeoutError as exc:
             print(f"测量未完成：{exc}", file=sys.stderr)
             print("提示：片内源未使能/未锁定，或外部输入没有边沿时，测量永远不会完成。", file=sys.stderr)
+            print(f"      {fmt_gate_budget(client)}", file=sys.stderr)
             return EXIT_ERROR
     calc = client.calc_meas(meas)
     if args.json:
-        print_json({**meas.as_row(), "freq_hz_local": calc.freq_hz,
-                    "phase_milli_deg_local": calc.phase_milli_deg})
+        print_json({**meas.as_row(), "freq_hz_local": calc.freq_hz, "phase_milli_deg_local": calc.phase_milli_deg})
         return EXIT_OK
     print(fmt_meas(meas, client))
 
@@ -291,10 +300,7 @@ def cmd_meas(args: argparse.Namespace, client: DpmClient) -> int:
     if meas.edge_cnt:
         cycles = M.phase_cycles_float(meas.phase_cnt, meas.edge_cnt)
         step_deg = 360.0 * calc.freq_hz / client.dsp_hz
-        print(
-            f"主判据 phaseCnt/edgeCnt = {cycles:.6f} DSP 周期"
-            f"（1 个 DSP 周期 = {step_deg:.4f}°，即相位量化下界）"
-        )
+        print(f"主判据 phaseCnt/edgeCnt = {cycles:.6f} DSP 周期" f"（1 个 DSP 周期 = {step_deg:.4f}°，即相位量化下界）")
         if args.expect_deg is not None:
             err = M.phase_err_deg(calc.phase_milli_deg, args.expect_deg)
             tol = 360.0 * calc.freq_hz / client.dsp_hz / 2.0 + 0.001
@@ -317,8 +323,10 @@ def cmd_monitor(args: argparse.Namespace, client: DpmClient) -> int:
             )
 
     if not args.json:
-        print(f"连续测量：次数={args.count if args.count else '∞'} 时长={args.duration if args.duration else '∞'}s "
-              f"流模式={'开' if args.stream else '关'}")
+        print(
+            f"连续测量：次数={args.count if args.count else '∞'} 时长={args.duration if args.duration else '∞'}s "
+            f"流模式={'开' if args.stream else '关'}"
+        )
         print(header)
     try:
         samples = client.monitor(
@@ -332,6 +340,7 @@ def cmd_monitor(args: argparse.Namespace, client: DpmClient) -> int:
         )
     except DpmTimeoutError as exc:
         print(f"测量超时：{exc}", file=sys.stderr)
+        print(f"      {fmt_gate_budget(client)}", file=sys.stderr)
         return EXIT_ERROR
     finally:
         pass
@@ -404,11 +413,20 @@ def cmd_sig(args: argparse.Namespace, client: DpmClient) -> int:
     if freq_hz is None and phase_mdeg is None:
         info = client.get_sig()
         if args.json:
-            print_json({"freqHz": info.freq_hz, "phaseMilliDeg": info.phase_milli_deg, "vcoHz": info.vco_hz,
-                        "div": info.div, "phaseField": info.phase_field})
+            print_json(
+                {
+                    "freqHz": info.freq_hz,
+                    "phaseMilliDeg": info.phase_milli_deg,
+                    "vcoHz": info.vco_hz,
+                    "div": info.div,
+                    "phaseField": info.phase_field,
+                }
+            )
         else:
-            print(f"片内源：f={info.freq_hz / 1e6:g} MHz 相位差={info.phase_deg:g}° "
-                  f"VCO={info.vco_hz / 1e6:g} MHz D={info.div} 相位字段={info.phase_field}")
+            print(
+                f"片内源：f={info.freq_hz / 1e6:g} MHz 相位差={info.phase_deg:g}° "
+                f"VCO={info.vco_hz / 1e6:g} MHz D={info.div} 相位字段={info.phase_field}"
+            )
         return EXIT_OK
 
     if freq_hz is None or phase_mdeg is None:
@@ -440,29 +458,38 @@ def cmd_sig(args: argparse.Namespace, client: DpmClient) -> int:
     info = client.set_sig(freq_hz, phase_mdeg)
     echo = client.get_sig()
     if args.json:
-        print_json({"requested": {"freqHz": freq_hz, "phaseMilliDeg": phase_mdeg},
-                    "set_sig": info.__dict__, "get_sig": echo.__dict__})
+        print_json({"requested": {"freqHz": freq_hz, "phaseMilliDeg": phase_mdeg}, "set_sig": info.__dict__, "get_sig": echo.__dict__})
     else:
-        print(f"SET_SIG → f={info.freq_hz / 1e6:g} MHz 相位差={info.phase_deg:g}° "
-              f"VCO={info.vco_hz / 1e6:g} MHz D={info.div} 相位字(0x218)={phase_mdeg} 毫度"
-              f"（phaseField={info.phase_field} 是历史字段，恒 0）")
-        print(f"GET_SIG → f={echo.freq_hz / 1e6:g} MHz 相位差={echo.phase_deg:g}° "
-              f"VCO={echo.vco_hz / 1e6:g} MHz D={echo.div}")
+        print(
+            f"SET_SIG → f={info.freq_hz / 1e6:g} MHz 相位差={info.phase_deg:g}° "
+            f"VCO={info.vco_hz / 1e6:g} MHz D={info.div} 相位字(0x218)={phase_mdeg} 毫度"
+            f"（phaseField={info.phase_field} 是历史字段，恒 0）"
+        )
+        print(f"GET_SIG → f={echo.freq_hz / 1e6:g} MHz 相位差={echo.phase_deg:g}° " f"VCO={echo.vco_hz / 1e6:g} MHz D={echo.div}")
         if info.phase_milli_deg != phase_mdeg:
             grid = S.mmcm_phase_grid_milli_deg(info.div) if info.div else None
             kind = "量化" if semantics.phase_controllable else "相位字未接入（当前 bitstream 不可在线改相位）"
-            print(f"注意：请求相位 {phase_mdeg / 1000:g}° 与实现相位 {info.phase_milli_deg / 1000:g}° 不同（{kind}"
-                  + (f"，网格 45/D = {float(grid) / 1000:.4f}°" if grid else "") + "）")
+            print(
+                f"注意：请求相位 {phase_mdeg / 1000:g}° 与实现相位 {info.phase_milli_deg / 1000:g}° 不同（{kind}"
+                + (f"，网格 45/D = {float(grid) / 1000:.4f}°" if grid else "")
+                + "）"
+            )
     return EXIT_OK
 
 
 def cmd_gate(args: argparse.Namespace, client: DpmClient) -> int:
     value = client.set_gate(args.target)
+    budget = client.gate_wait_budget()
     if args.json:
-        print_json({"gateTarget": value})
+        print_json({"gateTarget": value, "gateSeconds": value / client.slow_hz, "waitBudgetSeconds": budget})
     else:
         seconds = value / client.slow_hz
         print(f"gateTarget = {value}（{seconds * 1e6:.1f} µs @ {client.slow_hz / 1e6:g} MHz）")
+        print(
+            f"等结果的等待预算 = {budget:g} s"
+            f"（{GATE_TIMEOUT_FACTOR:g}×闸门 {seconds:g}s + {GATE_TIMEOUT_SLACK_S:g}s 余量）："
+            f"比它短的 --timeout / --result-timeout 会自动放大，长闸门不会误报超时"
+        )
     return EXIT_OK
 
 
@@ -589,8 +616,10 @@ def cmd_scan(args: argparse.Namespace, client: DpmClient) -> int:
     sem = S.current_semantics()
     if args.print_plan:
         print(f"扫描计划：{len(freqs)} 个频点 × {len(phases)} 个相位点 = {len(freqs) * len(phases)} 行")
-        print(f"相位可控性：{'是' if sem.phase_controllable else '否（实现相位恒为静态 ' + f'{sem.phase_static_milli_deg / 1000:.3f}' + '°）'}"
-              f"，来源 {sem.path or '回退'}")
+        print(
+            f"相位可控性：{'是' if sem.phase_controllable else '否（实现相位恒为静态 ' + f'{sem.phase_static_milli_deg / 1000:.3f}' + '°）'}"
+            f"，来源 {sem.path or '回退'}"
+        )
         skipped: list[str] = []
         for f in freqs:
             sol = S.solve_sig(f, 0, client.slow_hz, S.current_semantics())
@@ -613,8 +642,7 @@ def cmd_scan(args: argparse.Namespace, client: DpmClient) -> int:
                 f"f={M.format_freq_hz(row['f_meas_mHz']):>15} "
                 f"phase={M.format_milli_deg(row['phase_meas_mdeg']):>10} "
                 f"err={row['err_deg']:+.4f}° gate={row['gateCnt']} edge={row['edgeCnt']} "
-                f"phaseCnt={row['phaseCnt']} cycles={row['phaseCycles']:.4f}"
-                + ("" if row.get("phase_honored", True) else "  ⚠相位未生效")
+                f"phaseCnt={row['phaseCnt']} cycles={row['phaseCycles']:.4f}" + ("" if row.get("phase_honored", True) else "  ⚠相位未生效")
             )
 
     try:
@@ -631,6 +659,7 @@ def cmd_scan(args: argparse.Namespace, client: DpmClient) -> int:
         )
     except DpmTimeoutError as exc:
         print(f"扫描超时：{exc}", file=sys.stderr)
+        print(f"      {fmt_gate_budget(client)}", file=sys.stderr)
         if rows and args.out:
             scan_rows_to_csv(rows, args.out)
             print(f"已把已完成的 {len(rows)} 行写入 {args.out}", file=sys.stderr)
@@ -658,13 +687,17 @@ def cmd_scan(args: argparse.Namespace, client: DpmClient) -> int:
     if rows and not rows[0].get("phase_controllable", True):
         n_bad = sum(1 for row in rows if not row.get("phase_honored", True))
         if n_bad:
-            print(f"⚠ 当前 bitstream 相位不可在线改（spec/drp_semantics.json: phase_controllable=false）："
-                  f"实现相位恒为静态 90°，{n_bad}/{len(rows)} 行的相位与请求值不符（err_deg 已如实反映）")
+            print(
+                f"⚠ 当前 bitstream 相位不可在线改（spec/drp_semantics.json: phase_controllable=false）："
+                f"实现相位恒为静态 90°，{n_bad}/{len(rows)} 行的相位与请求值不符（err_deg 已如实反映）"
+            )
             print("  要在线扫描相位需按 docs/ps-protocol.md 6.2 给 clk_wiz_src 加 CONFIG.PHASE_DUTY_CONFIG 并重建 IP/BD")
         else:
-            print("说明：spec/drp_semantics.json 记录当前 bitstream 相位不可在线改（phase_controllable=false），"
-                  "但本次扫描的设备接受了相位设置（仿真后端 --phase-model controllable 模拟的「补丁后」行为）；"
-                  "真实硬件上相位仍恒为 90°，需重建 IP/BD 后才生效")
+            print(
+                "说明：spec/drp_semantics.json 记录当前 bitstream 相位不可在线改（phase_controllable=false），"
+                "但本次扫描的设备接受了相位设置（仿真后端 --phase-model controllable 模拟的「补丁后」行为）；"
+                "真实硬件上相位仍恒为 90°，需重建 IP/BD 后才生效"
+            )
     if args.out:
         print(f"CSV 已写入 {args.out}")
     return EXIT_OK
@@ -696,8 +729,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--port", metavar="PORT", default=None, help="串口设备或 pty 路径（如 /dev/pts/5）")
     ap.add_argument("--baud", type=int, default=P.DEFAULT_BAUD, help=f"波特率（默认 {P.DEFAULT_BAUD}）")
-    ap.add_argument("--timeout", type=float, default=0.5, help="单次请求超时（秒，默认 0.5）")
-    ap.add_argument("--result-timeout", type=float, default=2.0, help="等测量结果的总超时（秒，默认 2.0）")
+    ap.add_argument(
+        "--timeout",
+        type=float,
+        default=0.5,
+        help="单次请求超时（秒，默认 0.5）。只是**下限**：闸门时间更长时自动放大到 "
+        f"{GATE_TIMEOUT_FACTOR:g}×闸门 + {GATE_TIMEOUT_SLACK_S:g}s（对端可能在命令内部等一个闸门窗口）",
+    )
+    ap.add_argument(
+        "--result-timeout",
+        type=float,
+        default=2.0,
+        help="等测量结果的总超时（秒，默认 2.0）。同样只是**下限**：长闸门下自动放大，不会误报超时",
+    )
     ap.add_argument("--retries", type=int, default=1, help="超时重发次数（默认 1）")
     ap.add_argument("--slow-hz", type=int, default=M.SLOW_HZ_DEFAULT, help="低速时钟频率（IDENTIFY 会覆盖）")
     ap.add_argument("--dsp-hz", type=int, default=M.DSP_HZ_DEFAULT, help="DSP 时钟频率（IDENTIFY 会覆盖）")
@@ -758,8 +802,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--interval-ms", type=int, default=P.DEFAULT_STREAM_INTERVAL_MS, help="上报周期（ms）")
     p.add_argument("-n", "--count", type=int, default=5, help="收到多少条通知后退出（on 时）")
     p.add_argument("-d", "--duration", type=float, default=2.0, help="最长等待时间（秒）")
-    p.add_argument("--no-autostart", action="store_false", dest="autostart",
-                   help="没有有效结果时不要自动切 continuous + START")
+    p.add_argument("--no-autostart", action="store_false", dest="autostart", help="没有有效结果时不要自动切 continuous + START")
     p.set_defaults(func=cmd_stream, autostart=True)
 
     p = sub.add_parser("clear", help="CLEAR：复位结果区与标志")
@@ -787,8 +830,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", metavar="PORT", default=argparse.SUPPRESS, help="串口或 pty 路径（启动后自动连接）")
     p.add_argument("--baud", type=int, default=argparse.SUPPRESS, help="波特率")
     p.add_argument("--timeout", type=float, default=argparse.SUPPRESS, help="单次请求超时（秒）")
-    p.add_argument("--gui-args", nargs=argparse.REMAINDER, default=argparse.SUPPRESS, dest="gui_args",
-                   help="额外透传给 GUI 的参数（放在 -- 之后）")
+    p.add_argument(
+        "--gui-args", nargs=argparse.REMAINDER, default=argparse.SUPPRESS, dest="gui_args", help="额外透传给 GUI 的参数（放在 -- 之后）"
+    )
     p.set_defaults(func=cmd_gui)
     return ap
 

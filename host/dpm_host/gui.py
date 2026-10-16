@@ -66,7 +66,13 @@ from . import mathx as M
 from . import protocol as P
 from . import sig as S
 from .cli import parse_freq  # 频率写法（`25MHz` / `25e6` / `25M`）与 CLI 共用一套，见 host/README.md 第 4 节
-from .client import DpmClient, scan_rows_to_csv
+from .client import (
+    GATE_TIMEOUT_FACTOR,
+    GATE_TIMEOUT_SLACK_S,
+    DpmClient,
+    gate_wait_budget_seconds,
+    scan_rows_to_csv,
+)
 
 __all__ = [
     "DpmGuiApp",
@@ -82,15 +88,17 @@ __all__ = [
 MAX_ROWS = 200
 #: 相位输入的满量程（度）：0° 与 360° 同义，满量程不接收（协议字段是毫度 0..359999）。
 PHASE_MAX_DEG = 359.999
-#: 闸门时间（秒）输入范围：下限 1µs，上限 2s。
+#: 闸门时间（秒）输入范围：下限 1µs，上限 = RTL/协议的闸门计数上界。
 #:
-#: 上限沿用旧界面「闸门(低速周期) ≤ 1e8」的能力（50MHz 下正好 2s；RTL 的闸门计数器是 28 位，
-#: 理论上限 2²⁸-1 ≈ 5.37s，这里不放开，避免闸门时间长到几十秒时用户等不到结果）。
+#: RTL 的闸门计数器是 28 位（`GATE_TARGET_MAX = 2²⁸-1`），50MHz 下最长 5.3687s。
+#: 旧界面把上限压在 2s，理由是「闸门时间长到几十秒时用户等不到结果」——那正是固定超时
+#: （等结果 2.0s）造成的假超时；现在等待预算按闸门时间自动放大（`client.gate_wait_budget`），
+#: 因此放开到真实上界，长闸门换来的是更高的频率分辨率。
 GATE_MIN_SECONDS = 1e-6
-GATE_MAX_SECONDS = 2.0
-#: 闸门计数（低速周期）的合法范围，与协议 `SET_GATE` 的 u32 字段及旧界面同界。
+GATE_MAX_SECONDS = M.GATE_TARGET_MAX / float(M.SLOW_HZ_DEFAULT)
+#: 闸门计数（低速周期）的合法范围，与协议 `SET_GATE` / RTL 的 28 位闸门计数器一致。
 GATE_MIN_CYCLES = 1
-GATE_MAX_CYCLES = 100_000_000
+GATE_MAX_CYCLES = M.GATE_TARGET_MAX
 #: 相位仪表盘的最小尺寸（逻辑像素）。
 GAUGE_SIZE = 150
 #: 相位条形的高度。
@@ -697,11 +705,18 @@ class DpmGuiApp(QMainWindow):
 
     @Slot(float)
     def _refresh_gate_hint(self, _value: float = 0.0) -> None:
-        """把秒输入框换算成低速周期数显示出来（下发的就是这个周期数）。"""
+        """把秒输入框换算成低速周期数显示出来（下发的就是这个周期数），并给出等结果的等待预算。
+
+        等待预算 = `2×闸门 + 0.25s`（`DpmClient.gate_wait_budget`）：长闸门下一次测量本来
+        就要跑一个闸门窗口，界面上先说清要等多久，用户才不会把它当成卡死。
+        """
         slow = self._slow_hz()
         cycles = gate_seconds_to_cycles(self.gate_spin.value(), slow)
         resolution_hz = slow / cycles
-        self.gate_hint.setText(f"= {cycles} 低速周期 @ {slow / 1e6:g}MHz（频率分辨率 ≈ {resolution_hz / 1000:.4g} kHz）")
+        budget = gate_wait_budget_seconds(cycles, slow)
+        self.gate_hint.setText(
+            f"= {cycles} 低速周期 @ {slow / 1e6:g}MHz（频率分辨率 ≈ {resolution_hz / 1000:.4g} kHz"
+        )
 
     # ------------------------------------------------------------ 连接
 
@@ -1002,7 +1017,11 @@ class DpmGuiApp(QMainWindow):
                 self.sig_log.emit(f"设置闸门失败：{type(exc).__name__}: {exc}")
                 return
             actual = format_seconds(got / slow)
-            self.sig_log.emit(f"闸门时间 {format_seconds(seconds)} → gateTarget = {got} 低速周期（实际 {actual} @ {slow / 1e6:g}MHz）")
+            budget = gate_wait_budget_seconds(got, slow)
+            self.sig_log.emit(
+                f"闸门时间 {format_seconds(seconds)} → gateTarget = {got} 低速周期"
+                f"（实际 {actual} @ {slow / 1e6:g}MHz，等结果预算 ≈ {format_seconds(budget)}）"
+            )
             self._job_status()
 
         self.submit(job)

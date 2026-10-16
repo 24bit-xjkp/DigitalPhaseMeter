@@ -712,3 +712,158 @@ START → status=0x0000000B（busy=1 resultValid=1）
 | 发现的残留路径 | CLI `meas`/`status` 的裸 `get_meas()`（12.2 第 4 层）→ 已补修，并加 `test_cli_status_and_meas_survive_busy_get_meas` 钉住（未补修前该用例以 `ERR_BUSY … 请求 0x06（GET_MEAS）` 失败） |
 | 记录在案但**未**修的既有问题 | ① 流上报在源没有边沿时会持续重发缓存旧结果（`dpm_cmd_tick` 只判 `have_result`，帧里没有 valid 位），`monitor --stream` 会把它当样本；② 先 `start --no-wait`、再切到无信号源后 `meas` 会**直接打印上一次的片内源读数**（exit 0）——两者在本轮改动前后表现相同，属既有语义问题，未纳入本次修复 |
 | 未能验证的 | 真实板子/引脚/MMCM/真实串口；RTL 级「无信号」行为（`test/Controller.cpp` 恒驱周期信号，本轮未新增该用例） |
+
+## 13. 2026-10-16 第四轮：长闸门时间下的测量被误报「超时」
+
+**这一轮没有上板证据，也不需要**：问题在 PC 侧上位机的超时口径上，改动只涉及 `host/`。
+板上暂无长闸门实测（见 13.5），验证在三个后端上完成：`sim_server`（墙钟模型，真实等待 2.4s）、
+自建的 pty 对端（复现 C 固件「命令内部有界等待」的语义）、C 验证台（`ps/build/host_main`，
+同一份 `dpm_cmd.c`，虚拟时间与墙钟解耦）。
+
+### 13.1 现象
+
+把闸门时间调长（`SET_GATE` / GUI 的「闸门时间」输入框）后，测量**明明在正常进行**，上位机却报
+
+```text
+测量未完成：等待响应超时，timeout=2s：等待测量结果超时（源没有边沿时测量永不完成）；……
+```
+
+### 13.2 根因（两处，都在上位机的固定超时上）
+
+一次测量的时长就是闸门窗口 `T_gate = gateCnt / f_slow ≈ gateTarget / f_slow`
+（`docs/ps-protocol.md` 第 5 节）；RTL 的闸门计数器是 28 位，50MHz 下最长 **5.37s**，
+而旧实现的超时是写死的：
+
+1. **等结果的总预算固定 2.0s**（`--result-timeout` 默认值，GUI 单次测量是
+   `max(2.0, timeout×4)`）：闸门 > 2.0s 时结果还没锁存，预算就先到期——必然误报；
+2. **单次请求超时固定 0.5s**（`--timeout` 默认值）：真机固件在 `GET_RESULT` / `GET_MEAS`
+   命令**内部**等结果（`ps/src/dpm_cmd.c` 的 `ensure_result` → `dpm_cmd_wait_result`，
+   `50 + 4 × 闸门时间` ms 的有界等待，协议 §3.0），`SET_SIG` / `CLEAR` 也会在命令内部
+   `wait_idle`；因此闸门 > 约 0.11s 时单次请求也会被拖爆。
+
+另外 GUI 把闸门时间上界压在 **2.0s**（`GATE_MAX_SECONDS`，理由是「闸门长了用户等不到结果」），
+正是同一处固定超时的产物——长闸门想设也设不进去。
+
+### 13.3 修复
+
+| 文件 | 改动 |
+| ---- | ---- |
+| `host/dpm_host/client.py` | 新增 `GATE_TIMEOUT_FACTOR = 2.0` / `GATE_TIMEOUT_SLACK_S = 0.25` 与 `gate_wait_budget_seconds()`：等待预算 = `max(调用方给的值, 2×闸门窗口 + 0.25s)`。`DpmClient.gate_target` 由 `GET_STATUS.gateTarget` / `SET_GATE` 回显**自动缓存**；`request()`、`wait_result` / `wait_meas` / `wait_idle` / `wait_source_ready` 一律按它放大；闸门未知时先补读一次 `GET_STATUS`（`_ensure_gate_target`，`start --wait` / `meas` 这类不先读状态的路径靠它）；等待过程中单次请求超时只当「这一拍没问出结果」，继续轮询到总预算；`_status_or_none` 显式关掉放大（诊断不该再等一个闸门窗口）；超时诊断里加上「闸门多长、等了多久」 |
+| `host/dpm_host/cli.py` | `--timeout` / `--result-timeout` 的帮助写明「只是下限」；`gate` 子命令打印生效闸门与等待预算（`--json` 含 `waitBudgetSeconds`）；`start`/`meas`/`monitor`/`scan` 的超时提示补上闸门预算一行 |
+| `host/dpm_host/gui.py` | 「闸门时间」实时提示加上等待预算；闸门上限从 2.0s 放开到 28 位计数器的真实上界（`GATE_MAX_CYCLES = GATE_TARGET_MAX`，50MHz 下 ≈5.37s）；设置闸门后日志里报出预算 |
+| `docs/ps-protocol.md` §3.0 | 新增「上位机的等待预算随闸门时间放大」一条（PC 侧约定，不改 PS 行为） |
+| 回归 | `host/tests/test_gate_timeout.py`（14 项纯单元：预算换算、缓存、诊断文本、CLI 接线、`GET_STATUS` 失败容错）；`host/tests/test_client_over_pty.py` 新增 5 项：`LongGatePeer`（命令内部阻塞 0.6s / 结果按窗口锁存）四项 + `sim_server --gate 120000000`（2.4s）的端到端一项；`host/tests/test_gui.py` 新增闸门上限/预算提示 1 项、改写夹取范围 1 项；`host/tools/gui_smoke.py` 新增「长闸门 2.4s 单次测量」步 |
+
+### 13.4 验证（本轮实测）
+
+| 证据 | 命令 / 后端 | 结果 |
+| ---- | ----------- | ---- |
+| 反向验证（修复前确实会失败） | 把系数临时置 0 后跑长闸门用例（等价于旧口径） | 5 项里 **4 项失败**（请求级、结果级、闸门未知路径、2.4s 端到端），只有「默认闸门不放大」的回归项照常通过 |
+| 结果级预算（真实墙钟 2.4s 闸门） | `sim_server --gate 120000000` + `DpmClient(timeout=0.5).wait_meas(timeout=2.0)` | 成功，`gate_cnt=120000001`，耗时 ≈2.4s（旧口径在此必然报超时） |
+| 请求级预算（对端在命令内部阻塞） | `LongGatePeer`（pty，闸门 0.6s / 基准 0.1s） | 成功，`stats.timeouts == 0`（旧口径在 0.1s 就超时） |
+| 闸门未知路径（`start --wait` 语义） | `LongGatePeer`，不先读状态 | 成功，等待过程中补读到 `gateTarget`，预算随之放大 |
+| 默认闸门不被拖慢 | `LongGatePeer`（2000 周期，0.2s 基线） | 仍在 ≈0.25s 报超时（而不是白等到几秒） |
+| C 固件内核互通（长闸门） | `ps/build/host_main --pty --gate 120000000` + `SET_GATE`→`wait_idle`→`START`→`wait_meas` | `gateCnt=120000002`、`timeouts=0`，但墙钟只花 12.1ms——该验证台虚拟时间与墙钟解耦，**证明不了**第 2 条根因 |
+| CLI 端到端（长闸门扫描） | `python -m dpm_host --port <pty> scan --gate 120000000 --freqs 25e6 --phases 90` | 1 行结果 `gate=120000002`、`err=+0.0000°`，耗时 2.54s |
+| GUI 冒烟（含长闸门步） | `QT_QPA_PLATFORM=offscreen uv run python host/tools/gui_smoke.py --scan` | PASS（长闸门步：`gateCnt=120000002`，无「等待测量结果超时」） |
+| 全量 Python | `uv run pytest -q` | **720 项通过**（新增 20 项：14 纯单元 + 5 pty + GUI 改写） |
+| 规格自检 | `uv run python spec/selftest_spec.py` | 1284 项检查，0 失败（协议文档新增段落未破坏文档↔头文件一致性检查） |
+
+### 13.5 未验证 / 未做的部分
+
+* **真实板子上的长闸门**没有实测：本轮没有 bitstream/固件改动，也没有重新烧写。真机上要确认的是
+  「`GET_RESULT` 在命令内部等满一个 2~5s 的闸门窗口后回结果」这条时序，以及 28 位闸门计数器在
+  `gateTarget` 接近 `0x0FFFFFFF` 时 `gateCnt = target + ceil(T_sig/T_slow)` 是否会溢出（本轮未查）；
+* **C 验证台的墙钟与虚拟时间解耦**：它按事务推进模型时间，长闸门只花十几毫秒墙钟，因此它只能证明
+  「长闸门下协议互通、结果正确」，不能证明「请求级超时会被闸门拖爆」——后者目前只有 pty 对端
+  （按协议语义建模）与 `sim_server`（真实墙钟）两条仿真证据；
+* **预算系数（2× 闸门 + 0.25s）是工程余量**，不是从硬件时延推导出来的：真机上若存在测量重启、
+  MMCM 重锁、串口大缓冲等额外延迟，仍需按实测调整；系数与余量都集中在
+  `client.py` 的两个常量里，便于改；
+* **`--timeout` 的语义变化**：它从「硬上限」变成「下限」。想让某次请求**更早**失败（例如探活）
+  得用 `gate_aware=False`，CLI/GUI 目前没有暴露这个开关（诊断路径内部使用）；
+* **流模式（`monitor --stream`）的等待**没有跟着改：`STREAM` 的上报周期仍是固定的
+  `intervalMs`，长闸门下会重复上报同一条旧结果（12.6 已记录的既有问题，本轮未动）；
+* **PS 侧的等待上限当时仍是旧口径**（本轮只改上位机）：`DPM_WAIT_TIMEOUT_MS(gate, slow)`
+  = `50 + 4 × 闸门时间`，其中「闸门时间」取的是**微秒数值当毫秒用**，所以 2.4s 闸门下
+  `GET_RESULT` 在命令内部最多可等 ≈9600s（2.7 小时）。**已在 §14 修复**：改成
+  `50ms + 4 × 闸门时间（秒）`。
+
+## 14. 2026-10-16 第五轮：PS 侧等待上限的量纲错误（长闸门下等 2.7 小时）
+
+这一轮补的是 §13 记下的 PS 侧问题（**没有上板证据**：改动是纯软件的时间上限换算），外加一次
+仓库内 Python 脚本的统一格式化。
+
+### 14.1 现象与根因（PS 侧，量纲）
+
+`ps/include/dpm_cmd.h` 的 `DPM_WAIT_TIMEOUT_MS` 写成「`50 + 4 × 闸门时间的微秒数值`」，
+把 µs 当 ms 用：
+
+```c
+/* 旧实现 */
+(50u + 4u * (uint32_t)(((uint64_t)(gate_target) * 1000u) / (((slow_hz) / 1000u) ? ((slow_hz) / 1000u) : 1u)))
+```
+
+- 默认闸门（2000 周期 = 40µs）算出 **210ms**，看起来完全正常——这就是它一直没被发现的原因；
+- 闸门一长就放大 1000 倍：2.4s 闸门 → **9600s（2.7 小时）**，28 位上界闸门（5.37s）→ **5.96 小时**。
+
+后果：`GET_RESULT` / `GET_MEAS`（`ensure_result`）与 `SET_SIG` / `CLEAR`（`wait_idle`）会在
+命令**内部**按这个上限等；「长闸门 + 源没有边沿」时固件长时间占着命令处理，上位机只能按自己的
+预算超时退出（§13 的修复），连诊断用的 `GET_STATUS` 都读不到。
+
+### 14.2 修复
+
+| 文件 | 改动 |
+| ---- | ---- |
+| `ps/include/dpm_cmd.h` | `DPM_WAIT_TIMEOUT_MS(gate_target, slow_hz)` = `50ms + 4 × (gate_target / slow_hz)` 秒，中间量用 u64（`4000 × gateTarget ≤ 1.07e12`），`slow_hz == 0` 时按 1 处理避免除零。默认闸门仍是 50ms 量级、上界闸门 ≈21.5s——与闸门同量级、有界 |
+| `ps/include/dpm_cmd.h` | `DPM_WAIT_POLL_LIMIT` **不改数值**，只补注释说明它是**慢时钟周期**意义上的界（每次轮询至少一次寄存器读 → `4 × gateTarget` 个慢周期 ≈ 4 个闸门窗口），与上面的**时间**界量纲不同；它只在 `io->now_ms == 0` 的集成里生效，且提前返回（回 `valid = 0`）是良性的：上位机会继续轮询，PL 里的测量照跑 |
+| `docs/ps-protocol.md` §3.0 | 「当前实现 `50 + 4 × 闸门时间` ms」→「`50ms + 4 × 闸门时间（秒）`，上界闸门 5.37s → 最多 ≈21.5s」 |
+| `ps/tests/test_proto.c` | 新增 `test_wait_budget()`：钉住 4 个闸门点的数值（默认 2000 周期 → 50ms、100ms 闸门 → 450ms、2.4s 闸门 → 9650ms、28 位上界 → 21524ms）、`slow_hz = 0` 不崩、兜底轮询上限随闸门线性增长（共 8 项检查，与机器速度无关） |
+| `ps/tests/test_server_selftest.py` | 新增 `test_long_gate_bounded_wait()`：28 位上界闸门 + 外部无信号时，`GET_RESULT` 必须在有界时间内回 `valid = 0`（阈值 3s，见 14.3 的实测），且之后服务端仍能正常处理命令 |
+
+### 14.3 验证（本轮实测）
+
+| 证据 | 命令 / 后端 | 结果 |
+| ---- | ----------- | ---- |
+| 反向验证（修复前确实会卡住） | 用旧宏在 `/tmp` 里重建 `host_main`（不动工作树），跑新的 selftest | **FAIL**：`GET_RESULT` 墙钟 **10.52s**（模型里跑完 2.15e9 次 AXI 事务 = 兜底轮询上限；真实硬件上 ms 上限是 5.96 小时） |
+| 修复后同一条用例 | `uv run python ps/tests/test_server_selftest.py --host-main ./ps/build/host_main` | PASS：墙钟 **0.083s**（同一位置虚拟时间 21.5s，模型按事务推进，比墙钟快 ≈258 倍），624/624 项通过 |
+| C 单测（精确数值） | `ctest -R test_proto` | `test_proto` 128 项检查 0 失败（含新增 8 项） |
+| 全部 C 单测 + pty 端到端 | `ctest --test-dir ps/build/cmake --output-on-failure` | **4/4 通过**（`test_server_selftest` 4.29s） |
+| 交叉编译（目标工具链，`-Wall -Wextra -Werror`） | `bash ps/build.sh` | 零警告、`nm -u` 为空、镜像 28880B |
+| 79 点扫描（C 服务端） | `uv run python spec/validate_sweep.py --server "./ps/build/host_main --device {device}"` | **79/79 PASS**，`crc_err=0`、`timeouts=0` |
+| 补充用例 | `uv run python spec/verify_extras.py --server …` | 15/15 通过 |
+| 离线上板演练 | `bash ps/tools/onboard_accept_sim.sh` | **93/93 通过**（退出码 0） |
+| 上位机互通脚本 | `uv run python host/tools/interop_host_main.py --spawn ./ps/build/host_main` | 退出码 0 |
+| 上位机全量 | `uv run pytest -q` | 720 项通过 |
+| 规格自检（文档 ↔ 头文件） | `uv run python spec/selftest_spec.py` | 1284 项检查，0 失败 |
+| GUI 冒烟 | `QT_QPA_PLATFORM=offscreen uv run python host/tools/gui_smoke.py --scan` | PASS（含长闸门步） |
+
+### 14.4 附带：仓库内 Python 脚本统一格式化
+
+`pyproject.toml` 里本来就有 `[tool.black] line-length = 140` 与 `[tool.isort] profile = "black"`，
+但仓库里从没跑过格式化：33 个脚本里 18 个不符合 black、5 个不符合 isort。本轮统一跑了一遍
+（只改排版，不改语义）：
+
+```console
+$ uv run isort host spec ps      # 修 5 个文件的导入顺序/格式（跳过后端产物 1 个）
+$ uv run black host spec ps      # 重排 18 个文件、15 个不变
+$ uv run black --check host spec ps   # 33 files would be left unchanged
+$ uv run isort --check-only host spec ps   # 干净（Skipped 1 file）
+```
+
+覆盖 `host/`（上位机 + 测试 + 工具）、`spec/`（金标准与验证脚本）、`ps/tests` 与 `ps/tools`
+（C 验证台的自测与上板脚本）。格式化后上面所有门禁都复跑通过（`pytest` 720、`ctest` 4/4、
+`selftest_spec` 1284、79 点扫描、`onboard_accept_sim.sh` 93/93、GUI 冒烟 PASS）。
+C 源码（`ps/**/*.c|h`）本轮只动了 §14.2 的两处宏/注释与测试，**没有**整体套用 clang-format：
+`ps/` 的 C 风格与仓库根的 `.clang-format` 并不完全一致，整体重排会淹没本次的功能改动。
+
+### 14.5 未验证 / 未做的部分
+
+* **上板**：`DPM_WAIT_TIMEOUT_MS` 只在宿主机验证台（同一份 `dpm_cmd.c`）与交叉编译上验证，
+  真实 Zynq 上「长闸门 + 无信号」时固件的解卡时延没有实测（依赖 `dpm_regs_io.c` 的
+  Cortex-A9 全局定时器 `now_ms`，代码路径相同）；
+* **兜底轮询上限的数值**仍是 `4 × gateTarget + 200000`：它只在 `io->now_ms == 0` 的集成里生效，
+  本轮只补了注释说明量纲，没有按真实 AXI 读延迟重新标定；
+* **`wait_idle` 路径**（`SET_SIG` / `CLEAR`）用的是同一个宏，本轮只有 `GET_RESULT` 的端到端用例；
+  `SET_SIG` 在长闸门 + busy 下的解卡时延没有单独用例；
+* **clang-format**：如 §14.4 所述，`ps/` 的 C 代码没有整体格式化。

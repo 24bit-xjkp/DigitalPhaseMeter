@@ -267,6 +267,7 @@ def main() -> int:
                 f"rows={window.table.rowCount()}",
             ),
         )
+
         if args.scan:
             smoke.add(
                 "扫描",
@@ -296,6 +297,38 @@ def main() -> int:
                     smoke.check("CSV 可以导出（直接调用同一函数）", (outdir / "scan.csv").exists(), str(outdir / "scan.csv")),
                 ),
             )
+        # 长闸门（2.4s @50MHz）：等结果预算必须跟着放大（2×2.4+0.25 ≈ 5.05s），
+        # 否则旧的固定 2.0s 预算会把一次**正常**测量报成「等待测量结果超时」。
+        # 放在扫描之后：闸门被改成 2.4s 后每个扫描点也要跑满一个窗口，那会拖长扫描步骤。
+        long_gate: dict[str, int] = {}
+
+        def start_long_gate_measure() -> None:
+            long_gate["mark"] = len(window.log_view.toPlainText())
+            window.after_single()
+
+        def check_long_gate_measure() -> None:
+            tail = window.log_view.toPlainText()[long_gate.get("mark", 0) :]
+            lines = [line for line in tail.strip().splitlines() if line.strip()]
+            smoke.check(
+                "长闸门 2.4s：等待预算自动放大，测量正常完成（不误报超时）",
+                "单次测量完成" in tail and "等待测量结果超时" not in tail,
+                "；".join(lines[-2:]) if lines else "（日志为空）",
+            )
+
+        smoke.add(
+            "闸门设置（长闸门：2.4s）",
+            0.8,
+            lambda: (
+                window.gate_spin.setValue(2.4),
+                window.after_set_gate(),
+            ),
+        )
+        smoke.add("单次测量（2.4s 闸门）", 1.0, start_long_gate_measure)
+        smoke.add(
+            "检查长闸门测量",
+            4.5,  # 闸门窗口 2.4s + 余量：旧的 2.0s 预算会在这之前报超时
+            check_long_gate_measure,
+        )
         smoke.add("截图", 0.5, lambda: snapshot("gui"))
         smoke.add("截图（扫描后）", 0.3, lambda: snapshot("gui_final"))
 

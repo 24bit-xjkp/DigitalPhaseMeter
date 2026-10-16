@@ -33,10 +33,20 @@ import time
 
 SOF = 0xA5
 CMD = {
-    "PING": 0x01, "IDENTIFY": 0x02, "GET_STATUS": 0x03, "START": 0x04,
-    "GET_RESULT": 0x05, "GET_MEAS": 0x06, "SET_GATE": 0x07, "SET_MODE": 0x08,
-    "SET_SOURCE": 0x09, "SET_SIG": 0x0A, "GET_SIG": 0x0B, "CLEAR": 0x0C,
-    "STREAM": 0x0D, "RESET_COUNTERS": 0x0E,
+    "PING": 0x01,
+    "IDENTIFY": 0x02,
+    "GET_STATUS": 0x03,
+    "START": 0x04,
+    "GET_RESULT": 0x05,
+    "GET_MEAS": 0x06,
+    "SET_GATE": 0x07,
+    "SET_MODE": 0x08,
+    "SET_SOURCE": 0x09,
+    "SET_SIG": 0x0A,
+    "GET_SIG": 0x0B,
+    "CLEAR": 0x0C,
+    "STREAM": 0x0D,
+    "RESET_COUNTERS": 0x0E,
 }
 ERR_PARAM, ERR_BUSY = 0xFE, 0xFF
 
@@ -144,7 +154,7 @@ def _fixed(gate: int, edge: int, phase: int) -> tuple[int, int]:
     """按 docs/ps-protocol.md 第 5 节算 (freq_hz, phase_milli_deg)，整除截断。"""
     if not gate or not edge:
         return 0, 0
-    freq = (edge * F_SLOW) // gate                        # 单位：Hz
+    freq = (edge * F_SLOW) // gate  # 单位：Hz
     c, d = divmod(phase, gate)
     v = 360_000 * c + (360_000 * d) // gate
     return freq, (v * (F_SLOW // 1000)) // (F_DSP // 1000)
@@ -153,8 +163,9 @@ def _fixed(gate: int, edge: int, phase: int) -> tuple[int, int]:
 class SimBackend:
     """寄存器级 + 测量级 PL 模型（默认内部源 25MHz / 90°）。"""
 
-    def __init__(self, freq_hz: int = 25_000_000, phase_mdeg: int = 90_000,
-                 gate: int = 2000, locked: bool = True, phase_controllable: bool = True):
+    def __init__(
+        self, freq_hz: int = 25_000_000, phase_mdeg: int = 90_000, gate: int = 2000, locked: bool = True, phase_controllable: bool = True
+    ):
         self.f_slow, self.f_dsp = F_SLOW, F_DSP
         self.gate_target = gate
         self.mode = 0
@@ -174,7 +185,7 @@ class SimBackend:
         self.clear_req = 0
         self.freq_hz = freq_hz
         self.phase_mdeg = phase_mdeg
-        self.finish_at: float | None = None   # 测量完成的绝对时间
+        self.finish_at: float | None = None  # 测量完成的绝对时间
         self.pending_result: tuple[int, int, int] | None = None
         self.solve_sig(freq_hz, phase_mdeg)
 
@@ -245,7 +256,7 @@ class SimBackend:
         if self.busy:
             return
         if self.src_select and not (self.sig_enable and self.locked):
-            return                      # 源恒低：测量挂在「等参考沿」，永不完成
+            return  # 源恒低：测量挂在「等参考沿」，永不完成
         if not self.src_select:
             # 外部引脚输入：没有信号源，PL 会一直等参考沿（busy 永远为 1）。
             # 这个状态正是「docs/verify-plan.md 用例 5」要验证的容错路径。
@@ -265,7 +276,7 @@ class SimBackend:
     # ---- 总线访问 ----
     def write(self, off: int, value: int) -> None:
         idx = (off >> 2) & 0xF
-        if idx == 0:                     # CTRL
+        if idx == 0:  # CTRL
             self.ctrl_irq_enable = (value >> 1) & 1
             if value & 1:
                 self.start()
@@ -273,14 +284,14 @@ class SimBackend:
                 self.clear_req = 1
         elif idx == 2:
             self.gate_target = value & 0x0FFFFFFF
-        elif idx == 8:                   # IRQ_STATUS，W1C
+        elif idx == 8:  # IRQ_STATUS，W1C
             if value & 1:
                 self.irq_pending = 0
             if value & 2:
                 self.result_valid = 0
             if value & 4:
                 self.lost_count = 0
-        elif idx == 11:                  # SIG_CTRL
+        elif idx == 11:  # SIG_CTRL
             self.sig_enable = value & 1
             self.src_select = (value >> 1) & 1
             self.config_pending = 1
@@ -305,8 +316,7 @@ class SimBackend:
         sig_ready = 1 if (not self.src_select or (self.sig_enable and self.locked)) else 0
         table = {
             0: ctrl_rd,
-            1: self.busy | (self.result_valid << 1) | ((1 if self.lost_count else 0) << 2)
-               | (self.irq_pending << 3),
+            1: self.busy | (self.result_valid << 1) | ((1 if self.lost_count else 0) << 2) | (self.irq_pending << 3),
             2: self.gate_target,
             3: self.res_gate,
             4: self.res_edge,
@@ -317,8 +327,7 @@ class SimBackend:
             9: 0x44504D02,
             10: 4 | (1 << 8) | (1 << 16) | (1 << 17),
             11: self.sig_enable | (self.src_select << 1),
-            12: self.sig_enable | (self.src_select << 1) | ((1 if self.locked else 0) << 2)
-                | (sig_ready << 3),
+            12: self.sig_enable | (self.src_select << 1) | ((1 if self.locked else 0) << 2) | (sig_ready << 3),
         }
         return table.get(idx, 0)
 
@@ -341,25 +350,21 @@ class Session:
         if cmd == CMD["IDENTIFY"]:
             # ver(u32) gitRev(u32) caps(u32) versionReg(u32) capsReg(u32)
             # dspClkHz(u32) slowClkHz(u32) flags(u16) —— 共 30 字节
-            return encode(resp, struct.pack("<IIIIIIIH", 0x00010000, 0, 0, b.read(0x24),
-                                            b.read(0x28), b.f_dsp, b.f_slow, 0x0F))
+            return encode(resp, struct.pack("<IIIIIIIH", 0x00010000, 0, 0, b.read(0x24), b.read(0x28), b.f_dsp, b.f_slow, 0x0F))
         if cmd == CMD["GET_STATUS"]:
-            return encode(resp, struct.pack("<IIIII", b.read(0x04), b.read(0x30),
-                                            b.gate_target, b.lost_count, b.seq))
+            return encode(resp, struct.pack("<IIIII", b.read(0x04), b.read(0x30), b.gate_target, b.lost_count, b.seq))
         if cmd == CMD["START"]:
             b.write(0x00, (b.ctrl_irq_enable << 1) | 1)
             return encode(resp)
         if cmd == CMD["GET_RESULT"]:
-            payload = struct.pack("<BIIII", b.result_valid, b.res_seq, b.res_gate,
-                                  b.res_edge, b.res_phase)
+            payload = struct.pack("<BIIII", b.result_valid, b.res_seq, b.res_gate, b.res_edge, b.res_phase)
             if b.result_valid:
-                b.result_valid = 0    # 读走结果
+                b.result_valid = 0  # 读走结果
             return encode(resp, payload)
         if cmd == CMD["GET_MEAS"]:
             freq, ph = self.fixed(b.res_gate, b.res_edge, b.res_phase)
-            payload = struct.pack("<IIIIII", b.res_seq, b.res_gate, b.res_edge,
-                                  b.res_phase, freq, ph)
-            b.result_valid = 0        # 结果已被读走（等价于写 IRQ_STATUS 的 b1）
+            payload = struct.pack("<IIIIII", b.res_seq, b.res_gate, b.res_edge, b.res_phase, freq, ph)
+            b.result_valid = 0  # 结果已被读走（等价于写 IRQ_STATUS 的 b1）
             return encode(resp, payload)
         if cmd == CMD["SET_GATE"]:
             if len(payload) != 4:
@@ -375,11 +380,11 @@ class Session:
             if len(payload) != 1 or payload[0] > 1:
                 return encode(ERR_PARAM)
             if payload[0] == 1 and not b.locked:
-                return encode(ERR_BUSY)          # 未锁定就选片内源
+                return encode(ERR_BUSY)  # 未锁定就选片内源
             if payload[0] == 1:
-                b.write(0x2C, 1 | (1 << 1))      # enable | srcSelect
+                b.write(0x2C, 1 | (1 << 1))  # enable | srcSelect
             else:
-                b.write(0x2C, 0)                 # 切回外部输入
+                b.write(0x2C, 0)  # 切回外部输入
             return encode(resp, struct.pack("<I", b.read(0x30)))
         if cmd == CMD["SET_SIG"]:
             if len(payload) != 8:
@@ -395,11 +400,9 @@ class Session:
             # 的字段截断、相位回绕，必须显式拒绝而不是静默改相位。
             if not phase_code_fits(phase, b.div):
                 return encode(ERR_PARAM)
-            return encode(resp, struct.pack("<IIIHB", b.freq_hz, b.phase_mdeg, b.vco_hz,
-                                            b.div, b.phase_field))
+            return encode(resp, struct.pack("<IIIHB", b.freq_hz, b.phase_mdeg, b.vco_hz, b.div, b.phase_field))
         if cmd == CMD["GET_SIG"]:
-            return encode(resp, struct.pack("<IIIHB", b.freq_hz, b.phase_mdeg, b.vco_hz,
-                                            b.div, b.phase_field))
+            return encode(resp, struct.pack("<IIIHB", b.freq_hz, b.phase_mdeg, b.vco_hz, b.div, b.phase_field))
         if cmd == CMD["CLEAR"]:
             b.write(0x00, (b.ctrl_irq_enable << 1) | 4)
             return encode(resp)
@@ -438,8 +441,8 @@ class Session:
                 continue
             if len(self.rx) < 2 + length + 2:
                 break
-            frame = bytes(self.rx[:2 + length + 2])
-            del self.rx[:2 + length + 2]
+            frame = bytes(self.rx[: 2 + length + 2])
+            del self.rx[: 2 + length + 2]
             if crc16(frame[1:-2]) != struct.unpack("<H", frame[-2:])[0]:
                 continue
             cmd, payload = frame[2], frame[3:-2]
@@ -447,8 +450,7 @@ class Session:
                 r = self.handle(cmd, payload)
             except (ValueError, struct.error) as exc:
                 # 内部错误不能让服务端崩掉：回 ERR 并把原因写到 stderr
-                print(f"# 命令 0x{cmd:02X} 处理失败：{type(exc).__name__}: {exc}",
-                      file=sys.stderr, flush=True)
+                print(f"# 命令 0x{cmd:02X} 处理失败：{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
                 r = encode(ERR_PARAM)
             if r:
                 out.extend(r)
@@ -464,13 +466,13 @@ def main() -> int:
     ap.add_argument("--phase-mdeg", type=float, default=90e3)
     ap.add_argument("--gate", type=int, default=2000)
     ap.add_argument("--lock-lost", action="store_true", help="模拟 MMCM 失锁")
-    ap.add_argument("--phase-static", action="store_true",
-                    help="复现旧 clk_wiz_src bitstream：相位不可控，固定为 BD 初值 90°")
+    ap.add_argument("--phase-static", action="store_true", help="复现旧 clk_wiz_src bitstream：相位不可控，固定为 BD 初值 90°")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
-    backend = SimBackend(int(args.freq_hz), int(args.phase_mdeg), args.gate,
-                         locked=not args.lock_lost, phase_controllable=not args.phase_static)
+    backend = SimBackend(
+        int(args.freq_hz), int(args.phase_mdeg), args.gate, locked=not args.lock_lost, phase_controllable=not args.phase_static
+    )
     session = Session(backend)
 
     if args.pty:
@@ -487,9 +489,12 @@ def main() -> int:
         return 2
 
     if not args.quiet:
-        print(f"# spec 仿真服务端：f={backend.freq_hz/1e6:.4f}MHz φ={backend.phase_mdeg/1000:.1f}° "
-              f"VCO={backend.vco_hz/1e6:.0f}MHz D={backend.div} gate={backend.gate_target}",
-              file=sys.stderr, flush=True)
+        print(
+            f"# spec 仿真服务端：f={backend.freq_hz/1e6:.4f}MHz φ={backend.phase_mdeg/1000:.1f}° "
+            f"VCO={backend.vco_hz/1e6:.0f}MHz D={backend.div} gate={backend.gate_target}",
+            file=sys.stderr,
+            flush=True,
+        )
     try:
         while True:
             backend.tick()
