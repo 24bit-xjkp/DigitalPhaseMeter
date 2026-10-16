@@ -616,8 +616,10 @@ def test_external_source(host_main: str, golden: dict) -> None:
     """外部源两条路径（与真实 PL 一致）。
 
     1. 默认（外部引脚没接信号）：`START` 后测量停在「等参考沿」，
-       `STATUS.busy` 恒为 1、不产生结果、`RESULT_SEQ` 不自增，
-       `GET_MEAS`/`GET_RESULT` 等不到结果 → 回 `ERR_BUSY`；
+       `STATUS.busy` 恒为 1、不产生结果、`RESULT_SEQ` 不自增；
+       `GET_MEAS` 没有 `valid` 字段 → 回 `ERR_BUSY`；
+       `GET_RESULT` 有 `valid` 字段（协议 §3.0 的权威探针）→ 回 **`valid = 0` 而不是 ERR_BUSY**
+       （回 0xFF 会让按协议写的上位机把它当致命错误中止整段测量，实测踩到过）；
     2. `--ext-present`（模拟接了 10MHz/0°）：与 golden 的 10MHz/0° 行逐位一致。
     """
     # ---- 1) 无信号：不得给出看似正常的读数 ----
@@ -637,6 +639,12 @@ def test_external_source(host_main: str, golden: dict) -> None:
         f = sv.request(CMD_GET_MEAS, timeout=10.0)
         check("外部无信号：GET_MEAS 超时回 ERR_BUSY", f is not None and f[0] == ERR_BUSY,
               "None" if f is None else hex(f[0]))
+        # GET_RESULT 必须用 valid 表达「还没有结果」（协议 §3.0）：这是上位机的权威探针，
+        # 回 ERR_BUSY 会让它把正常输入状态当致命错误——切到没接信号的外部源后必现。
+        pl = sv.expect_ok(CMD_GET_RESULT, timeout=10.0)
+        check("外部无信号：GET_RESULT 回 valid=0（不是 ERR_BUSY）",
+              len(pl) == 17 and pl[0] == 0 and rd_u32(pl, 1) == 0 and rd_u32(pl, 9) == 0,
+              pl.hex())
     finally:
         rc = sv.close()
         check("无信号实例按 SIGTERM 干净退出（码 0）", rc == 0, f"rc={rc}")

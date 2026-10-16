@@ -40,10 +40,15 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 
 def start_sim_server(link: Path) -> subprocess.Popen[bytes]:
-    """起一个 pty 仿真服务端（与 `python -m dpm_host.sim_server --pty` 相同）。"""
+    """起一个 pty 仿真服务端（与 `python -m dpm_host.sim_server --pty` 相同）。
+
+    带上 `--ext-disable`（外部输入无信号）：后面「切到外部输入源再测量」那一步要复现
+    「源没有边沿 → 测量永不完成」的正常输入状态，界面上必须报超时 + 输入源诊断，
+    而不是报设备错误（真机上曾报 `ERR_BUSY` / `GET_RESULT`）。
+    """
     link.unlink(missing_ok=True)
     proc = subprocess.Popen(
-        [sys.executable, "-m", "dpm_host.sim_server", "--pty", "--pty-link", str(link), "--freq", "25e6", "--phase", "90"],
+        [sys.executable, "-m", "dpm_host.sim_server", "--pty", "--pty-link", str(link), "--freq", "25e6", "--phase", "90", "--ext-disable"],
         cwd=str(HOST_DIR),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -219,6 +224,22 @@ def main() -> int:
             ),
         )
         smoke.add("切输入源", 0.8, lambda: (window.radio_ext.setChecked(True), window.after_set_source()))
+        # 外部输入无信号（服务端 `--ext-disable`）：PL 停在 busy、结果永不锁存。
+        # 这里复现用户报的那条链路：切到外部源 → 测量 → 必须给出「超时 + 输入源诊断」，
+        # 不能是「设备错误：PS 返回错误响应 0xFF（ERR_BUSY），请求 0x05（GET_RESULT）」。
+        smoke.add("外部无信号时单次测量", 1.0, window.after_single)
+        smoke.add(
+            "检查外部源超时诊断",
+            3.0,
+            lambda: smoke.check(
+                "外部无信号：报超时并指出外部引脚，不是 ERR_BUSY 设备错误",
+                "单次测量失败" in window.log_view.toPlainText()
+                and "等待测量结果超时" in window.log_view.toPlainText()
+                and "外部引脚" in window.log_view.toPlainText()
+                and "ERR_BUSY" not in window.log_view.toPlainText(),
+                window.log_view.toPlainText().strip().splitlines()[-1] if window.log_view.toPlainText().strip() else "（日志为空）",
+            ),
+        )
         smoke.add("切回片内源", 0.8, lambda: (window.radio_int.setChecked(True), window.after_set_source()))
         smoke.add(
             "闸门设置（按秒：40µs）",

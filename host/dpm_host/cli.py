@@ -221,8 +221,15 @@ def cmd_status(args: argparse.Namespace, client: DpmClient) -> int:
         return EXIT_OK
     print(fmt_status(st))
     if st.result_valid:
-        meas = client.get_meas()
-        print("最新结果：" + fmt_meas(meas, client))
+        # `STATUS.resultValid = 1` 只说明结果槽里有一个**未读走**的结果；对端可能拒绝把它
+        # 当成本次的结果交出来（`START` 之后本次结果还没产出时的旧结果保护，见
+        # `docs/ps-protocol.md` §3.0），此时 `GET_MEAS` 回 `ERR_BUSY`——那是「暂无可用结果」
+        # 而不是设备错误，`status` 是只读查询，不该因此中止。
+        meas = client.try_get_meas()
+        if meas is None:
+            print("最新结果：暂时读不到（结果槽里是上一次未读的结果，或本次测量尚未结束；用 meas 等一次新结果）")
+        else:
+            print("最新结果：" + fmt_meas(meas, client))
     return EXIT_OK
 
 
@@ -250,13 +257,19 @@ def cmd_start(args: argparse.Namespace, client: DpmClient) -> int:
 
 def cmd_meas(args: argparse.Namespace, client: DpmClient) -> int:
     st = client.get_status()
+    meas: Meas | None = None
     if st.result_valid:
-        meas = client.get_meas()
-    elif args.no_start:
-        print("没有有效结果（用 start 或 meas 触发一次测量）", file=sys.stderr)
-        return EXIT_ERROR
-    else:
-        if st.busy:
+        # 结果槽里有未读结果：通常一次 `GET_MEAS` 就能读走。例外是 `START` 之后本次结果
+        # 还没产出——对端按「不把上一次的结果当成本次结果」拒绝（协议 §3.0 的旧结果保护），
+        # 回 `ERR_BUSY`。那是「暂无可用结果」，不能当设备错误，退回「等一次新结果」的路径。
+        meas = client.try_get_meas()
+    if meas is None:
+        if args.no_start:
+            print("没有可用的新结果（--no-start：不主动启动测量）", file=sys.stderr)
+            return EXIT_ERROR
+        if st.result_valid:
+            print("结果槽里还有上一次未读的结果，本次测量尚未产出新结果，等一次新结果……")
+        elif st.busy:
             print("测量进行中，等待结果……")
         else:
             print("无有效结果，启动一次测量……")

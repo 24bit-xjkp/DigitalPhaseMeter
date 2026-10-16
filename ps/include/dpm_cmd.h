@@ -220,7 +220,12 @@ int dpm_cmd_fetch(dpm_cmd_ctx_t *c);
 
 /** 等待并取回一次结果（同时更新丢失统计）。
  *
- * @return 0 = 成功（`c->last` 有效），1 = 超时，2 = 源不可用。1/2 对应 ERR_BUSY。
+ * @return 0 = 成功（`c->last` 有效），1 = 超时（含「测量已结束但没有新结果」），2 = 源不可用。
+ *
+ * 返回非 0 表示「这次没等到结果」，**由调用方按命令的字段能力表达**：
+ *   - `GET_RESULT` 有 `valid` 字段（协议 §3.0 规定它是结果就绪的权威探针）→ 回 `valid = 0`，
+ *     **不回 ERR_BUSY**（「源没有边沿」是正常输入状态，不是「命令不被允许」）；
+ *   - `GET_MEAS` 没有 `valid` 字段，只能用 `ERR_BUSY` 表达「暂无结果」，上位机按继续轮询处理。
  */
 int dpm_cmd_wait_result(dpm_cmd_ctx_t *c, uint32_t timeout_ms, uint32_t poll_limit);
 

@@ -507,6 +507,59 @@ class DpmClient:
                 raise DpmTimeoutError(None, timeout, "等待 STATUS.busy=0 超时")
             time.sleep(poll_interval)
 
+    def _no_result_detail(self, st: Status | None) -> str:
+        """等不到结果时的诊断文本（给 :class:`DpmTimeoutError` 的 detail）。
+
+        「等不到结果」是**正常的输入状态**（协议 §3.0：源没有边沿时测量永不完成），
+        不是致命错误：切到没接信号的外部输入源时必现。因此消息要说清现在选的是哪个源、
+        为什么等不到、以及怎么恢复——否则调用方只会看到一句无信息量的「超时」。
+        """
+        parts = ["等待测量结果超时（源没有边沿时测量永不完成）"]
+        if st is not None:
+            source = "片内信号源" if st.sig_select else "外部引脚 sig1/sig2"
+            parts.append(
+                f"当前输入源 = {source}，status=0x{st.status:08X}"
+                f"（busy={int(st.busy)} resultValid={int(st.result_valid)}）"
+                f"、sigStatus=0x{st.sig_status:08X}（sourceReady={int(st.source_ready)}）"
+            )
+            if not st.source_ready:
+                parts.append("片内源未使能或 MMCM 未锁定：先 SET_SOURCE(1) 等 sourceReady=1，或改用外部输入")
+            elif not st.sig_select:
+                parts.append(
+                    "外部引脚没有边沿：确认 sig1/sig2 已接两路同频信号、与开发板共地，"
+                    "电平满足引脚 IO 标准（默认 LVCMOS33），且频率落在闸门窗口内"
+                )
+            if st.busy and st.result_valid:
+                parts.append(
+                    "结果槽里还留着上一次未读的结果（resultValid=1），本次测量还没产出新结果——"
+                    "对端按「不把旧结果当新结果」处理，所以这里继续等的是本次的结果"
+                )
+        parts.append("挂起的这次测量会一直等边沿：接好信号或切回片内信号源后它才会结束")
+        return "；".join(parts)
+
+    def _status_or_none(self) -> Status | None:
+        """诊断用：尽量读一次 `GET_STATUS`，读不到就返回 ``None``（不掩盖原来的错误）。"""
+        try:
+            return self.get_status(timeout=min(float(self.timeout), 0.2), retries=0)
+        except Exception as exc:  # pragma: no cover - 诊断路径，失败不影响原错误
+            self._log(f"诊断用 GET_STATUS 失败：{exc!r}")
+            return None
+
+    def _poll_result(self) -> Result | None:
+        """`GET_RESULT` 的**容错**探针：没有结果时返回 ``None``，不抛异常。
+
+        `ERR_BUSY`（0xFF）在这里表示「还没有结果」而不是「命令被拒」：协议 §3.0 规定
+        结果就绪的权威探针就是 `GET_RESULT.valid`，因此固件可能用两种等价方式表达
+        「暂无结果」——`valid=0`（参照实现与协议定稿），或等不到结果时回 `ERR_BUSY`
+        （早期 C 侧固件的行为，见 `docs/ps-protocol.md` §3.0）。两种都要当「继续轮询」，
+        不能当致命错误：切到没有信号的外部输入源时必现，把它当错误会让测量程序直接中止。
+        """
+        frame = self.request(Cmd.GET_RESULT, accept_busy=True)  # type: ignore[arg-type]
+        if frame.is_error:
+            return None
+        result = P.decode_result(frame.payload)
+        return result if result.valid else None
+
     def wait_result(self, timeout: float = 2.0, poll_interval: float = 0.002) -> Result:
         """等一次结果，返回 `GET_RESULT` 的原始观测量。
 
@@ -514,14 +567,15 @@ class DpmClient:
         的同时也就把结果读走了。不能拿 `GET_RESULT` 之外的 `GET_STATUS.resultValid`
         当唯一依据——PS 侧实现可能是「事件驱动」的（例如每次 AXI 事务才推进一次模型时间），
         状态位与结果锁存之间存在时序差；本方法对两种实现都成立。
+        超时抛 :class:`DpmTimeoutError`（带输入源诊断），**不**把「暂无结果」当设备错误。
         """
         deadline = time.monotonic() + timeout
         while True:
-            result = self.get_result()
-            if result.valid:
+            result = self._poll_result()
+            if result is not None:
                 return result
             if time.monotonic() >= deadline:
-                raise DpmTimeoutError(None, timeout, "等待测量结果超时（源没有边沿时测量永不完成）")
+                raise DpmTimeoutError(None, timeout, self._no_result_detail(self._status_or_none()))
             time.sleep(poll_interval)
 
     def wait_meas(self, timeout: float = 2.0, poll_interval: float = 0.002) -> Meas:
@@ -530,6 +584,10 @@ class DpmClient:
         路径：`GET_STATUS.resultValid` 置位时用 `GET_MEAS`（顺便验证 GET_MEAS 通路）；
         否则退回 `GET_RESULT.valid` 探针，并**用计数本地换算**成 `Meas`
         （对「结果锁存与状态位有时序差」的 PS 实现也成立）。
+
+        两条路径上的 `ERR_BUSY` 都只表示「**还没有结果**」（`GET_MEAS` 没有 `valid`
+        字段，只能用错误码表达同一件事），一律继续轮询到 `timeout` 再抛
+        :class:`DpmTimeoutError`——「源没有边沿」是正常的输入状态，不是设备错误。
         """
         deadline = time.monotonic() + timeout
         status_miss_logged = False
@@ -541,8 +599,8 @@ class DpmClient:
                 except DpmError as exc:
                     if exc.code != int(Cmd.ERR_BUSY):
                         raise
-            result = self.get_result()
-            if result.valid:
+            result = self._poll_result()
+            if result is not None:
                 if not status_miss_logged and not st.result_valid:
                     self._log(
                         "对端在 GET_RESULT.valid=1 时仍未置 STATUS.resultValid（协议第 3 节 STATUS b1）；"
@@ -559,7 +617,7 @@ class DpmClient:
                     phase_milli_deg=calc.phase_milli_deg,
                 )
             if time.monotonic() >= deadline:
-                raise DpmTimeoutError(None, timeout, "等待测量结果超时（源没有边沿时测量永不完成）")
+                raise DpmTimeoutError(None, timeout, self._no_result_detail(self._status_or_none()))
             time.sleep(poll_interval)
 
     def wait_source_ready(self, timeout: float = 2.0, poll_interval: float = 0.002) -> Status:

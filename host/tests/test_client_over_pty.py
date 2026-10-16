@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import pty
 import select
@@ -20,6 +21,7 @@ import threading
 import time
 
 import pytest
+from dpm_host import cli
 from dpm_host import mathx as M
 from dpm_host import protocol as P
 from dpm_host import sig as S
@@ -512,3 +514,152 @@ def test_notification_codes_are_not_confused_with_responses(peer_client) -> None
     assert client.ping()
     assert client.stats.unexpected >= 1
     assert client.stats.notifications == 0
+
+
+# ------------------------------------------- 「源没有边沿」：ERR_BUSY 只表示「暂无结果」
+
+
+class BusyResultPeer:
+    """复现「切到没接信号的外部输入源」时 C 侧固件的响应：
+
+    PL 停在 `busy = 1`、结果永不锁存 → `GET_RESULT` / `GET_MEAS` 等不到结果，回 `ERR_BUSY`
+    （0xFF）。`GET_RESULT` 有 `valid` 字段，按协议 §3.0 本应回 `valid = 0`；这个对端刻意
+    保留旧的 0xFF 行为，用来验证**上位机两种表达都当「还没有结果」继续轮询**，
+    而不是把它当设备错误中止整段测量程序。
+
+    回归背景：真机上曾报
+    「设备错误：PS 返回错误响应 0xFF（ERR_BUSY），请求 0x05（GET_RESULT）」。
+    """
+
+    def __init__(self) -> None:
+        self.master, slave = pty.openpty()
+        self.port = os.ttyname(slave)
+        self.counts: dict[int, int] = {}
+        #: `GET_STATUS` 的 STATUS 字（测试可改成「有未读结果」等组合）
+        self.status_word = self.STATUS_BUSY
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._peer_loop, daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2.0)
+        os.close(self.master)
+
+    #: `GET_STATUS`：busy=1（测量停在等边沿）、sigStatus=sourceReady（外部引脚恒 ready）
+    STATUS_BUSY = 0x1
+    STATUS_RESULT_VALID = 0x2
+    SIGST_READY = 0x8
+
+    def _peer_loop(self) -> None:
+        parser = P.FrameParser()
+        while not self._stop.is_set():
+            try:
+                ready, _, _ = select.select([self.master], [], [], 0.02)
+            except OSError:  # pragma: no cover - pty 关闭
+                return
+            if not ready:
+                continue
+            try:
+                chunk = os.read(self.master, 256)
+            except OSError:  # pragma: no cover
+                return
+            if not chunk:
+                continue
+            for ev in parser.feed(chunk):
+                if not isinstance(ev, P.Frame):
+                    continue
+                cmd = int(ev.cmd)
+                self.counts[cmd] = self.counts.get(cmd, 0) + 1
+                if cmd == P.Cmd.PING:
+                    reply = P.encode_frame(P.Cmd.PING.response)
+                elif cmd == P.Cmd.GET_STATUS:
+                    reply = P.encode_frame(
+                        P.Cmd.GET_STATUS.response,
+                        P.encode_status(P.Status(self.status_word, self.SIGST_READY, 2000, 0, 0)),
+                    )
+                elif cmd in (P.Cmd.GET_RESULT, P.Cmd.GET_MEAS):
+                    reply = P.encode_frame(P.Cmd.ERR_BUSY)
+                elif cmd == P.Cmd.SET_MODE:
+                    reply = P.encode_frame(P.Cmd.SET_MODE.response, bytes([0]))
+                else:
+                    reply = P.encode_frame(cmd | 0x80)
+                os.write(self.master, reply)
+
+
+@pytest.fixture
+def busy_peer_client():
+    """（ERR_BUSY 对端, 客户端）：客户端 timeout=1.0、不打印日志。"""
+    peer = BusyResultPeer()
+    cli = DpmClient(port=peer.port, timeout=1.0, log=lambda _m: None)
+    try:
+        yield peer, cli
+    finally:
+        cli.close()
+        peer.close()
+
+
+def test_get_result_err_busy_is_polled_by_wait_result(busy_peer_client) -> None:
+    """`wait_result`：`GET_RESULT` 回 ERR_BUSY 时继续轮询，最终报**超时**而不是设备错误。"""
+    peer, client = busy_peer_client
+    with pytest.raises(P.DpmTimeoutError) as excinfo:
+        client.wait_result(timeout=0.3, poll_interval=0.02)
+    # 必须是「超时」而不是 0xFF 设备错误（DpmTimeoutError.code == 0）
+    assert excinfo.value.code == 0
+    # 轮询了不止一次 GET_RESULT（0x05），说明 ERR_BUSY 被当「暂无结果」
+    assert peer.counts.get(int(P.Cmd.GET_RESULT), 0) >= 2
+    # 诊断要点名当前的输入源，用户才知道该去查外部引脚
+    assert "外部引脚" in str(excinfo.value)
+
+
+def test_get_result_err_busy_is_polled_by_wait_meas(busy_peer_client) -> None:
+    """`wait_meas`：同一条 ERR_BUSY 在 GET_MEAS 与 GET_RESULT 两条路径上都不致命。"""
+    peer, client = busy_peer_client
+    assert client.start()  # START 成功，随后测量永不完成
+    with pytest.raises(P.DpmTimeoutError) as excinfo:
+        client.wait_meas(timeout=0.3, poll_interval=0.02)
+    assert excinfo.value.code == 0
+    assert peer.counts.get(int(P.Cmd.GET_RESULT), 0) >= 2
+    assert "等待测量结果超时" in str(excinfo.value)
+
+
+def test_no_result_diagnostic_reports_internal_source() -> None:
+    """内部源诊断：`sigSelect=1` 且 `sourceReady=0` 时要点名「未使能/未锁定」。"""
+    client = DpmClient(log=lambda _m: None)
+    details = client._no_result_detail(P.Status(0x1, 0x0, 2000, 0, 0))
+    assert "片内源未使能或 MMCM 未锁定" in details
+    assert "片内信号源" in details
+    # sourceReady=1 的内部源（enable|srcSelect|srcLocked|sourceReady = 0xF）：不该给误导
+    details = client._no_result_detail(P.Status(0x1, 0xF, 2000, 0, 0))
+    assert "片内源未使能或 MMCM 未锁定" not in details
+    # 读不到 STATUS 时仍要给出兜底说明，不能抛异常
+    assert "等待测量结果超时" in client._no_result_detail(None)
+
+
+def test_cli_status_and_meas_survive_busy_get_meas(busy_peer_client, capsys) -> None:
+    """CLI `status` / `meas`：结果槽里有未读旧结果、而 `GET_MEAS` 回 `ERR_BUSY` 时不许报设备错误。
+
+    这是上面 `BusyResultPeer` 场景的 CLI 版：`--no-wait` 启动过一次测量、结果没人读走，
+    再 `START` 一次却卡在没边的源上——`STATUS.resultValid` 仍为 1，`cli.py` 原先直接
+    `client.get_meas()`，于是又把 `ERR_BUSY` 打成「设备错误」中止。
+    """
+    peer, client = busy_peer_client
+    peer.status_word = BusyResultPeer.STATUS_BUSY | BusyResultPeer.STATUS_RESULT_VALID
+
+    # `status` 是只读查询：读不到结果只说明原因，仍然算成功
+    assert cli.cmd_status(argparse.Namespace(json=False), client) == 0
+    captured = capsys.readouterr()
+    assert "暂时读不到" in captured.out
+    assert "设备错误" not in captured.err
+
+    # `meas` 退化成「等一次新结果」：超时退出 + 诊断，而不是设备错误
+    args = argparse.Namespace(json=False, no_start=False, result_timeout=0.3, expect_deg=None)
+    assert cli.cmd_meas(args, client) == 1
+    captured = capsys.readouterr()
+    assert "测量未完成" in captured.err
+    assert "ERR_BUSY" not in captured.err and "设备错误" not in captured.err
+
+    # `--no-start`：不主动启动，也不该把「暂无结果」当设备错误
+    args = argparse.Namespace(json=False, no_start=True, result_timeout=0.3, expect_deg=None)
+    assert cli.cmd_meas(args, client) == 1
+    assert "没有可用的新结果" in capsys.readouterr().err

@@ -457,6 +457,18 @@ STREAM 通知 0 条
    与 `ps/include/dpm_regs.h` 的 `0x00030104` / 四位全 1 不一致；`SET_SIG` 的
    `phaseField` 回 2（历史字段的 45° 步数），本实现固定 0（实测已否定该字段是相位字段）。
    这些字段上位机只做展示，不影响交互，但建议两侧统一（已上报）。
+4. **`GET_RESULT` 等不到结果时曾回 `ERR_BUSY`（已修复，两侧）**：切到**没接信号**的外部输入源
+   （或选中的片内源没有边沿）时 PL 一直停在等边沿（`STATUS.busy = 1`、结果永不锁存），
+   早期 C 侧固件把「等不到结果」表达成 `ERR_BUSY`，上位机把它当致命错误，于是整段测量程序中止：
+   `设备错误：PS 返回错误响应 0xFF（ERR_BUSY），请求 0x05（GET_RESULT）`。
+   现在两侧都按 `docs/ps-protocol.md` §3.0 对齐：**固件回 `valid = 0`**（`GET_MEAS` 没有
+   `valid` 字段，仍用 `ERR_BUSY`），**上位机在所有调用点把 `ERR_BUSY` 都当「还没有结果」**
+   （`DpmClient.wait_meas`/`wait_result` 轮询到自己的超时再抛 `DpmTimeoutError`；CLI 的
+   `status`/`meas` 与 GUI 的连续测量循环改用 `try_get_meas()`，不再因一条 `ERR_BUSY` 中止），
+   并把「当前选的是哪个源、为什么等不到、怎么恢复」写进消息。
+   回归用例：`host/tests/test_client_over_pty.py` 的 `BusyResultPeer` 系列（模拟回 `ERR_BUSY`
+   的固件，含 CLI 调用点）、`host/tools/interop_host_main.py` 的
+   「外部输入源（无信号容错路径）」段、`host/tools/gui_smoke.py` 的「外部无信号时单次测量」步。
 
 ### 验收补充：`sigtable`（离线自校验）
 
@@ -505,8 +517,9 @@ EXIT=0
 
 - 未在真实 Zynq 板卡（`/dev/ttyUSB*` UART）上跑过：串口路径、8N1/115200 由 pyserial 保证，
   但 `docs/ps-protocol.md` 第 1 节提到的 BD 尚未使能 PS UART（`PCW_EN_UART0/1 = 0`）。
-- 与 C 侧 `ps/sim/host_main` 的互通已验证（见验收 4），另有 3 处 C 侧差异已上报、
-  上位机做了兼容；`STREAM` 通知在 C 侧需要持续请求推进其模型时间才会到点（见验收 4 说明）。
+- 与 C 侧 `ps/sim/host_main` 的互通已验证（见验收 4），另有 4 处 C 侧差异已上报
+  （第 9 节；第 4 处「`GET_RESULT` 无结果回 `ERR_BUSY`」已两侧修复：固件改回 `valid = 0`，
+  上位机对两种表达都容错）；`STREAM` 通知在 C 侧需要持续请求推进其模型时间才会到点（见验收 4 说明）。
 - `sim_fpga` 不含 MMCM 抖动/相位噪声、真实布线延迟差与 CDC 亚稳态（见第 6 节）；
   它的相位模型与真实 bitstream 的差异由 `--phase-model` 显式选择，默认跟随实测结论。
 - `--phase-model controllable` 是**假设**（"补丁后相位字可用"），真实行为需重建 IP/BD 后实测。

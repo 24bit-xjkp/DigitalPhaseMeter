@@ -918,11 +918,23 @@ class DpmGuiApp(QMainWindow):
             while self._continuous and self.client is client:
                 try:
                     result = client.wait_result(timeout=1.0)
-                    meas = client.get_meas()
+                    # `GET_MEAS` 可能回 `ERR_BUSY`（对端暂无**新**结果可给，例如刚读走一条、
+                    # 下一次测量还没结束）。那不是设备错误，不该中断连续测量：用刚读到的
+                    # `GET_RESULT` 计数本地换算，界面照常刷新这一条结果。
+                    meas = client.try_get_meas()
                 except Exception as exc:
                     self.sig_log.emit(f"连续测量中断：{type(exc).__name__}: {exc}")
                     break
                 calc = M.meas_calc(result.gate_cnt, result.edge_cnt, result.phase_cnt, client.slow_hz, client.dsp_hz)
+                if meas is None:
+                    meas = P.Meas(
+                        seq=result.seq,
+                        gate_cnt=result.gate_cnt,
+                        edge_cnt=result.edge_cnt,
+                        phase_cnt=result.phase_cnt,
+                        freq_milli_hz=calc.freq_hz,
+                        phase_milli_deg=calc.phase_milli_deg,
+                    )
                 self.sig_meas.emit(meas, calc)
                 time.sleep(0.005)
             try:

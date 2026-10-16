@@ -594,3 +594,121 @@ HANDOFF_DONE 全部 79 个点通过（10 个频点，含 31 个 ≥180° 的点�
   上界内的最大点（8MHz/183.96°、5MHz/191.625°）已测；
 * SD 卡 `BOOT.bin` 自启仍未验证（本机没有 Vitis/FSBL 工具链），本轮也没有改动 SD 卡内容；
 * 长稳/温漂统计仍未做（与第 10 节相同）。
+
+## 12. 2026-10-16 第三轮：切到外部输入源后报 `ERR_BUSY`（`GET_RESULT`）的根因与修复
+
+**这一轮没有新的上板证据**：板上现象来自用户报告，根因定位与修复验证在 **C 验证台
+（`ps/build/host_main`，与固件同一份 `dpm_cmd.c`）经真 pty 驱动上位机**上完成；上板复验需要
+先重烧固件（见 12.5）。
+
+### 12.1 现象与复现
+
+用户报告：上位机切到外部输入源后执行测量，程序直接退出并打印
+
+```text
+设备错误：PS 返回错误响应 0xFF（ERR_BUSY），请求 0x05（GET_RESULT）
+```
+
+按同一条链路复现（`SET_SOURCE(0)` → `SET_MODE(single)` → `START` → 等结果，C 验证台默认
+外部引脚无信号），三个观察量一致：
+
+```text
+SET_SOURCE ext → sigStatus=0x0000000C [srcLocked|sourceReady]
+START 后：busy=True resultValid=False sourceReady=True
+[ERROR] DpmError: PS 返回错误响应 0xFF（ERR_BUSY），请求 0x05（GET_RESULT）
+```
+
+### 12.2 根因（三层，缺一层都不会中止程序）
+
+1. **PL（不是缺陷）**：选中的输入源没有边沿时，测量 FSM 停在「等参考沿」——`STATUS.busy = 1`、
+   结果永不锁存。这是设计内的**正常输入状态**：选外部输入时 `SIG_STATUS.sourceReady` 恒为 1
+   （引脚上是否真有信号，PL 判断不了，见 `SignalInputMux`），`docs/verify-plan.md` 第 3 节
+   用例 5 描述的就是这条路径。
+2. **PS 固件（缺陷）**：`handle_result` 把「等不到结果」表达成 `GET_RESULT = ERR_BUSY`。
+   而协议 §3.0 规定 `GET_RESULT.valid` 是「结果是否就绪」的权威探针，`ERR_BUSY` 的语义是
+   「当前状态不允许该命令」；两个参照实现（`host/dpm_host/sim_server.py`、`spec/sim_server.py`）
+   在无结果时都回 `valid = 0`，只有 C 侧固件回 `0xFF`。
+3. **上位机（缺陷）**：`DpmClient.wait_meas` 把 `GET_MEAS` 的 `ERR_BUSY` 当「暂无结果」继续
+   轮询，却把 `GET_RESULT` 上**同一条** `ERR_BUSY` 当致命错误抛出（`DpmError`），于是整段测量
+   程序中止——连 `docs/verify-plan.md` 要求的「上位机要能超时退出并提示」都没走到。
+4. **上位机 CLI/GUI（缺陷，独立验证发现后补修）**：`cli.py` 的 `status`/`meas` 与 `gui.py` 的
+   连续测量循环用的是**裸 `get_meas()`**，`GET_MEAS` 上的 `ERR_BUSY` 同样被当致命错误。触发
+   条件更窄但很现实：结果槽里还留着上一次未读的结果（`STATUS.resultValid = 1`），此时再
+   `START` 一次却卡在没边的源上——固件按旧结果保护拒绝把上一次的结果当成本次结果，`GET_MEAS`
+   回 `ERR_BUSY`，CLI 又打出「设备错误…请求 0x06（GET_MEAS）」。最小复现（纯 CLI）：
+   `source int` → `start --no-wait` → `source ext` → `start --no-wait` → `meas`；
+   同一状态下 `start`/`monitor` 已经不报设备错误，说明修复漏了这两个调用点。
+
+### 12.3 修复
+
+| 侧 | 文件 | 改动 |
+| -- | ---- | ---- |
+| 固件 | `ps/src/dpm_cmd.c`、`ps/include/dpm_cmd.h` | `GET_RESULT` 等不到结果时回 `valid = 0`（计数全 0），不再回 `ERR_BUSY`；保留命令**内部**的有界等待（`50 + 4 × 闸门时间` ms），`START` 后紧接一次 `GET_RESULT` 仍能一次读走。`GET_MEAS` 没有 `valid` 字段，保持 `ERR_BUSY`（在协议里写明为例外） |
+| 上位机 | `host/dpm_host/client.py` | `wait_meas` / `wait_result` 把两条路径上的 `ERR_BUSY` 统一当「还没有结果」，轮询到自己的超时再抛 `DpmTimeoutError`；新增输入源诊断（当前源、`busy`/`resultValid`/`sourceReady`、查线建议、如何恢复） |
+| 上位机 CLI/GUI | `host/dpm_host/cli.py`、`host/dpm_host/gui.py` | `status`/`meas` 改用 `try_get_meas()`：读不到就**说明原因**（`status`，仍算成功）/ 退回「等一次新结果」（`meas`）；连续测量循环同样容错，读不到 `GET_MEAS` 时用刚读到的 `GET_RESULT` 计数本地换算，不再因一条 `ERR_BUSY` 中断 |
+| 协议 | `docs/ps-protocol.md` §3.0、§3.2 | 写明「『还没有结果』用 `valid = 0` 表达，不要用 `ERR_BUSY`」与 `GET_MEAS` 的例外 |
+| 回归 | `host/tests/test_client_over_pty.py`、`ps/tests/test_server_selftest.py`、`host/tools/interop_host_main.py`、`host/tools/gui_smoke.py` | 新增 `BusyResultPeer`（模拟仍回 `ERR_BUSY` 的固件）4 项单测（含 CLI `status`/`meas` 的残留路径）；固件侧 `GET_RESULT → valid=0` 断言；互通脚本新增「外部输入源（无信号容错路径）」段；GUI 冒烟新增「外部无信号时单次测量」步 |
+
+修复后同一条链路的输出（`host/tools/interop_host_main.py --spawn ./ps/build/host_main`）：
+
+```text
+SET_SOURCE(ext) → sigStatus=0x0000000C sourceReady=1
+START → status=0x0000000B（busy=1 resultValid=1）
+[OK] 等不到结果 → 超时（不是设备错误）：等待响应超时，timeout=1.5s：等待测量结果超时（源没有边沿时测量永不完成）；
+     当前输入源 = 外部引脚 sig1/sig2，status=0x0000000B（busy=1 resultValid=1）、sigStatus=0x0000000C（sourceReady=1）；
+     外部引脚没有边沿：确认 sig1/sig2 已接两路同频信号、与开发板共地，电平满足引脚 IO 标准（默认 LVCMOS33），
+     且频率落在闸门窗口内；结果槽里还留着上一次未读的结果（resultValid=1），本次测量还没产出新结果——
+     对端按「不把旧结果当新结果」处理，所以这里继续等的是本次的结果；
+     挂起的这次测量会一直等边沿：接好信号或切回片内信号源后它才会结束
+[OK] GET_RESULT → valid=0（等不到结果时必须用 valid=0，不是 ERR_BUSY）
+```
+
+`START → status=0x…0B`（`busy=1` 且 `resultValid=1`）是上一轮测量留下的**未读结果**：
+固件按 `valid_before`/`seq_before` 保护不把它当本次结果交出去，上位机因此继续等——这条旧结果
+保护逻辑在修复前后都成立（`ps/tests/test_server_selftest.py::test_result_clear` 覆盖）。
+
+**兼容性**：只更新上位机、暂不重烧固件也能消除用户看到的「设备错误」——轮询到自己的超时后
+报超时 + 诊断。拿旧固件跑互通脚本会打印 `[FAIL] GET_RESULT 回了错误响应 0xFF` 并以退出码 1
+结束：那一条是固件侧的一致性断言，要重烧固件才变绿（已用旧固件二进制实测确认）。
+
+### 12.4 全量门禁（本轮复跑）
+
+| 门禁 | 命令 | 结果 |
+| ---- | ---- | ---- |
+| Verilator（RTL 未改，顺带复跑） | `xmake test -v` | 4 个目标 100% 通过（13 + 17 + 110 + 545 断言） |
+| Python 上位机 | `uv run pytest -q` | **700 项通过**（新增 4 项 ERR_BUSY 容错用例） |
+| 规格自检 | `uv run python spec/selftest_spec.py` | **1284 项检查，0 失败** |
+| C 单测 + 服务端自测 | `ctest --test-dir ps/build/cmake --output-on-failure` | 4/4（`test_server_selftest` **620/620**，含新增的「外部无信号：GET_RESULT 回 valid=0」） |
+| 固件交叉编译 | `bash ps/build.sh` | 零警告（`-Wall -Wextra -Werror`）、`nm -u` 为空 |
+| 端到端扫描（C 服务端） | `uv run python spec/validate_sweep.py --server "./ps/build/host_main --device {device}"` | **79 点全部 PASS**（sent=636=recv、crc_err=0） |
+| C 验台互通（含新的外部源容错段） | `uv run python host/tools/interop_host_main.py --spawn ./ps/build/host_main` | 退出码 0 |
+| 离线演练（上板前置） | `bash ps/tools/onboard_accept_sim.sh` | 93/93 |
+| GUI 冒烟（PySide6，无头） | `QT_QPA_PLATFORM=offscreen uv run python host/tools/gui_smoke.py --scan` | PASS（含「外部无信号时单次测量」步） |
+
+### 12.5 未验证 / 未做的部分
+
+* **上板**：本轮没有板上的 bitstream/固件改动，也没有重新烧写。板上要拿到固件侧的
+  `valid = 0`，需 `bash ps/build.sh --ps-only` 后按 `docs/bringup.md` 重新加载/更新 `BOOT.bin`；
+* **外部输入源真机路径**（`docs/verify-plan.md` 第 6.5 条）仍**没有上板验证**：两路同频信号
+  接到 `sig1`(W18)/`sig2`(W19) 后能否测到正确频率/相位，要有信号源才能下结论。本轮只证明了
+  「**没有**信号时不再报设备错误」这条容错路径；
+* 「挂起的这次测量会自行结束」只有模型/RTL 层面的依据：真实 PL 上源恢复边沿后，测量 FSM 要
+  先等到闸门计数器回到 `targetGate`（28 位 @50MHz，最长回绕一次 ≈5.4s）再等一个 `sig2` 沿，
+  因此**不是立刻**结束，这一点没有上板计时确认；C 侧模型则完全不恢复（第 6 节已知差异 1）；
+* 真实串口的重试/超时窗口（上位机 `--timeout` 默认 0.5s、`--result-timeout` 默认 2s）在板上
+  未复跑；修复后的诊断依赖一次额外的 `GET_STATUS`（上限 0.2s），与真机时延的配合未实测。
+
+### 12.6 独立验证（另一名验证者，只读 + /tmp 重建）
+
+修复后由**独立验证者**用自己写的脚本重做了一遍，结论与上面的记录一致，并补出两条本次修复
+**没覆盖到**的路径（第 4 层根因、见 12.2）：
+
+| 项 | 独立验证结果 |
+| -- | ------------ |
+| 复现修复前故障 | `git worktree add /tmp/dpm_prefix HEAD` + 重建验证台：裸帧 `GET_RESULT → cmd=0xFF`；客户端 `DpmError code=255`，原文与用户报告**逐字相同**；CLI 打印 `设备错误：…请求 0x05（GET_RESULT）` |
+| 修复后 | 裸帧 `cmd=0x85 payload=0000…`（valid=0）；客户端 `DpmTimeoutError code=0`（2.00s）含输入源诊断；CLI 无「设备错误」 |
+| 反向验证（成功路径未被掩盖） | `--ext-present` 10MHz/0°、`--unlock` 下 `SET_SOURCE(int)`/`START` 仍回 `ERR_BUSY`、测量中再次 `START` 仍回 `ERR_BUSY`（需 `--speed 0 --gate 200000` 构造真 busy）、`START` 后**一次** `GET_RESULT` 一次读走（payload 与修复前逐字节相同） |
+| 门禁 | `ps/tests/test_server_selftest.py` 620/620、`interop_host_main.py` 退出码 0、`gui_smoke.py` PASS（均用仓库外副本 / 只读方式跑） |
+| 发现的残留路径 | CLI `meas`/`status` 的裸 `get_meas()`（12.2 第 4 层）→ 已补修，并加 `test_cli_status_and_meas_survive_busy_get_meas` 钉住（未补修前该用例以 `ERR_BUSY … 请求 0x06（GET_MEAS）` 失败） |
+| 记录在案但**未**修的既有问题 | ① 流上报在源没有边沿时会持续重发缓存旧结果（`dpm_cmd_tick` 只判 `have_result`，帧里没有 valid 位），`monitor --stream` 会把它当样本；② 先 `start --no-wait`、再切到无信号源后 `meas` 会**直接打印上一次的片内源读数**（exit 0）——两者在本轮改动前后表现相同，属既有语义问题，未纳入本次修复 |
+| 未能验证的 | 真实板子/引脚/MMCM/真实串口；RTL 级「无信号」行为（`test/Controller.cpp` 恒驱周期信号，本轮未新增该用例） |

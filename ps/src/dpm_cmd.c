@@ -528,12 +528,29 @@ static uint32_t handle_result(dpm_cmd_ctx_t *c, uint8_t *out, uint32_t cap, uint
     dpm_result_reply_t v;
     uint8_t pl[32];
     size_t n = 0u;
+    int ready = (ensure_result(c, now_ms) == 0);
 
-    if (ensure_result(c, now_ms) != 0) {
-        return cmd_reply_err(c, DPM_RESP_ERR_BUSY, out, cap);
+    /* 等不到结果**不是**「当前状态不允许该命令」，而是「选中的输入源没有边沿」这一正常
+     * 输入状态（协议 §3.0：源没有边沿时测量永不完成）。协议同时规定 `GET_RESULT.valid`
+     * 就是「结果是否就绪」的权威探针，所以这里必须回 `valid = 0`（计数全 0），
+     * **不能回 ERR_BUSY**：
+     *   - 回 ERR_BUSY 会让按协议写的上位机把它当致命错误中止整段测量程序
+     *     （实测：切到没接信号的外部输入源后 START，GET_RESULT 回 0xFF，上位机报
+     *     「设备错误：PS 返回错误响应 0xFF（ERR_BUSY），请求 0x05（GET_RESULT）」）；
+     *   - 两个参照实现（`host/dpm_host/sim_server.py` 与 `spec/sim_server.py`）在无结果时
+     *     也都是回 `valid = 0`，`ERR_BUSY` 只用于 SET_SOURCE/SET_SIG/START 这类状态受限命令。
+     * 保留 `ensure_result` 的**有界**等待：`START` 之后紧接着一次 `GET_RESULT` 仍能在结果
+     * 到来时一次读走（对同步式调用方方便），只是超时后表达方式改为 `valid = 0`。 */
+    if (ready != 0) {
+        v.valid = (c->have_result != 0u) ? 1u : 0u;
+        v.r = c->last;
+    } else {
+        v.valid = 0u;
+        v.r.seq = 0u;
+        v.r.gate_cnt = 0u;
+        v.r.edge_cnt = 0u;
+        v.r.phase_cnt = 0u;
     }
-    v.valid = (c->have_result != 0u) ? 1u : 0u;
-    v.r = c->last;
     put_u8(&pl[n], v.valid);
     n += 1u;
     dpm_wr_u32(&pl[n], v.r.seq);
