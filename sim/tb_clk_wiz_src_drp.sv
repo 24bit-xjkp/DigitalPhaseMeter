@@ -1,4 +1,12 @@
 // ============================================================================
+// 【已作废·仅作历史记录】片内信号源 clk_wiz_src 的 DRP 位域语义实测激励。
+//
+// 本文件针对的是**已被方案 A 取代**的 `clk_wiz_src` IP（它已从 `create_bd.tcl` 删除），
+// 因此**现在跑不起来**（`run_drp_tb.sh` 找不到 IP 源目录）。它的产出是
+// `docs/verify-drp.md` 与 `docs/verify-report.md` §3 的那批实测数据（相位字不生效的判决性证据），
+// 保留下来是为了让那份结论可追溯，**不要再基于它做验证**。
+// 当前方案的联调激励见 `sim/tb_src_handoff.sv` + `sim/run_handoff_tb.sh`。
+//
 // 片内信号源 clk_wiz_src（dpm_system_clk_wiz_src_0：MMCM + 动态重配置）的
 // DRP 位域语义实测激励。
 //

@@ -1,10 +1,11 @@
 # DPM PC 侧上位机（`host/`）
 
 DigitalPhaseMeter 的 PC 侧 Python 上位机：实现 `docs/ps-protocol.md` 定义的 PS ↔ PC 串口协议，
-提供命令行（CLI）、Tk 图形界面（GUI），以及一个**可独立运行的寄存器级 + 测量级 PL 仿真后端**
+提供命令行（CLI）、**PySide6 图形界面**（GUI），以及一个**可独立运行的寄存器级 + 测量级 PL 仿真后端**
 （没有硬件时把整条上位机链路跑通）。
 
-所有文档与代码注释均为中文。**本目录只依赖 Python 标准库 + `pyserial`**（GUI 用标准库 `tkinter`）。
+所有文档与代码注释均为中文。运行期依赖是 `pyserial` 与 **`PySide6`**（GUI），开发期用 `pytest`
+（见仓库根 `pyproject.toml`）——环境由 `uv` 管理，直接 `uv run ...` 即可。
 
 ---
 
@@ -12,45 +13,48 @@ DigitalPhaseMeter 的 PC 侧 Python 上位机：实现 `docs/ps-protocol.md` 定
 
 ```text
 host/
-├── pyproject.toml              # 包定义（依赖只有 pyserial；测试只用标准库 unittest）
+├── ../pyproject.toml           # 仓库根：包定义（依赖只有 pyserial）+ pytest 配置（testpaths/pythonpath/markers）
 ├── README.md                   # 本文件（含验收的原始输出）
 ├── dpm_host/
 │   ├── __init__.py             # 版本与包说明
 │   ├── protocol.py             # 帧编解码 + CRC-16/MODBUS + 流式解析器 + 各命令 PAYLOAD 编解码
 │   ├── client.py               # 串口客户端：单事务串行、超时/重试、读线程、通知帧回调
 │   ├── mathx.py                # 定点换算（与 ps/include/dpm_calc.h 同一契约）
-│   ├── sig.py                  # MMCM 求解 + DRP 字（含独立毫度相位字）+ 相位语义 JSON
+│   ├── sig.py                  # MMCM 求解 + 寄存器镜像编码（方案 A：Delays/Mux 拆分）+ 相位可控性 JSON
 │   ├── sim_fpga.py             # 寄存器级 + 测量级 PL 模型（ControlRegs 语义 + 假 MMCM）
 │   ├── sim_server.py           # 把 sim_fpga 接到 pty/串口上，模拟 PS 侧固件（--pty / --device）
 │   ├── cli.py                  # `python3 -m dpm_host <子命令>`
-│   ├── gui.py                  # Tk 图形界面
+│   ├── gui.py                  # PySide6 图形界面（工作线程 + Qt 信号回主线程刷新）
 │   └── __main__.py             # `python3 -m dpm_host` 入口
 └── tests/
-    ├── conftest.py             # pytest 的 sys.path 兜底（本机没有 pytest，见下）
-    ├── test_protocol.py        # 帧/CRC/解析器/PAYLOAD/编码空间（32 项）
-    ├── test_mathx.py           # 定点换算 + 金标准向量逐位比对（14 项）
-    ├── test_sig.py             # 冻结求解规则、DRP 字、相位字语义、45/D 网格（25 项）
-    ├── test_sim.py             # 寄存器语义、测量模型 vs golden、PS 固件逻辑、流通知（31 项）
-    └── test_client_over_pty.py # pty 交互（sim_server 15 项 + 外来对端通知分流 3 项 = 18 项）
+    ├── conftest.py             # pytest 的 sys.path 兜底（正常由 pythonpath 生效，见第 2 节）
+    ├── test_protocol.py        # 帧/CRC/解析器/PAYLOAD/编码空间（58 项）
+    ├── test_mathx.py           # 定点换算 + 金标准向量逐位比对（95 项）
+    ├── test_sig.py             # 冻结求解规则、方案 A 的 DRP 寄存器镜像、相位码与 45/D 网格、金标准相位字段（137 项）
+    ├── test_sim.py             # 寄存器语义、测量模型 vs golden、假 MMCM/DRP 镜像、PS 固件逻辑、流通知（60 项）
+    └── test_client_over_pty.py # pty 交互（sim_server 10 项 + 参数化 12 项 + 超时 4 项 + 外来对端通知分流 3 项 = 20 项）
 └── tools/
-    └── interop_host_main.py    # 验收 4 的可复跑互通脚本（--spawn ./ps/build/host_main）
+    ├── interop_host_main.py    # 验收 4 的可复跑互通脚本（--spawn ./ps/build/host_main）
+    └── gui_smoke.py            # GUI 冒烟 + 截图（自动起 pty 仿真后端，产出 gui.png 与步骤日志）
 ```
 
 ## 2. 安装与运行
 
 ```bash
-# 依赖：Python ≥3.10（本机 3.14.8）+ pyserial 3.5；GUI 需要 tkinter 与 DISPLAY
-cd host
-python3 -m dpm_host --help                    # 无需安装即可直接用（包就在当前目录）
-# 可选：pip install -e .                      # 之后可在任意目录用 `dpm-host` 或 `python3 -m dpm_host`
+# 依赖：Python ≥3.12（本机 3.14.8）+ pyserial 3.5 + PySide6（GUI）；由 uv 管理，别手工 pip install
+uv run python -m dpm_host --help              # 从仓库根目录直接跑（包通过 .pth 指向 host/）
+# 也可安装成命令：uv sync 之后 `uv run dpm-host --help`
 ```
 
-**测试**（本机**没有安装 pytest**，`python3 -m pytest` 不存在，因此用标准库 unittest；
-测试写法同时兼容 pytest 收集，装了 pytest 后 `python3 -m pytest host/tests -q` 也可）：
+**测试**（pytest 原生写法，由 `uv` 管理虚拟环境；pytest 配置在仓库根 `pyproject.toml`
+的 `[tool.pytest.ini_options]`：`testpaths = ["host/tests"]`、`pythonpath = ["host"]`、
+`addopts = "-ra --strict-markers"`，所以两种调用目录都行、不带参数即全量）：
 
 ```bash
-cd host && python3 -m unittest discover -s tests -t . -v
-# 或在仓库根目录：python3 -m unittest discover -s host/tests -t host -v
+cd /home/luo/DigitalPhaseMeter && uv run pytest -q          # 仓库根目录：全量
+cd /home/luo/DigitalPhaseMeter/host && uv run pytest -q     # host 目录：同样全量
+uv run pytest -q -m slow                                    # 只看标记用例（slow/pty 默认也执行）
+uv run pytest --collect-only -q | tail -3                   # 用例数
 ```
 
 ## 3. 无硬件：`sim_server` + CLI
@@ -126,12 +130,21 @@ python3 -m dpm_host --port /dev/pts/2 gui --port /dev/pts/2
 - **结果表**（最近 200 条：序号/频率/相位差/gate/edge/phaseCnt/DSP 周期）+ **导出 CSV** + 清空表；
 - **日志区**（带时间戳，含求解出的 VCO/MULT/D、量化提示、错误信息）。
 
-线程模型：所有串口操作在后台工作线程里执行，结果经队列回到 Tk 主线程刷新界面，
-因此界面不会因为请求超时而卡死。
+线程模型：所有串口操作都在一个后台 `QThread` 里**串行**执行，结果通过 Qt 信号（跨线程队列连接）
+回到界面线程刷新控件，因此界面不会因为请求超时而卡死，工作线程也不碰控件。PySide6 是运行期依赖
+（`uv run` 自动装上），不需要额外系统包。
 
-**截图说明**：本环境（`DISPLAY=:0`）可以真实启动，但没有截图工具链，因此用**冒烟测试**代替：
-进程被 `timeout` 杀掉之前**没有任何 traceback**，且仿真服务端日志能看到 GUI 自动发出的
-`PING → IDENTIFY → GET_STATUS`，说明连接、握手与状态刷新都真实工作了（原始输出见第 8 节验收 3）。
+**冒烟 + 截图**（可复跑，产出真实窗口截图与逐步证据）：
+
+```bash
+uv run python host/tools/gui_smoke.py            # 自动起 pty 仿真后端 → 连接/测量/切源/表格
+uv run python host/tools/gui_smoke.py --scan     # 再跑一次 2×2 扫描并导出 CSV
+# 产物：build/gui_smoke/gui.png、gui_final.png、gui_stdout.txt、scan.csv
+# 无显示环境（CI）加 QT_QPA_PLATFORM=offscreen 也能跑，截图用 QWidget.grab() 不依赖窗口系统
+```
+
+该脚本把「界面真的能用」变成可复现证据：连接、单次测量、22.5° 细调相位、输入源切换、闸门设置、
+扫描与 CSV 导出逐项断言，最后用 `QWidget.grab()` 直接抓窗口（不依赖 `import`/`spectacle` 等截图工具）。
 
 ## 6. 仿真后端模型：假设与不覆盖的东西
 
@@ -156,16 +169,17 @@ python3 -m dpm_host --port /dev/pts/2 gui --port /dev/pts/2
    **不覆盖**：MMCM 抖动/相位噪声、真实布线延迟与边沿检测通路的固定延迟差、
    异步采样链的 CDC 亚稳态、闸门停止握手的额外低速周期（RTL 里 stop 要等 `sig2` 下一个上升沿，
    容限见 `.agents/skills/dpm-measurement-model`）。
-3. **假 MMCM**（按实测结论 `spec/drp_semantics.json`）：低字节 = 分频比 `D` 本体、
-   `LOAD(0x25C)` 的 bit0 = 触发 / bit1 = SADDR（0 = BD 静态配置，1 = 寄存器文件）、
-   `locked` 在 **0x004**（bit0），重配置期间先掉后起；`0x27C` 恒为 0（保留对照）。
+3. **假 MMCM**（方案 A：MMCM 的 16 位寄存器镜像 + LOAD）：DRP 段在模型的平坦地址空间里是
+   **`0x100 + off`**（模拟「另一段 AXI 基地址」，真实是 `0x43C1_0000`）：`0x100+0x00` ID、
+   `0x100+0x04` STATUS（bit0 = locked、bit1/bit2 = busy）、`0x100+0x08..0x24` 八个 MMCM 寄存器镜像、
+   `0x100+0x28` LOAD（写 1 整批生效并重新锁定）。相位按 `45/D` 网格量化后生效。
    相位由 `--phase-model` 决定：
 
    | 取值 | 行为 |
    | --- | --- |
-   | `auto`（**默认**） | 跟随 `spec/drp_semantics.json` 的 `phase_controllable`——实测为 **false**，因此**相位字写进去也不生效，clk_out2 恒为静态 90°**，与真实 bitstream 一致 |
-   | `static` | 同上，强制固定静态相位 |
-   | `controllable` | 假装「打好 `PHASE_DUTY_CONFIG` 补丁、相位字 0x218 已接线」：按 `45/D` 度网格量化后生效，专门用于**上位机相位通路自测**（`spec/validate_sweep.py` 的相位判据也可用它跑） |
+   | `auto`（**默认**） | 跟随 `spec/drp_semantics.json` 的 `phase_controllable`（方案 A 实测为 **true**）：写相位字段即生效 |
+   | `controllable` | 同 `auto` 的可控分支，强制「相位可写」 |
+   | `static` | 复现旧 `clk_wiz_src` bitstream：CLKOUT1 的相位字段按 0 写，输出恒为静态 90°（用来验证上位机在「相位不可控」时的提示路径） |
 
 ## 7. 与 PS 侧的契约关系
 
@@ -183,44 +197,51 @@ python3 -m dpm_host --port /dev/pts/2 gui --port /dev/pts/2
 
   `freqMilliHz` 字段承载的是**整数 Hz**（25MHz → 25000000，名字是历史遗留），
   `phaseMilliDeg` 是毫度。
-- **片内源**：`sig.py` 与 `ps/include/dpm_calc.h::dpm_sig_solve` / `dpm_regs.h` 同一实现——
+- **片内源（方案 A）**：`sig.py` 与 `ps/include/dpm_calc.h::dpm_sig_solve` /
+  `dpm_regs.h::DPM_MMCM_ENCODE_CLKOUT` 同一实现——
   冻结求解规则（先最小化频率误差，再取距 BD 初始点 `(1000MHz, D=40)` 最近的解，
-  `D ≤ 127`、`MULT = 12..24`、`VCO ∈ [600,1200]MHz`、无小数分频），
-  DRP 写入顺序与 `docs/ps-protocol.md` 第 6.4 节一致：
+  `D ≤ 126`（分频编码成 `HIGH_TIME + LOW_TIME` 各 6 位）、`MULT = 12..24`、
+  `VCO ∈ [600,1200]MHz`、无小数分频），写入顺序与 `docs/ps-protocol.md` §6.1 一致：
 
   ```text
-  0x200 = (MULT << 8) | DIVCLK      0x208 = D（clk_out1）      0x214 = D（clk_out2）
-  0x20C = 0（clk_out1 相位）        0x218 = phase_mdeg（clk_out2 相位，毫度）
-  0x25C = 0x07（触发 + SADDR=1）    状态：0x004 bit0 = locked
+  0x08/0x0C = CLKFBOUT   ClkReg1/ClkReg2           0x10/0x14 = CLKOUT0  （clk_out1，相位 0）
+  0x18/0x1C = CLKOUT1    ClkReg1/ClkReg2           0x20 = DIVCLK = 0x1041
+  0x24 = POWER = 0xFFFF                            0x28 = LOAD：写 1 整批生效
   ```
 
-  相位字段的**单位**不写死：`sig.py` 从 `spec/drp_semantics.json` 读
-  （`phase_unit_deg_milli` → `phase_unit_ps_per_lsb` → `phase_field_is_degrees` → 回退候选 B `45000`），
-  并提供 `reload_semantics()` 在实测结论更新后热加载。
+  相位不占独立寄存器：`m = round(phase_mdeg × D / 45000)`（9 位，单位 1/8 VCO 周期），
+  `DELAY_TIME = m >> 3`（ClkReg2 低 6 位）、`PHASE_MUX = m & 7`（ClkReg1 位 [15:13]），
+  可实现网格 `45/D` 度。`phaseField` 回包 = `DELAY_TIME`。
+
+  `sig.py` 从 `spec/drp_semantics.json` 只读两个结论：`phase_controllable`（方案 A 为 true）
+  与 `phase_static_deg_milli`（不可控时的固定相位）；`reload_semantics()` 可在结论更新后热加载。
 
 ## 8. 验收证据（实际运行的原始输出）
 
-> 环境：Python 3.14.8、pyserial 3.5、tkinter、`DISPLAY=:0`、Linux。
-> **本机没有 pytest**（`python3 -m pytest` → `No module named pytest`），所以用标准库 unittest；
-> 测试文件同时兼容 pytest 收集（`host/tests/conftest.py` 负责 `sys.path`）。
+> 环境：Python 3.14.8、pyserial 3.5、tkinter、`DISPLAY=:0`、Linux；Python 依赖由 `uv` 管理（`.venv`）。
+> 测试是 **pytest 原生**写法（模块级 `def test_*` + `assert` + `pytest.raises`/`parametrize`/fixture），
+> 配置在仓库根 `pyproject.toml` 的 `[tool.pytest.ini_options]`，不再需要 `unittest`。
 
 ### 验收 1：全部单元/集成测试
 
 ```console
-$ cd host && python3 -m unittest discover -s tests -t . -v
-...
-Ran 120 tests in 3.336s
+$ cd /home/luo/DigitalPhaseMeter && uv run pytest -q
+[test_mathx] 金标准向量来源：/home/luo/DigitalPhaseMeter/spec/golden/vectors.json（79 组）
+667 passed in 5.65s
 
-OK
-
-[test_mathx] 金标准向量来源：/home/luo/DigitalPhaseMeter/spec/golden/vectors.json（28 组）
+$ cd /home/luo/DigitalPhaseMeter/host && uv run pytest -q
+[test_mathx] 金标准向量来源：/home/luo/DigitalPhaseMeter/spec/golden/vectors.json（79 组）
+667 passed in 5.65s
 ```
 
-（120 = 协议 32 + mathx 14 + sig 25 + sim 31 + pty 端到端 18；略去的 `-v` 明细是每项 `ok`。
-这是**协议 v1.1（通知码 0xE1/0xE2）之后**的重跑结果。）
-`python3 -m unittest discover -s host/tests -t host` 在仓库根目录同样 `OK`。）
+（667 项 = 协议 58 + mathx 248 + pty 端到端 29 + sig 221 + sim 111；两种调用目录都在仓库根
+`pyproject.toml` 下收集到同一批用例（`rootdir: /home/luo/DigitalPhaseMeter`，`configfile: pyproject.toml`）。
+五个测试文件都是 pytest 原生写法，`unittest` 的 `subTest` 已全部换成 `parametrize` 展开的独立用例。
+金标准向量从 28 条扩到 **79 条**（10 频点 × 逐频点相位点，含 31 个 ≥180° 的点），
+`test_mathx` / `test_sim` 因此大幅增加——这是扩表的直接结果，见 `docs/verify-report.md` §11。
+D=127 的 `xfail` 已随 `DIV_MAX` 收到 126 变成普通断言，不再有预期失败项。）
 
-`test_mathx.py` 与 Lead 重新生成的 `spec/golden/vectors.json` **28/28 逐位一致**
+`test_mathx.py` 与 `spec/golden/vectors.json` **79/79 逐位一致**
 （`freqMilliHz` 与 `phaseMilliDeg` 都比对），另有 500 组随机用例验证「安全形式 == 朴素公式」逐位相同。
 
 Lead 的独立自检同样通过：
@@ -241,92 +262,68 @@ EXIT=0
 ### 验收 2：`sim_server --pty` + `scan`
 
 ```console
-$ python3 -m dpm_host.sim_server --pty
-启动仿真服务端：slow=50MHz dsp=400MHz gate=2000 f=25MHz phase=90°
-PTY_LINK=/tmp/dpm_sim_pty
-PTY_SLAVE=/dev/pts/2
-PTY 从设备路径: /dev/pts/2
+$ python3 -m dpm_host.sim_server --pty --freq 25e6 --phase 90e3 --gate 2000
+启动仿真服务端：slow=50MHz dsp=400MHz gate=2000 f=25MHz phase=90000°
+PTY_SLAVE=/dev/pts/1
+PTY 从设备路径: /dev/pts/1
 
-$ python3 -m dpm_host --port /dev/pts/2 scan --freqs 5e6,6.25e6,8e6,10e6,12.5e6,20e6,25e6 \
-      --phases 0,22.5,45,67.5,90,112.5,135,157.5 --out /tmp/scan.csv
-扫描计划：7 个频点 × 8 个相位点 = 56 行
-相位可控性：否（实现相位恒为静态 90.000°），来源 /home/luo/DigitalPhaseMeter/spec/drp_semantics.json
-     5.0000 MHz → VCO=600.0MHz MULT=12 DIVCLK=1 D=120 → f_out=5.000000MHz，相位字 0x218=0（实际 90.000°）
-     6.2500 MHz → VCO=750.0MHz MULT=15 DIVCLK=1 D=120 → f_out=6.250000MHz，相位字 0x218=0（实际 90.000°）
-     8.0000 MHz → VCO=1000.0MHz MULT=20 DIVCLK=1 D=125 → f_out=8.000000MHz，相位字 0x218=0（实际 90.000°）
-    10.0000 MHz → VCO=1000.0MHz MULT=20 DIVCLK=1 D=100 → f_out=10.000000MHz，相位字 0x218=0（实际 90.000°）
-    12.5000 MHz → VCO=1000.0MHz MULT=20 DIVCLK=1 D=80 → f_out=12.500000MHz，相位字 0x218=0（实际 90.000°）
-    20.0000 MHz → VCO=1000.0MHz MULT=20 DIVCLK=1 D=50 → f_out=20.000000MHz，相位字 0x218=0（实际 90.000°）
-    25.0000 MHz → VCO=1000.0MHz MULT=20 DIVCLK=1 D=40 → f_out=25.000000MHz，相位字 0x218=0（实际 90.000°）
-[  1]    5.0000MHz     0.0° → f=   5.000000 MHz phase=   90.000° err=+90.0000° gate=2010 edge=201 phaseCnt=4020 cycles=20.0000  ⚠相位未生效
-[  2]    5.0000MHz    22.5° → f=   5.000000 MHz phase=   90.000° err=+67.5000° gate=2010 edge=201 phaseCnt=4020 cycles=20.0000  ⚠相位未生效
-[  3]    5.0000MHz    45.0° → f=   5.000000 MHz phase=   90.000° err=+45.0000° gate=2010 edge=201 phaseCnt=4020 cycles=20.0000  ⚠相位未生效
-[  4]    5.0000MHz    67.5° → f=   5.000000 MHz phase=   90.000° err=+22.5000° gate=2010 edge=201 phaseCnt=4020 cycles=20.0000  ⚠相位未生效
-[  5]    5.0000MHz    90.0° → f=   5.000000 MHz phase=   90.000° err=+0.0000° gate=2010 edge=201 phaseCnt=4020 cycles=20.0000
+$ python3 -m dpm_host --port /dev/pts/1 scan --freqs 5e6,6.25e6,8e6,10e6,12.5e6,20e6,25e6 \
+      --phases 0,22.5,45,90,135,180,225,270,315 --out /tmp/scan.csv
+扫描计划：7 个频点 × 9 个相位点 = 63 行
+相位可控性：是，来源 /home/luo/DigitalPhaseMeter/spec/drp_semantics.json
+     5.0000 MHz → VCO=600.0MHz MULT=12 DIVCLK=1 D=120 → f_out=5.000000MHz，相位码 0（DELAY_TIME=0、PHASE_MUX=0，实际 0.000°）
+     6.2500 MHz → VCO=750.0MHz MULT=15 DIVCLK=1 D=120 → f_out=6.250000MHz，相位码 0（DELAY_TIME=0、PHASE_MUX=0，实际 0.000°）
+     8.0000 MHz → VCO=1000.0MHz MULT=20 DIVCLK=1 D=125 → f_out=8.000000MHz，相位码 0（DELAY_TIME=0、PHASE_MUX=0，实际 0.000°）
+    10.0000 MHz → VCO=1000.0MHz MULT=20 DIVCLK=1 D=100 → f_out=10.000000MHz，相位码 0（DELAY_TIME=0、PHASE_MUX=0，实际 0.000°）
+    12.5000 MHz → VCO=1000.0MHz MULT=20 DIVCLK=1 D=80 → f_out=12.500000MHz，相位码 0（DELAY_TIME=0、PHASE_MUX=0，实际 0.000°）
+    20.0000 MHz → VCO=1000.0MHz MULT=20 DIVCLK=1 D=50 → f_out=20.000000MHz，相位码 0（DELAY_TIME=0、PHASE_MUX=0，实际 0.000°）
+    25.0000 MHz → VCO=1000.0MHz MULT=20 DIVCLK=1 D=40 → f_out=25.000000MHz，相位码 0（DELAY_TIME=0、PHASE_MUX=0，实际 0.000°）
+  其中 12 个 (频点, 相位) 超出相位码上界（`m ≤ 511`），会被跳过：5MHz/225°、5MHz/270°、5MHz/315°、6.25MHz/225°、6.25MHz/270°、6.25MHz/315°…
+  实际可扫 51 行
+[  1]    5.0000MHz     0.0° → f=   5.000000 MHz phase=    0.000° err=+0.0000° gate=2010 edge=201 phaseCnt=0 cycles=0.0000
+[  6]    5.0000MHz   180.0° → f=   5.000000 MHz phase=  180.000° err=+0.0000° gate=2010 edge=201 phaseCnt=8040 cycles=40.0000
+[scan] 跳过 5MHz/225°：SET_SIG 回 ERR_PARAM（相位超出该频点的 9 位相位码上界）
 ...
-[ 56]   25.0000MHz   157.5° → f=  25.000000 MHz phase=   90.000° err=-67.5000° gate=2002 edge=1001 phaseCnt=4004 cycles=4.0000  ⚠相位未生效
+[ 49]   25.0000MHz   225.0° → f=  25.000000 MHz phase=  225.000° err=+0.0000° gate=2002 edge=1001 phaseCnt=10010 cycles=10.0000
+[ 51]   25.0000MHz   315.0° → f=  25.000000 MHz phase=  315.000° err=+0.0000° gate=2002 edge=1001 phaseCnt=14014 cycles=14.0000
 
 CSV 前几行（freq_nominal,phase_nominal,f_meas_mHz,phase_meas_mdeg,gateCnt,edgeCnt,phaseCnt,phaseCycles,err_deg,phase_controllable）：
-  5000000,0.0,5000000,90000,2010,201,4020,20.0,90.0,False
-  5000000,22.5,5000000,90000,2010,201,4020,20.0,67.5,False
-  5000000,45.0,5000000,90000,2010,201,4020,20.0,45.0,False
-  5000000,67.5,5000000,90000,2010,201,4020,20.0,22.5,False
-  5000000,90.0,5000000,90000,2010,201,4020,20.0,0.0,False
-  5000000,112.5,5000000,90000,2010,201,4020,20.0,-22.5,False
-  5000000,135.0,5000000,90000,2010,201,4020,20.0,-45.0,False
-  5000000,157.5,5000000,90000,2010,201,4020,20.0,-67.5,False
-  ...（共 56 行）
+  5000000,0.0,5000000,0,2010,201,0,0.0,0.0,True
+  5000000,22.5,5000000,22500,2010,201,1005,5.0,0.0,True
+  5000000,45.0,5000000,45000,2010,201,2010,10.0,0.0,True
+  5000000,90.0,5000000,90000,2010,201,4020,20.0,0.0,True
+  5000000,135.0,5000000,135000,2010,201,6030,30.0,0.0,True
+  5000000,180.0,5000000,180000,2010,201,8040,40.0,0.0,True
+  6250000,0.0,6250000,0,2008,251,0,0.0,0.0,True
+  6250000,22.5,6250000,22500,2008,251,1004,4.0,0.0,True
+  ...（共 51 行）
+  25000000,270.0,25000000,270000,2002,1001,12012,12.000000,0.0000,True
+  25000000,315.0,25000000,315000,2002,1001,14014,14.000000,0.0000,True
 
-扫描完成：56 行，|err_deg| 最大 90.0000° 平均 45.0000°
-⚠ 当前 bitstream 相位不可在线改（spec/drp_semantics.json: phase_controllable=false）：实现相位恒为静态 90°，49/56 行的相位与请求值不符（err_deg 已如实反映）
-  要在线扫描相位需按 docs/ps-protocol.md 6.2 给 clk_wiz_src 加 CONFIG.PHASE_DUTY_CONFIG 并重建 IP/BD
+扫描完成：51 行，|err_deg| 最大 9.0540° 平均 1.0444°
 CSV 已写入 /tmp/scan.csv
-EXIT=0
-
-$ head -4 /tmp/scan.csv
-freq_nominal,phase_nominal,f_meas_mHz,phase_meas_mdeg,gateCnt,edgeCnt,phaseCnt,phaseCycles,err_deg,phase_controllable
-5000000,0.0,5000000,90000,2010,201,4020,20.000000,90.0000,False
-5000000,22.5,5000000,90000,2010,201,4020,20.000000,67.5000,False
-5000000,45.0,5000000,90000,2010,201,4020,20.000000,45.0000,False
-
-$ wc -l < /tmp/scan.csv
-57
 ```
+
+> 这是**方案 A（裸 MMCM + 极简 DRP 控制器）之后**的输出（旧 `clk_wiz_src` 时代相位不可控，
+> 每行都是 `⚠相位未生效`，那批原始输出保留在 `docs/verify-report.md` §3/§6 与 git 历史里）。
+> 扫描现在按 `45°/D` 网格与 DSP 采样网格两重量化判误差，`err_deg` 最大 9.0540°（20MHz 下
+> 1 个 DSP 周期就是 18°）。
 
 说明（很重要）：
 
-- **频率与计数完全符合冻结模型**：例如 5MHz/90° → `gate=2010 edge=201 phaseCnt=4020`、25MHz/90° →
-  `gate=2002 edge=1001 phaseCnt=4004`，与 `spec/golden/vectors.json` 的期望值逐位相同。
-- **相位列如实反映硬件限制**：当前 bitstream 的相位字未接线（`phase_controllable=false`），
-  所以实现相位恒为 90°；`err_deg` 就是"请求值 - 实现值"的真实差，没有假装成功。
-  CSV 前 9 列是验收要求的列（列名保留，`f_meas_mHz` 的单位按 `docs/ps-protocol.md` 第 5 节
-  字段单位表 = **Hz**），第 10 列 `phase_controllable` 是 Lead 要求追加的。
-
-**相位通路自测**（仿真后端假装"补丁已生效"，用于验证上位机相位链路；真实硬件仍需重建 IP/BD）：
-
-```console
-$ python3 -m dpm_host.sim_server --pty --pty-link /tmp/dpm_sim_pty --phase-model controllable &
-$ python3 -m dpm_host --port /dev/pts/2 scan --freqs 10e6,25e6 --phases 0,22.5,45,90,135 --out /tmp/scan_ctrl.csv
-...
-CSV 前几行（freq_nominal,phase_nominal,f_meas_mHz,phase_meas_mdeg,gateCnt,edgeCnt,phaseCnt,phaseCycles,err_deg,phase_controllable）：
-  10000000,0.0,10000000,0,2005,401,0,0.0,0.0,False
-  10000000,22.5,10000000,18000,2005,401,802,2.0,-4.5,False
-  10000000,45.0,10000000,45000,2005,401,2005,5.0,0.0,False
-  10000000,90.0,10000000,90000,2005,401,4010,10.0,0.0,False
-  10000000,135.0,10000000,135000,2005,401,6015,15.0,0.0,False
-  25000000,0.0,25000000,0,2002,1001,0,0.0,0.0,False
-  25000000,22.5,25000000,22500,2002,1001,1001,1.0,0.0,False
-  25000000,45.0,25000000,45000,2002,1001,2002,2.0,0.0,False
-  ...（共 10 行）
-
-扫描完成：10 行，|err_deg| 最大 4.5000° 平均 0.4500°
-说明：spec/drp_semantics.json 记录当前 bitstream 相位不可在线改（phase_controllable=false），但本次扫描的设备接受了相位设置（仿真后端 --phase-model controllable 模拟的「补丁后」行为）；真实硬件上相位仍恒为 90°，需重建 IP/BD 后才生效
-CSV 已写入 /tmp/scan_ctrl.csv
-EXIT=0
-```
-
-`10000000,22.5°` 的 `-4.5°` 误差是**模型自带的 DSP 量化**（10MHz 下 22.5° = 2.5 个 DSP 周期，
-半数取偶后取 2 个 → 18°，与 golden 的 `phase_quant_error_mdeg` 一致），不是扫描缺陷。
+- **频率与计数符合冻结模型**：例如 5MHz/180° → `gate=2010 edge=201 phaseCnt=8040`、25MHz/315° →
+  `gate=2002 edge=1001 phaseCnt=14014`，与 `spec/golden/vectors.json` 的期望值逐位相同。
+- **相位列反映两重量化**：先吸附到 MMCM 的 `45°/D` 网格，再被测量端的 DSP 采样网格
+  （1 个周期 = `360·f_sig/400MHz`）量化，所以 `err_deg` 在高频点自然变大（20MHz 下 1 个
+  DSP 周期就是 18°）；`cycles` 列即 `phaseCnt / edgeCnt`（整数个 DSP 周期）。
+  CSV 前 9 列是验收要求的列（`f_meas_mHz` 的单位按 `docs/ps-protocol.md` 第 5 节字段单位表
+  = **Hz**），第 10 列 `phase_controllable` 由协议 `IDENTIFY.flags.b4` 决定。
+- **越界组合会被跳过并记录**：相位上界是 9 位相位码 `m ≤ 511`（按 D 逐点，D=125 只到
+  184.139°），越界请求服务端回 `ERR_PARAM`，`scan()` 记一条 `[scan] 跳过 …` 后继续扫。
+  仿真后端（`dpm_host/sim_server.py`）与固件（`ps/src/dpm_cmd.c`）用同一判据，
+  因此仿真里不会出现"真机会拒绝但仿真接受"的点——这条一致性由
+  `host/tests/test_client_over_pty.py` 的 `test_phase_code_overflow_is_rejected` /
+  `test_scan_skips_unrepresentable_points` 钉住。
 
 ### 验收 3：GUI 冒烟测试
 

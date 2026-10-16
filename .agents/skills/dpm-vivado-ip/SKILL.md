@@ -152,8 +152,11 @@ xsim <snapshot> -runall
 ```
 FCLK_CLK0(50MHz) ──► dpm_mmcm_src(clkIn) ──► clkOut1/clkOut2 ──► dpm_top_0/srcSig1,srcSig2
                                        └──► locked ──► dpm_src_drp/locked、dpm_top_0/srcLocked
-dpm_src_drp（AXI4-Lite @0x43C1_0000）──► DRP 口 ──► dpm_mmcm_src
+dpm_src_drp（AXI4-Lite @0x43C1_0000）──► DRP 口 + mmcm_reset ──► dpm_mmcm_src（drpReset）
 ```
+
+重配置时序（控制器内部完成，软件只写镜像 + LOAD）：
+`RST=1`（≥8 个 DCLK）→ 8 笔 DRP 写（DEN/DWE 各一拍，等 DRDY）→ `RST=0` → MMCM 重新锁定。
 
 - `vivado/rtl/dpm_mmcm_src.v`：`MMCME2_ADV` 薄封装（BUFG 反馈 + 每个输出一路
   `BUFGCE`/`BUFH` 的 8 拍 Safe Clock Startup）。
@@ -169,8 +172,11 @@ dpm_src_drp（AXI4-Lite @0x43C1_0000）──► DRP 口 ──► dpm_mmcm_src
 | **`DPM_DRP_OFF_*` 是字节偏移，且 PL 侧寄存器 = MMCM 原始寄存器** | 旧方案是 clk_wiz 的「语义寄存器文件」（0x200 起、单位毫度/百分比）。新方案的寄存器直接镜像 MMCM 的 16 位寄存器值（0x08/0x0C/0x10/0x14/0x18/0x1C/0x20/0x24/0x28） |
 | **`ClkReg1` 的 bit12** | XAPP888 标为 RSVD，但 clk_wiz 生成器在该位**恒置 1**（div=20/40/80/100 实测全为 1）；而 `divide == 1` 的计数器字是 `0x0041`（bit12 为 0）。编码/解码按**实测生成值**，不要按手册推断 |
 | **DIVCLK 寄存器布局与 ClkReg1 不同** | `DivReg = {2'b00, EDGE[13], NO_COUNT[12], HIGH_TIME[11:6], LOW_TIME[5:0]}`；bit12 是 NO_COUNT（divide==1 时为 1）。`divide = 1` 时 HIGH/LOW_TIME 都是占位的 1，**不能相加**，必须先判 NO_COUNT |
-| **xsim 的 unisim MMCM 不支持 DRP 写** | 对 `MMCME2_ADV` 写 0x0A/0x0B 的任意值读回都不变（16 个单比特探针全部无效）。因此**裸 DRP 通路无法在 xsim 里验证**；控制器的正确性要用「DRP 从端模型」验证（`build/analysis/drp_tb/`），真实器件上的行为必须上板确认 |
-| 取权威寄存器值的办法 | 用 clk_wiz 的 **`CONFIG.AXI_DRP=true`（Write DRP 模式）** 生成配置——该模式下 IP 不做任何换算，生成的 `S1_*` 参数就是**权威的 MMCM 寄存器值**（`*_clk_wiz_drp.vhd` 的 generic map 里）。用它校验自己的编码实现 |
+| **DRP 写必须让 MMCM 处于复位** | unisim 模型在 `RST` 为低时对 DRP 写直接报 `Error: RST need to be high when changing parameters through DRP`，并把 `@(negedge RST)` 当作新配置生效时刻；**上板实测同样如此**：不拉 `RST` 时「分频字立即生效、相位字不生效」（相位延迟单元只在复位/重新锁定时重新初始化）。因此 `MmcmDrpController` 的重配置时序是 `RST=1 → 8 笔 DRP 写 → RST=0 → 重新锁定`，`dpm_mmcm_src` 专门开了 `drpReset` 输入（与系统复位相或） |
+| **`DWE` 不能常置 1** | unisim 对「DWE 连续多个 DCLK 拉高」报 `DRC Error` 并结束仿真；DEN 与 DWE 都只在写那一拍拉高 |
+| **AXI 地址译码要用页内偏移** | AXI 互连**不剥离基地址**，从口看到的是完整地址（PS 写 `0x43C1_0008` 时 `addr = 0x43C1_0008`）。早期实现按 `addr[31:6] == 0` 判窗口 → 上板所有 DRP 读写被丢弃（`SET_SIG` 恒回 `ERR_BUSY`），而 xsim/Verilator 激励按裸偏移驱动掩盖了它。正确做法：只译码 `addr[11:6] == 0 && addr[1:0] == 0`，高 20 位交给 BD 的地址段 |
+| **unisim 的 DRP 写是支持的，但语义严格** | 早期 note 写「unisim 不支持 DRP 写」是**错的**：`sim/tb_src_handoff.sv` 用真实 `MMCME2_ADV` 行为模型跑通了整条链（写镜像 → LOAD → 输出相位跟着变）。踩到的是上面两条时序约束，不是「不支持」 |
+| 取权威寄存器值的办法 | 用 clk_wiz 的 **`CONFIG.AXI_DRP=true`（Write DRP 模式）** 生成配置——该模式下 IP 不做任何换算，生成的 `S1_*` 参数就是**权威的 MMCM 寄存器值**；相位拆分另有厂商源码可查：`$XILINX_VIVADO/data/ip/xilinx/clk_wiz_v5_4/mmcm_pll_drp_func_7s_mmcm.vh` 的 `mmcm_pll_phase` / `mmcm_pll_count_calc` |
 
 ### MMCM 寄存器编码（软件侧，已对权威值验证）
 
@@ -180,13 +186,41 @@ ClkReg2 = (EDGE << 7) | (NO_COUNT << 6) | DELAY_TIME[5:0]
 DivReg  = (EDGE << 13) | (NO_COUNT << 12) | (HIGH_TIME[5:0] << 6) | LOW_TIME[5:0]
 
 HIGH_TIME = divide // 2, LOW_TIME = divide - HIGH_TIME（50% 占空比）
-EDGE = divide & 1, NO_COUNT = (divide == 1)
-DELAY_TIME = round(phase_mdeg * divide / 360000) & 0x3F
-PHASE_MUX  = (round(phase_mdeg * divide / 360000) >> 6) & 0x7
+EDGE = (divide == 1) ? 0 : (divide & 1), NO_COUNT = (divide == 1)
+m          = round(phase_mdeg × divide / 45000)   # 9 位相位码，单位 1/8 VCO 周期
+DELAY_TIME = m >> 3        # 相位码的整数部分（VCO 周期）
+PHASE_MUX  = m & 0x7       # 相位码的小数部分（1/8 VCO 周期）
 ```
 
-参考实现与校验：`build/analysis/golden/mmcm_encode.py`、`verify_encoder.py`
-（对金标准 1664 行 + 权威值 14 点全部一致）。
+**相位网格 = 1/8 VCO 周期 = `45/divide` 度**（不是 45°）：22.5° 在 D=40 下 = 20 步
+（`DELAY_TIME=2` + `PHASE_MUX=4`）精确可表示。
+
+**可表示的相位上界与 D 有关（9 位相位码）**：`m <= 511` ⟺ `phase_mdeg × D <= 23017499`
+（`DPM_MMCM_PHASE_MAX_MDEG_NUM`），即 `phase_max = min(23017499/D, 359999)` 毫度：
+
+| D            | 频点             | 上界                      |
+| ------------ | ---------------- | ------------------------- |
+| 20 / 25 / 40 | 50 / 40 / 25MHz  | 359.999°（整个 0~360°）   |
+| 50           | 16 / 20MHz       | 359.999°                  |
+| 80           | 12.5MHz          | 287.718°                  |
+| 100          | 10MHz            | 230.174°                  |
+| 120          | 5 / 6.25MHz      | 191.812°                  |
+| 125          | 8MHz             | 184.139°                  |
+
+越界请求（`m > 511`）会让 `PHASE_MUX`/`DELAY_TIME` 按位截断、相位**回绕**（旧 bitstream
+实测 8MHz 写 270° 读到 86.4°），因此协议层用 `dpm_mmcm_phase_code_fits` 显式回 `ERR_PARAM`。
+**旧的「请求必须 < 180°」规则已作废**（比硬件保守，会白扔掉 D ≤ 63 频点的 180°~360°）：
+相位计测的是无符号间隔（sig1 沿 → 下一个 sig2 沿，落在 `(0, 360°]`），>180° 同样可测，
+上板与 xsim 联调都已覆盖（见 `docs/ps-protocol.md` §6.2/§6.4）。
+
+**`D ≤ 126`**：分频编码成 `HIGH_TIME + LOW_TIME`（各 6 位），上限 `63 + 63 = 126`；
+`D = 127` 的 `LOW_TIME = 64` 会被截断成 63（输出频率差一倍），因此三处实现
+（`DPM_SIG_DIV_MAX` / `host/dpm_host/sig.py::DIV_MAX` / `spec/gen_golden.py::DIV_HARD_MAX`）
+都取 126，`spec/selftest_spec.py` 有自动校验。
+
+参考实现：厂商 `.vh` 的 `mmcm_pll_phase` / `mmcm_pll_count_calc`（相位拆分）、
+`host/dpm_host/sig.py::mmcm_encode_clkout` 与 `ps/include/dpm_regs.h::DPM_MMCM_ENCODE_CLKOUT`
+（两者逐位一致，由 `ps/tests/test_sig.c` 与 `host/tests/test_sig.py` 对拍）。
 
 ---
 
@@ -206,10 +240,13 @@ PHASE_MUX  = (round(phase_mdeg * divide / 360000) >> 6) & 0x7
 - **开了 DRP 的 clk_wiz 没有 `reset` 端口**（复位由 DRP 状态机内部驱动），但仍有 `s_axi_aclk` /
   `s_axi_aresetn`；它的 AXI 接口名是 **`s_axi_lite`**（不是 `s_axi`）。`connect_bd_net` 之前先用
   `get_bd_pins <cell>/*` 确认端口名，别照抄其它 AXI IP 的命名。
-- **输出选点要考虑相位范围**：MMCM 每个输出的相位寄存器覆盖 64 个 VCO 周期，换成输出相位是
-  `64 / D` 个输出周期（D = CLKOUTx 分频）。本仓库初始工作点 25MHz（VCO 800MHz、D = 32）→ 2 个
-  输出周期，0～360° 全覆盖；D = 64（12.5MHz）刚好 1 个周期；D = 128（6.25MHz）只剩 0～180°。
+- **输出选点要考虑相位范围**：MMCM 每个输出的相位寄存器覆盖 64 个 VCO 周期（9 位相位码），
+  换成输出相位是 `64 / D` 个输出周期（D = CLKOUTx 分频），即上界 `min(23017499/D, 359999)`
+  毫度。本仓库初始工作点 25MHz（VCO 1000MHz、D = 40）→ 1.6 个输出周期，0～360° 全覆盖；
+  D = 64（15.625MHz）刚好 1 个周期（359.648°）；D = 128（6.25MHz）只剩 0～180°。
   要更低频率时优先把 VCO 调到下限（600MHz），不要在 MMCM 上把 D 拉到 128 再想要大相位。
+  另外**信号周期必须是 DSP 周期（2.5ns）的整数倍**（`8D / MULT` 为整数），否则每个信号周期的
+  相位计数窗口在 k 与 k+1 之间交替，`phaseCnt % edgeCnt == 0` 不再成立（xsim 联调实测）。
 - **不要在 IP 里对 MMCM 输出再做数字分频**：本仓库试过「测量时钟域里数边沿后分频（÷N）把频率
   做到 1kHz」，除了低频端相位差会带上 0～1 个源周期的固定偏移，分频器本身在 400MHz 域里的
   「取配置字 → 计数终值减法 → 比较器 → 计数器」路径也一直违约（实测 −1.7ns，即使在模块内先打

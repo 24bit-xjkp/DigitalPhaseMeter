@@ -1,6 +1,9 @@
-"""pytest 的路径兜底：把 `host/` 加进 `sys.path`，这样从仓库根目录
-`python3 -m pytest host/tests -q` 也能 `import dpm_host`（本机没有 pytest，
-本文件对 `python3 -m unittest` 无影响）。
+"""pytest 的路径兜底：把 `host/` 加进 `sys.path`。
+
+仓库根的 `pyproject.toml` 已经配置了 `pythonpath = ["host"]`（相对 rootdir 解析），
+所以「仓库根目录 `uv run pytest`」与「`host/` 目录 `uv run pytest`」两种调用都能
+`import dpm_host`。本文件保留一段等价的兜底逻辑，用于 rootdir 不是仓库根目录的
+非标准调用（例如直接 `pytest host/tests/test_protocol.py`）。
 """
 
 from __future__ import annotations

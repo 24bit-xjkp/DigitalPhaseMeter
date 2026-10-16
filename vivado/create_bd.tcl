@@ -379,6 +379,9 @@ connect_bd_net [get_bd_pins dpm_src_drp_0/drp_den] [get_bd_pins dpm_mmcm_src_0/d
 connect_bd_net [get_bd_pins dpm_src_drp_0/drp_dwe] [get_bd_pins dpm_mmcm_src_0/drpDwe]
 connect_bd_net [get_bd_pins dpm_mmcm_src_0/drpDout] [get_bd_pins dpm_src_drp_0/drp_dout]
 connect_bd_net [get_bd_pins dpm_mmcm_src_0/drpDrdy] [get_bd_pins dpm_src_drp_0/drp_drdy]
+# 重配置复位：控制器在写 DRP 期间拉高，MMCM 内部与系统复位相或
+# （MMCM 的 DRP 写要求器件处于复位，否则相位字不生效——上板实测）
+connect_bd_net [get_bd_pins dpm_src_drp_0/mmcm_reset] [get_bd_pins dpm_mmcm_src_0/drpReset]
 connect_bd_net [get_bd_pins dpm_mmcm_src_0/locked] [get_bd_pins dpm_src_drp_0/locked]
 # 两路源信号与锁定指示送给 IP
 connect_bd_net [get_bd_pins dpm_mmcm_src_0/clkOut1] [get_bd_pins dpm_top_0/srcSig1]

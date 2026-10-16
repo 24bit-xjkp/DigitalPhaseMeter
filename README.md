@@ -9,9 +9,9 @@
 两路输出直接作为被测信号）。**PS 侧软件与 PC 侧上位机已完成**：PS 侧是 freestanding 裸机 C 串口服务端（读写 AXI 寄存器与
 MMCM 的 DRP 口），PC 侧是 Python 上位机（CLI + Tk GUI，相位差 0~360° 与频率显示、单次/连续、
 片内源频率与相位、输入源切换、多频点多相位扫描）。协议见 [`docs/ps-protocol.md`](docs/ps-protocol.md)，
-验证结果见 [`docs/verify-report.md`](docs/verify-report.md)（7 频点 × 4 相位请求共 28 个测量点
-在 pty 串口上全部通过；**但相位在线扫描当前不可用**，原因是 clk_wiz 的 DRP 相位字未接入
-MMCM 重配置逻辑，实测两路输出恒相差 90°——详见 [`docs/verify-drp.md`](docs/verify-drp.md) 与路线图第 5 项）。
+验证结果见 [`docs/verify-report.md`](docs/verify-report.md)（第 10 节是 2026-10-16 的复验：
+**相位在线设定已上板验证**，`onboard_accept.py` 44/44、扫描 32/32，端到端 28/28；
+22.5° 这类需要 `PHASE_MUX` 细调的点也成立）。
 
 ## 测量原理
 
@@ -23,7 +23,11 @@ MMCM 重配置逻辑，实测两路输出恒相差 90°——详见 [`docs/verif
 | `edgeCnt`  | 窗口内参考信号 `sig1` 的上升沿数                        | `gateCnt × T_clock / T_sig1`                               |
 | `phaseCnt` | 每个参考周期内「参考沿 → 被测沿」的高速时钟周期数累加值 | `phaseOffset / T_dspClock × edgeCnt`                       |
 
-`phaseCnt` 的分辨率就是一个高速时钟周期，因此高速时钟频率越高、闸门时间越长，测量越精确。被测相位偏移需要小于半个信号周期，`phaseCnt` 与相位差才保持一一对应。各观测量的容限与精度下界见 [`.agents/skills/dpm-measurement-model`](.agents/skills/dpm-measurement-model/SKILL.md)。
+`phaseCnt` 的分辨率就是一个高速时钟周期，因此高速时钟频率越高、闸门时间越长，测量越精确。
+`phaseCnt / edgeCnt` 量的是从 `sig1` 上升到**下一个** `sig2` 上升沿的**无符号**间隔，因此
+`0°~360°` 的相位差都与读数一一对应（`>180°` 同样可测，不需要"小于半个周期"；只有按有符号
+偏移解释时才需要 `|δ| < 180°`，且 `0°` 会因"等下一个沿"读成一个整周期）。各观测量的容限与
+精度下界见 [`.agents/skills/dpm-measurement-model`](.agents/skills/dpm-measurement-model/SKILL.md)。
 
 ## 模块结构
 
@@ -257,13 +261,28 @@ vivado -mode batch -source vivado/build_bitstream.tcl  # 综合 / 实现 / bitst
    见 [`ps/`](ps/README.md)（Zynq PS 侧 freestanding 裸机 C 服务端）与 [`host/`](host/README.md)
    （PC 侧 Python 上位机：CLI + Tk GUI）。支持可变闸门时间、连续/单次测量、片内/片外信号源切换、
    片内源频率与相位设定、流模式上报；协议见 [`docs/ps-protocol.md`](docs/ps-protocol.md)。
-   验证结果见 [`docs/verify-report.md`](docs/verify-report.md)（28 个测量点全部通过，
+   验证结果见 [`docs/verify-report.md`](docs/verify-report.md)（测量点全部通过，
    但**相位扫描未真正生效**，见下）。
-5. **PL 侧：让在线相位扫描真正可用** —— 旧 `clk_wiz_src` 方案的 DRP 相位字**没有接入 MMCM
-   重配置逻辑**（`PHASE_DUTY_CONFIG=false`），两路输出恒相差 90°。现在片内源已换成
-   **裸 MMCM + 极简 DRP 控制器**（方案 A）：相位字就是 MMCM 的相位寄存器，由 PS 直接给出，
-   不再经过厂商 IP 的换算，因此这条限制不再存在。**是否真的生效仍需上板确认**
-   （xsim 的 unisim MMCM 不支持 DRP 写，控制器只在 DRP 从端模型里验证过）。
-6. **PS UART 与上板** —— PS7 的调试串口现在是 `create_bd.tcl` 的流水线参数
+5. ~~**PL 侧：让在线相位扫描真正可用**~~ —— **已完成并上板验证（2026-10-16）**：片内源换成
+   **裸 MMCM + 极简 DRP 控制器**（方案 A）后，相位由 PS 直接编码进 MMCM 的
+   `PHASE_MUX`/`DELAY_TIME`（网格 `45°/D`）。上板过程中修掉 3 个只有硬件才暴露的缺陷
+   （DRP 地址窗口误判完整地址、DRP 写期间未拉高 MMCM 的 `RST`、`DWE` 常置 1），
+   并改正了 PS 侧 MMCM 相位编码里接反的位域与 45° 吸附遗留。
+   证据：上板 8MHz 请求 22.5° → 实测 21.602°（3 个 DSP 周期）、8MHz/90° → 86.367°
+   （与金标准逐位一致）；`onboard_accept.py` 44/44、扫描 32/32；
+   xsim 联调（真实 MMCM 行为模型 + DRP 控制器 + 测量通路）4/4 点通过。
+   详见 [`docs/verify-report.md`](docs/verify-report.md) 第 10 节。
+6. ~~**扩大相移覆盖：更多频点 + >180° 相移**~~ —— **已完成并上板验证（2026-10-16 第二轮）**：
+   相位请求的上界从写死的 `< 180°` 改为**硬件依据**——9 位相位码
+   `m = round(相位 × D / 45000) <= 511`，即可请求上界 `min(23017499/D, 359999)` 毫度
+   （D=20/25/40/50 覆盖整个 `0~360°`，D=120 到 191.812°、D=125 到 184.139°）；越界请求
+   显式回 `ERR_PARAM`（字段截断会让相位回绕，旧 bitstream 实测 8MHz 写 270° 读到 86.4°）。
+   冻结频点从 7 个扩到 **10 个**（5/6.25/8/10/12.5/16/20/25/40/50MHz，覆盖 VCO
+   600/750/800/1000MHz 与 D = 20/25/40/50/80/100/120/125），相位点**逐频点**按上界裁剪
+   （含 22.5° 与 180°/225°/270°/315°，必要时用相位码上界点 183.96°/191.625° 兜底），
+   共 **79 个点、其中 31 个 ≥180°**。证据：xsim 联调 79/79（`HANDOFF_SUMMARY ... fails=0`）、
+   上板验收扫描 79/79、C/Python/spec 三侧单测与金标准 79 条向量全部通过。
+   详见 [`docs/verify-report.md`](docs/verify-report.md) 第 11 节。
+7. **PS UART 与上板** —— PS7 的调试串口现在是 `create_bd.tcl` 的流水线参数
    （`-uart uart1`，默认；`uart0` / `none` 可选），重建 BD 即带上 UART1（MIO48/49、115200），
    不再需要单独的补丁脚本；上板步骤见 [`docs/bringup.md`](docs/bringup.md)。

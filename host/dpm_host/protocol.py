@@ -157,6 +157,7 @@ FLAG_SIGNAL_SOURCE = 1 << 0  # b0 片内信号源可用
 FLAG_CONTINUOUS = 1 << 1  # b1 支持连续模式
 FLAG_STREAM = 1 << 2  # b2 支持流模式
 FLAG_IRQ = 1 << 3  # b3 中断驱动
+FLAG_PHASE_CTRL = 1 << 4  # b4 相位可在线设定（方案 A；旧 clk_wiz_src bitstream 为 0）
 
 #: EVENT 通知的 code 语义（协议第 3.3 节）。
 EVENT_NAMES = {
@@ -520,6 +521,11 @@ class Identify:
     @property
     def irq_driven(self) -> bool:
         return bool(self.flags & FLAG_IRQ)
+
+    @property
+    def phase_controllable(self) -> bool:
+        """b4 = phaseControllable：写 MMCM 相位字段能否真的改变输出相位。"""
+        return bool(self.flags & FLAG_PHASE_CTRL)
 
     @property
     def ver_text(self) -> str:

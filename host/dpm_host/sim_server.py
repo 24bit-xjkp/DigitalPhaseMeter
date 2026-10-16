@@ -272,8 +272,15 @@ class SimPs:
         # SIG_CTRL 与输入选择同域，写通道不再因配置而挂起（wr_ready 恒真）；这里仍推进一次
         # 模型时间，让输入选择完成跟随
         self.fpga.poll()
+        if not (0 <= int(phase_milli_deg) < S.FULL_SCALE_MILLI_DEG):
+            return self._err(P.Cmd.ERR_PARAM)
         sol = S.solve_sig(freq_hz, phase_milli_deg, self.fpga.slow_hz, self.fpga.semantics)
         if not sol.ok:
+            return self._err(P.Cmd.ERR_PARAM)
+        # 相位上界 = 9 位相位码（按 D 逐点）：越界请求会让 MMCM 的 PHASE_MUX/DELAY_TIME
+        # 截断、相位**回绕**，固件回 ERR_PARAM，仿真后端必须与之一致——否则上位机在仿真里
+        # 会看到真机上不存在的「接受」（例如 5MHz/225° 被接受后读数变成 31.5°）。
+        if not S.phase_code_fits(phase_milli_deg, sol.div):
             return self._err(P.Cmd.ERR_PARAM)
         self.fpga.configure_sig(freq_hz, phase_milli_deg)
         info = self._current_sig_info()

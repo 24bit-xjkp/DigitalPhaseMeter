@@ -83,6 +83,26 @@ sim/run_xsim.sh        # xsim：AXI4 接口与顶层 IP（SystemVerilog 激励�
   `==== 测试通过`（xsim 的退出码不足以判定，`$fatal` 也可能返回 0）。
 - 报告里写明实际跑的目标、用例数与断言数（doctest 结尾会打印 `test cases / assertions / Status`）。
 
+### Python（`host/` 上位机、`spec/` 校验脚本）
+
+环境由 **uv** 管理（`uv.lock` + `.venv`），不要手工 `pip install`；测试是 **pytest** 原生写法：
+
+```bash
+uv run pytest -q                      # 全量（testpaths = host/tests，仓库根或 host/ 下都能跑）
+uv run black --check --line-length 140 host/ spec/ ps/tests/   # 已改的 .py 文件
+uv run isort --check-only --profile black --line-length 140 <改动的 .py>
+uv run python spec/selftest_spec.py   # 文档 ↔ 头文件 ↔ 金标准的一致性自检
+uv run python host/tools/gui_smoke.py # 改了 GUI 时跑：连接/测量/扫描 + 截图（QT_QPA_PLATFORM=offscreen 可无头）
+```
+
+改了 C 服务端（`ps/`）还要重建验证台并跑端到端：
+
+```bash
+bash ps/build.sh && cmake --build ps/build/cmake -j8
+ctest --test-dir ps/build/cmake --output-on-failure
+bash ps/tools/onboard_accept_sim.sh                # 离线验收演练（C 验证台，44 项）
+```
+
 ## 4. 交付范围
 
 ```bash

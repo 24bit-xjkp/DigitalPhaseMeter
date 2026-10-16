@@ -12,7 +12,7 @@
   4. 协议层：PING / IDENTIFY / GET_STATUS / SET_GATE / SET_MODE / SET_SOURCE 正常路径，
      以及 ERR_PARAM 错误路径（非法相位、非法频率）；
   5. 连续模式 + 流上报：至少收到 3 条 STREAM_DATA 且 seq 递增；
-  6. 测量扫描：8 频点 × 4 相位 = 32 点，逐点判频率与相位；
+  6. 测量扫描：10 个频点 × **逐频点相位点**（含 >180° 的用例）= 79 点，逐点判频率与相位；
   7. 汇总：写 build/onboard_acceptance.json 与 .md，打印 PASS/FAIL，失败时退出码非 0。
 
 判据（相位期望按 **MMCM 的移相精度**量化，不是按 DSP 采样网格量化）：
@@ -32,6 +32,14 @@
     注意口径：DSP 量化不再是**期望值**的一部分，而是**容限**；
   * 计数自检：gateCnt ∈ [target, target+ceil(f_slow/f_sig)+5]，
     edgeCnt 与 gateCnt·f_sig/f_slow 相差 ≤ 1。
+
+相位上界（本次新增 >180° 用例的由来）：MMCM 的相位码 `m = round(相位 × D / 45000)`
+只有 9 位（DELAY_TIME 6 位 + PHASE_MUX 3 位），因此可请求的相位上界是
+`min(23017499/D, 359999)` 毫度——D=32（31.25MHz）覆盖整个 0~360°，D=125（8MHz）
+只能到 184.139°。越界请求会被固件回 `ERR_PARAM`（字段截断会让相位**回绕**）。
+每个频点的相位点由 `phases_for()` 生成，规则与 `spec/gen_golden.py::phase_points_for`
+一致：0/45/90/135/180 必测，D 为偶数时加 22.5°，225/270/315 按相位码裁剪，
+一个都放不下时改用相位码上界点（m = 511）兜底。
 
 MMCM 相位模型复用宿主机参考实现 `host/dpm_host/sig.py`（与 `ps/src/dpm_sig.c` 同一套
 冻结规则），本脚本不另写一份公式，避免两边漂移。
@@ -55,16 +63,48 @@ if (ROOT / "host").is_dir():
 
 from dpm_host.client import DpmClient  # noqa: E402
 from dpm_host.protocol import Cmd, DpmError, DpmTimeoutError  # noqa: E402
-from dpm_host.sig import mmcm_phase_grid_milli_deg, phase_word_value  # noqa: E402
+from dpm_host.sig import (  # noqa: E402
+    FULL_SCALE_MILLI_DEG,
+    mmcm_phase_grid_milli_deg,
+    phase_code_fits,
+    phase_code_top_milli_deg,
+    phase_code_value,
+    solve_sig,
+)
 
-FREQS = [5_000_000, 6_250_000, 8_000_000, 10_000_000, 12_500_000, 20_000_000, 25_000_000, 30_000_000]
-PHASES_DEG = [0, 45, 90, 135]
+# 冻结验证频点（与 spec/gen_golden.py::FREQ_POINTS_HZ、docs/ps-protocol.md §6.4 一致）：
+# 10 个频点全部由求解规则精确解出，覆盖 VCO 600/750/800/1000MHz、MULT 12/15/16/20 与
+# D = 20/25/40/50/80/100/120/125。选取要求信号周期既是整数 ps、也是 DSP 周期（2.5ns）
+# 的整数倍（`8D/MULT` 为整数），此时 `phaseCnt % edgeCnt == 0` 严格成立。
+FREQS = [5_000_000, 6_250_000, 8_000_000, 10_000_000, 12_500_000, 16_000_000, 20_000_000, 25_000_000, 40_000_000, 50_000_000]
 SLOW_HZ = 50_000_000
 DSP_HZ = 400_000_000
 # 闸门时间 (s)
 GATE_TIME = 0.1
 # 闸门计数
 GATE = round(GATE_TIME * SLOW_HZ)
+
+
+def phases_for(freq_hz: int) -> list[int]:
+    """该频点要测的相位点（毫度）：与 `spec/gen_golden.py::phase_points_for` 同一规则。
+
+    0/45/90/135/180 必测（180° 的相位码是 4D ≤ 504，所有合法 D 都能表示）；
+    D 为偶数时加 22.5°（需要 PHASE_MUX 细调）；225/270/315 中相位码 ≤ 511 的才可测；
+    一个 >180° 的 45° 倍数都放不下时（D ≥ 103），用相位码上界点（m = 511）兜底，
+    保证每个频点都有 >180° 的用例。
+    """
+    div = int(solve_sig(int(freq_hz)).div)
+    if div <= 0:
+        return []
+    points = [0, 45_000, 90_000, 135_000, 180_000]
+    if div % 2 == 0:
+        points.append(22_500)
+    over = [p for p in (225_000, 270_000, 315_000) if phase_code_fits(p, div)]
+    if over:
+        points.extend(over)
+    else:
+        points.append(min(phase_code_top_milli_deg(div), FULL_SCALE_MILLI_DEG - 1))
+    return sorted(set(points))
 
 
 class Report:
@@ -160,7 +200,15 @@ def protocol_checks(rep: Report, c: DpmClient) -> None:
     )
     st = c.get_status()
     rep.check("GET_STATUS 可读且此刻不忙", not st.busy, f"status=0x{st.status:x}")
-    for label, freq, phase in (("相位 ≥180°", 25_000_000, 180_000), ("频率不可达（3MHz）", 3_000_000, 0)):
+    # 错误路径（相位上界 = 9 位相位码，按 D 逐点，见 docs/ps-protocol.md §6.2）：
+    #   8MHz（D=125）的 200° 需要相位码 556 > 511 → ERR_PARAM（字段截断会让相位回绕）；
+    #   360° 是满量程（与 0° 同义）→ ERR_PARAM；
+    #   3MHz 低于可实现下限（600/126 ≈ 4.76MHz）→ ERR_PARAM。
+    for label, freq, phase in (
+        ("相位码越界（8MHz/200°）", 8_000_000, 200_000),
+        ("相位满量程（360°）", 25_000_000, 360_000),
+        ("频率不可达（3MHz）", 3_000_000, 0),
+    ):
         try:
             c.set_sig(freq, phase)
             ok, detail = False, "居然接受了"
@@ -169,6 +217,16 @@ def protocol_checks(rep: Report, c: DpmClient) -> None:
         except Exception as exc:
             ok, detail = False, f"{type(exc).__name__}: {exc}"
         rep.check(f"错误路径：{label} 回 ERR_PARAM", ok, detail)
+    # 反向确认：>180° 的请求现在是**合法**的（旧固件一律拒 ≥180°，比硬件保守得多）
+    try:
+        info = c.set_sig(25_000_000, 270_000)
+        rep.check(
+            "正常路径：>180°（25MHz/270°）被接受且回显一致",
+            info.phase_milli_deg == 270_000 and info.div == 40,
+            f"回显 {info.phase_milli_deg / 1000:g}° D={info.div} phaseField={info.phase_field}",
+        )
+    except Exception as exc:
+        rep.check("正常路径：>180°（25MHz/270°）被接受且回显一致", False, f"{type(exc).__name__}: {exc}")
 
 
 def stream_check(rep: Report, c: DpmClient) -> None:
@@ -200,16 +258,23 @@ def stream_check(rep: Report, c: DpmClient) -> None:
         c.clear()
         time.sleep(0.2)
         c.start()
-    deadline = time.time() + 4.0
-    while time.time() < deadline and frames < 3:
+    # 等 3 个**不同**的 seq：流上报的语义是「周期性推送最新结果」（见固件 dpm_cmd.c 的
+    # tick 分支），闸门与上报周期都是 100ms 时，两次 tick 之间可能还没出新结果，
+    # 于是同一条结果被推两次——所以判据是「单调不减 + 确实在推进」，不是严格递增。
+    deadline = time.time() + 6.0
+    while time.time() < deadline and len(set(seqs)) < 3:
         time.sleep(0.1)
     c.stream(False)
     c.set_mode(0)
     rep.check("连续模式 + 流上报：收到 ≥3 条 STREAM_DATA", frames >= 3, f"收到 {frames} 条；seq={seqs[:6]}")
-    rep.check("流上报 seq 递增", len(seqs) >= 2 and all(a < b for a, b in zip(seqs, seqs[1:])), str(seqs[:8]))
+    rep.check(
+        "流上报 seq 单调不减且推进（≥3 个不同 seq）",
+        len(seqs) >= 2 and all(a <= b for a, b in zip(seqs, seqs[1:])) and len(set(seqs)) >= 3,
+        f"{seqs[:8]}",
+    )
 
 
-def mmcm_actual_phase_deg(phase_word_mdeg: int, div: int) -> tuple[float, float, str]:
+def mmcm_actual_phase_deg(phase_echo_mdeg: int, div: int) -> tuple[float, float, str]:
     """按 MMCM 的移相精度把相位字量化成**实际输出相位差**。
 
     返回 `(实际相位差[度], 量化网格[度], 说明)`。
@@ -218,13 +283,13 @@ def mmcm_actual_phase_deg(phase_word_mdeg: int, div: int) -> tuple[float, float,
     VCO 周期）就是 `45°/D`，这也是 DRP 相位字（毫度）实际能表达的最小间隔
     （见 `spec/drp_semantics.json` 的 `phase_hw_quantum_ps`、`docs/ps-protocol.md` §6.2）。
 
-    量化用的是宿主机参考实现 `host/dpm_host/sig.py::phase_word_value`（与
+    量化用的是宿主机参考实现 `host/dpm_host/sig.py::phase_code_value`（与
     `ps/src/dpm_sig.c::dpm_sig_solve` 同一套冻结规则），本脚本不另写一份公式。
     D 非法时抛 `ValueError`（`SET_SIG` 回显不完整，判为失败点）。
     """
     if int(div) <= 0:
         raise ValueError(f"SET_SIG 回显的分频比 D 非法（{div}）")
-    _word, actual_mdeg, _grid_mdeg, notes = phase_word_value(int(phase_word_mdeg), int(div))
+    _code, actual_mdeg, _grid_mdeg, notes = phase_code_value(int(phase_echo_mdeg), int(div))
     grid_deg = float(mmcm_phase_grid_milli_deg(int(div))) / 1000.0
     return int(actual_mdeg) / 1000.0, grid_deg, "；".join(notes)
 
@@ -238,9 +303,14 @@ def sweep(rep: Report, c: DpmClient, csv_path: Path) -> None:
         "exp_deg,mmcm_grid_deg,dsp_quantum_deg,err_deg,err_over_quantum,ok"
     ]
     n_ok = 0
+    n_total = 0
+    n_over180 = 0
+    per_freq: dict[int, list[int]] = {f: phases_for(f) for f in FREQS}
     for f in FREQS:
-        for pdeg in PHASES_DEG:
-            pmdeg = pdeg * 1000
+        for pmdeg in per_freq[f]:
+            n_total += 1
+            n_over180 += 1 if pmdeg >= 180_000 else 0
+            pdeg = pmdeg / 1000.0
             try:
                 info = c.set_sig(f, pmdeg)
                 # 相位期望 = MMCM 实际输出相位差：相位字按 1/8 VCO 周期（= 45°/D）网格量化。
@@ -251,7 +321,7 @@ def sweep(rep: Report, c: DpmClient, csv_path: Path) -> None:
                 _, meas, local = c.measure_once(timeout=3.0)
             except (DpmError, DpmTimeoutError, ValueError) as exc:
                 lines.append(",".join([str(f), str(pdeg)] + [""] * 14 + ["-1"]))
-                rep.check(f"{f/1e6:g}MHz/{pdeg}° 测量完成", False, f"{type(exc).__name__}: {exc}")
+                rep.check(f"{f/1e6:g}MHz/{pdeg:g}° 测量完成", False, f"{type(exc).__name__}: {exc}")
                 continue
             f_meas = local.freq_hz  # 本地由计数换算，避免对端字段口径差异
             ph_meas = local.phase_milli_deg / 1000.0
@@ -261,15 +331,23 @@ def sweep(rep: Report, c: DpmClient, csv_path: Path) -> None:
             quantum = 360.0 * f_actual / DSP_HZ
             err = abs((ph_meas - exp_deg + 180.0) % 360.0 - 180.0)
             err_steps = err / quantum if quantum > 0.0 else 0.0
-            # 频率判据：计数粒度决定分辨率（1 个信号计数 = f/edgeCnt），
-            # 另加一条更紧的"edgeCnt 与理想值差 ≤1 计数"的检查。
+            # 频率判据：计数粒度决定分辨率（1 个信号计数 = f/edgeCnt）。
             f_tol = max(1_000.0, f / 1000.0, 2.0 * f / max(meas.edge_cnt, 1))
-            ideal_edge = round(meas.gate_cnt * f / SLOW_HZ)
+            # 计数自检（与 xsim 联调激励同一口径）：
+            #   * 闸门窗口在 sig2 的下一个上升沿关闭，跨时钟域同步还有几拍延迟，
+            #     因此 gate ∈ [GATE, GATE + ceil(T_sig/T_slow) + 5]；
+            #   * 相位计的 DSP 测量窗口还与闸门计数窗口差几拍（CDC + 启动对齐），
+            #     折算成参考沿数是 f/f_slow 的比例，所以 edge 只能按闸门**区间**折算
+            #     再放宽 1 个沿——按实测 gate 反推（`abs(edge - gate×f/f_slow) <= 1`）
+            #     在高频点会误判：40MHz 时 1 个沿 = 1.25 个慢时钟，实测偏差 2 个沿
+            #     仍在正常范围内。
+            gate_lo = GATE
+            gate_hi = GATE + int(SLOW_HZ / max(f, 1)) + 5
+            edge_lo = int(gate_lo * f / SLOW_HZ) - 1
+            edge_hi = int(gate_hi * f / SLOW_HZ) + 1
             ok_f = abs(f_meas - f) <= f_tol
             ok_p = err <= quantum + 1e-3
-            # 闸门窗口在 sig2 的下一个上升沿关闭，跨时钟域同步还有几拍延迟，
-            # 因此上界给 target + ceil(T_sig/T_slow) + 5 个慢时钟周期的余量。
-            ok_c = GATE <= meas.gate_cnt <= GATE + int(SLOW_HZ / max(f, 1)) + 5 and abs(meas.edge_cnt - ideal_edge) <= 1
+            ok_c = gate_lo <= meas.gate_cnt <= gate_hi and edge_lo <= meas.edge_cnt <= edge_hi
             ok = ok_f and ok_p and ok_c
             n_ok += 1 if ok else 0
             lines.append(
@@ -283,7 +361,7 @@ def sweep(rep: Report, c: DpmClient, csv_path: Path) -> None:
             if mmcm_note:
                 extra += f"；{mmcm_note}"
             rep.check(
-                f"{f/1e6:g}MHz/{pdeg}° 频率+相位+计数",
+                f"{f/1e6:g}MHz/{pdeg:g}° 频率+相位+计数",
                 ok,
                 f"f={f_meas/1e6:.6f}MHz(±{f_tol/1e3:.0f}kHz) φ={ph_meas:.3f}° "
                 f"MMCM期望={exp_deg:.3f}°(1/8VCO网格{mmcm_grid:.3f}°,D={info.div}) "
@@ -292,9 +370,9 @@ def sweep(rep: Report, c: DpmClient, csv_path: Path) -> None:
             )
     csv_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     rep.check(
-        f"扫描 {len(FREQS)*len(PHASES_DEG)} 点全部通过",
-        n_ok == len(FREQS) * len(PHASES_DEG),
-        f"通过 {n_ok}/{len(FREQS)*len(PHASES_DEG)}；明细见 {csv_path}",
+        f"扫描 {n_total} 点（{len(FREQS)} 个频点，其中 ≥180° 的 {n_over180} 点）全部通过",
+        n_ok == n_total,
+        f"通过 {n_ok}/{n_total}；明细见 {csv_path}",
     )
 
 

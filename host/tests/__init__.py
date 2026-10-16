@@ -1,1 +1,1 @@
-"""测试包（`python3 -m unittest discover -s tests -t .` 需要它是可导入的包）。"""
+"""host 侧上位机的 pytest 测试包（`uv run pytest`，见仓库根 `pyproject.toml`）。"""

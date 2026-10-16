@@ -340,7 +340,7 @@ int main(int argc, char **argv)
     {
         dpm_sig_t sig;
         dpm_sig_solve_t sst;
-        dpm_sig_solve(freq_hz, phase_mdeg, slow_hz, dpm_sig_phase_unit_deg_milli(), &sig, &sst);
+        dpm_sig_solve(freq_hz, phase_mdeg, slow_hz, &sig, &sst);
         if (sst.ok != 0) {
             if (dpm_sig_apply(&ctx, &sig) == 0) {
                 ctx.sig = sig;
@@ -357,8 +357,8 @@ int main(int argc, char **argv)
 
     dpm_rx_init(&rx);
     if (verbose != 0) {
-        fprintf(stderr, "[host_main] ready: slow=%u Hz dsp=%u Hz seed=%u unit=%u mdeg/step\n",
-                slow_hz, dsp_hz, seed, dpm_sig_phase_unit_deg_milli());
+        fprintf(stderr, "[host_main] ready: slow=%u Hz dsp=%u Hz seed=%u\n",
+                slow_hz, dsp_hz, seed);
     }
 
     uint32_t loop_iters = 0u;

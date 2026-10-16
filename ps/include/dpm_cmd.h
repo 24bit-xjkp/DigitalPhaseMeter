@@ -262,19 +262,17 @@ size_t dpm_enc_event(uint8_t *out, size_t cap, const dpm_event_t *v);
 
 /* ------------------------------------------------------- 片内源（dpm_sig.c） */
 
-/** 相位字段一个步长对应的毫度（默认 45000 = 45°，见 `dpm_sig.c` 顶部宏）。 */
-uint32_t dpm_sig_phase_unit_deg_milli(void);
-
-/** 相位字段 1 LSB 对应的时间（ps），由当前单位与 VCO 决定。 */
+/** 相位 1 步（1/8 VCO 周期）对应的时间（ps）。步长只由 VCO 决定。 */
 uint32_t dpm_sig_phase_step_ps(uint32_t vco_hz);
 
-/** clk_out2 相位字（0x218）的内容，单位**毫度**（复位值 90000 = 90.000°）。
+/** 把请求相位吸附到硬件网格（1/8 VCO 周期 = 45°/divide）后返回实际相位（毫度）。
  *
- * 当前 bitstream 里该字未接到 MMCM 重建逻辑，写它不改变输出相位（见 flags.b4）。 */
-uint32_t dpm_sig_phase_word_mdeg(const dpm_sig_t *sig);
+ * 方案 A 下相位由 MMCM 的 PHASE_MUX（1/8 VCO 周期）与 DELAY_TIME（整数 VCO 周期）
+ * 共同表示，因此网格是 `45°/D` 而不是 45°：22.5° 在 D=40 下精确可表示。 */
+uint32_t dpm_sig_snap_phase_milli_deg(uint32_t phase_milli_deg, uint32_t divide);
 
-/** 把请求相位吸附到字段网格后返回实际相位（毫度）。 */
-uint32_t dpm_sig_snap_phase_milli_deg(uint32_t phase_milli_deg);
+/** 兼容旧接口的历史函数：方案 A 下相位不再有独立的毫度字，恒返回 0。 */
+uint32_t dpm_sig_phase_word_mdeg(const dpm_sig_t *sig);
 
 /** 按协议 §6 的 5 步时序把工作点写进 MMCM DRP 并等待重新锁定。
  *

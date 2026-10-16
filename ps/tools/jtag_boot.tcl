@@ -28,7 +28,7 @@ puts "T1 rst=$er state=[state] pc=[rrd pc]"
 targets -set -filter {name =~ "xc7z010"}
 fpga -f $bit
 targets -set -filter {name =~ "APU"}
-source /tmp/xsaprobe/ps7_init.tcl
+source $root/build/vivado/bd_proj/dpm_bd.gen/sources_1/bd/dpm_system/ip/dpm_system_processing_system7_0_0/ps7_init.tcl
 ps7_init
 ps7_post_config
 dow -data $bin 0x0

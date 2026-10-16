@@ -136,11 +136,26 @@ def case_modes(link) -> None:
 
 def case_errors(link) -> None:
     print("[3] 错误路径")
+    # 相位上界 = 9 位相位码（按 D 逐点，见 docs/ps-protocol.md §6.2）：
+    # 25MHz（D=40）能表示整个 0~360°，而 8MHz（D=125）在 184.139° 以上越界
+    # （MMCM 的 PHASE_MUX/DELAY_TIME 字段会截断、相位回绕成另一个值）。
     try:
-        link.set_sig(25_000_000, 200_000)      # 相位 > 180°
-        record("非法相位 → ERR_PARAM", False, "未报错")
+        link.set_sig(8_000_000, 200_000)       # 相位码 556 > 511
+        record("相位码越界（8MHz/200°）→ ERR_PARAM", False, "未报错")
     except vs.ParamError:
-        record("非法相位 → ERR_PARAM", True, "相位 200° 被拒")
+        record("相位码越界（8MHz/200°）→ ERR_PARAM", True, "相位码 556 > 511 被拒")
+    try:
+        link.set_sig(25_000_000, 360_000)      # 满量程（与 0° 同义）
+        record("相位满量程（360°）→ ERR_PARAM", False, "未报错")
+    except vs.ParamError:
+        record("相位满量程（360°）→ ERR_PARAM", True, "360° 被拒")
+    # 反向确认：>180° 的请求现在是**合法**的（旧固件一律拒 ≥180°，属过度保守）
+    try:
+        echo = link.set_sig(25_000_000, 270_000)
+        record("相位 270°@25MHz 合法（>180° 用例）", echo["div"] == 40 and echo["phase_mdeg"] == 270_000,
+               f"D={echo['div']} 回显相位={echo['phase_mdeg'] / 1000:g}° phaseField={echo['phase_field']}")
+    except vs.ParamError as exc:
+        record("相位 270°@25MHz 合法（>180° 用例）", False, f"被拒：{exc}")
     try:
         link.set_sig(3_000_000, 90_000)        # 低于可实现的频点
         record("非法频率 → ERR_PARAM", False, "未报错")

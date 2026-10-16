@@ -144,24 +144,109 @@
 /** POWER 寄存器：使能相位 mux 与 delay time（复位值）。 */
 #define DPM_DRP_POWER_ENABLE_PHASE 0xFFFFu
 
-/* ---- MMCM 寄存器编码（与 build/analysis/golden/mmcm_encode.py 逐步一致）----
+/* ---- MMCM 寄存器编码 ----
  *
- * 位域依据官方 XAPP888 v1.8 的 Table 1/2，并用 clk_wiz 的 Write DRP 模式生成的
- * 权威寄存器值逐点校验过（多分频 × 多相位共 14 个点全部一致）：
+ * 位域依据官方 XAPP888 v1.8 的 Table 1/2，相位部分另用 clk_wiz 自带的
+ * `mmcm_pll_drp_func_7s_mmcm.vh`（`mmcm_pll_phase` / `mmcm_pll_count_calc`）逐步核对：
  *
  *   ClkReg1 = {PHASE_MUX[15:13], 1'b1, HIGH_TIME[11:6], LOW_TIME[5:0]}
  *   ClkReg2 = {9'h000, EDGE[7], NO_COUNT[6], DELAY_TIME[5:0]}
  *
  * 其中：
  *   HIGH_TIME = divide / 2，LOW_TIME = divide - HIGH_TIME（50% 占空比）
- *   EDGE      = divide & 1（奇数分频才置位）
+ *   EDGE      = divide & 1（奇数分频才置位；divide == 1 时按厂商做法清 0）
  *   NO_COUNT  = 1 当且仅当 divide == 1
- *   DELAY_TIME = round(phase_mdeg * divide / 360000) & 0x3F
- *   PHASE_MUX  = (round(phase_mdeg * divide / 360000) >> 6) & 0x7
+ *   m = round(phase_mdeg × divide / 45000)：**9 位相位码，单位是 1/8 VCO 周期**
+ *   DELAY_TIME = m >> 3（相位码的**整数部分**，单位 VCO 周期）
+ *   PHASE_MUX  = m & 0x7（相位码的**小数部分**，单位 1/8 VCO 周期）
  *
- * 注：手册把 ClkReg1 的 bit12 标为 RSVD，但 clk_wiz 的生成器在该位**恒置 1**
+ * 相位编码的布局由厂商实现决定，不是手册推断：`mmcm_pll_phase` 把
+ * `phase_in_cycles = phase_deg/360 × divide`（单位 = VCO 周期）四舍五入到 3 位小数，
+ * 再把**小数部分**（`temp[FRAC:FRAC-2]`）放进 PHASE_MUX、**整数部分**
+ * （`temp[FRAC+6:FRAC+1]`）放进 DELAY_TIME；`mmcm_pll_count_calc` 的寄存器装配注释
+ * 也写明 `DELAY_TIME [21:16]`（upper）与 `PHASE_MUX [15:13]`（lower）。
+ * 因此可实现的相位网格 = 1/8 VCO 周期 = `45/D` 度，不是 1 个 VCO 周期（`360/D` 度）。
+ *
+ * 注 1：手册把 ClkReg1 的 bit12 标为 RSVD，但 clk_wiz 的生成器在该位**恒置 1**
  * （div=20/40/80/100 实测全为 1）；编码以实测生成值为准，勿按手册改。
+ * 注 2：`m` 是 9 位（DELAY_TIME 6 位 + PHASE_MUX 3 位），可表示 `512/8 = 64` 个 VCO
+ * 周期，即最多 `DPM_MMCM_PHASE_CODE_MAX = 511` 步。**可表示的相位上界因此与 D 有关**：
+ * `phase_max = 511 × 45°/D`（D=40 → 574.875°、D=100 → 229.95°、D=125 → 183.96°），
+ * 即 D ≤ 63 的频点能覆盖整个 0~360°，D = 64..126 的频点只能覆盖到 184°~360°。
+ * 请求的 `m` 超过 511 时，`DPM_MMCM_ENCODE_CLKOUT` 的两个字段都会按位截断，硬件行为是
+ * **相位回绕**（旧 bitstream 上实测：8MHz 写 270° 回绕成 86.4°，见 `docs/onboard-ax7010.md`
+ * §5），因此协议层必须用 `dpm_mmcm_phase_code_fits` 显式拒绝，而不是把相位一律限制在
+ * `< 180°`（那条旧限制比硬件保守得多，会把 D ≤ 63 的频点的 180°~360° 白扔掉）。
  */
+
+/** 相位编码 1 步对应的毫度分子：步长 = `45000 / divide`（1/8 VCO 周期）。 */
+#define DPM_MMCM_PHASE_STEP_MDEG_NUM 45000u
+
+/** 由相位（毫度）与输出分频算 9 位相位编码 `m = round(phase_mdeg × divide / 45000)`。
+ *
+ * 单位是 1/8 VCO 周期：1 个输出周期 = `divide` 个 VCO 周期 = `8 × divide` 步。
+ */
+static inline uint32_t dpm_mmcm_phase_code(uint32_t phase_mdeg, uint32_t divide)
+{
+    /* (phase_mdeg × divide × 8 + 半个分母) / 分母 = round(phase_mdeg × divide / 45000) */
+    return (uint32_t)(((uint64_t)phase_mdeg * (uint64_t)divide * 8u + 180000u) / 360000u);
+}
+
+/** 相位编码 `m` → 实际相位（毫度，0..359999）。与 `dpm_mmcm_phase_code` 互逆。 */
+static inline uint32_t dpm_mmcm_phase_code_to_mdeg(uint32_t code, uint32_t divide)
+{
+    if (divide == 0u) {
+        return 0u;
+    }
+    return (uint32_t)((((uint64_t)code * DPM_MMCM_PHASE_STEP_MDEG_NUM) + (uint64_t)divide / 2u) /
+                      (uint64_t)divide) %
+           360000u;
+}
+
+/** 相位码的字段上限：`m <= 511`（DELAY_TIME 6 位 + PHASE_MUX 3 位）。 */
+#define DPM_MMCM_PHASE_CODE_MAX 511u
+
+/** 相位请求的满量程（毫度）：协议请求范围是 `[0, 360000)`。 */
+#define DPM_MMCM_PHASE_FULL_SCALE_MDEG 360000u
+
+/** 相位上界公式的分子（毫度·分频）：`m <= 511` ⟺ `phase_mdeg × D <= 23017499`。
+ *
+ * 推导：`m = floor((phase_mdeg × D + 22500) / 45000) <= 511`
+ * ⟺ `phase_mdeg × D + 22500 < 512 × 45000 = 23040000`
+ * ⟺ `phase_mdeg × D <= 23017499`。
+ */
+#define DPM_MMCM_PHASE_MAX_MDEG_NUM 23017499u
+
+/** 给定输出分频 D 时可**请求**的最大相位（毫度，含），并按满量程截断。
+ *
+ * D=40（25MHz）→ 359999（满量程，m=320 落回 0°）；D=100（10MHz）→ 230174；
+ * D=120（5MHz）→ 191812；D=125（8MHz）→ 184139（吸附后 183.960°）。
+ */
+static inline uint32_t dpm_mmcm_phase_max_mdeg(uint32_t divide)
+{
+    uint32_t p;
+    if (divide == 0u) {
+        return 0u;
+    }
+    p = DPM_MMCM_PHASE_MAX_MDEG_NUM / divide;
+    return (p > (DPM_MMCM_PHASE_FULL_SCALE_MDEG - 1u)) ? (DPM_MMCM_PHASE_FULL_SCALE_MDEG - 1u) : p;
+}
+
+/** 相位请求是否落在 9 位相位码范围内。
+ *
+ * 返回 0 表示编码会截断回绕（输出相位≠请求相位），协议层必须回 `ERR_PARAM`：
+ * 请求相位 < 360° 且 `round(phase × D / 45000) <= 511`。
+ */
+static inline uint32_t dpm_mmcm_phase_code_fits(uint32_t phase_mdeg, uint32_t divide)
+{
+    if (divide == 0u) {
+        return 0u; /* D 非法（求解器不会给出 0，这里只做防御） */
+    }
+    return ((phase_mdeg < DPM_MMCM_PHASE_FULL_SCALE_MDEG) &&
+            (dpm_mmcm_phase_code(phase_mdeg, divide) <= DPM_MMCM_PHASE_CODE_MAX))
+               ? 1u
+               : 0u;
+}
 
 /** 由分频比与相位（毫度）算出一个 CLKOUTx / CLKFBOUT 寄存器对。
  *
@@ -175,12 +260,12 @@
         uint32_t d_ = (uint32_t)(divide);                                                  \
         uint32_t ht_ = d_ / 2u;                                                            \
         uint32_t lt_ = d_ - ht_;                                                           \
-        uint32_t vco_ = ((uint32_t)(phase_mdeg) * d_ + 180000u) / 360000u;                 \
+        uint32_t m_ = dpm_mmcm_phase_code((uint32_t)(phase_mdeg), d_);                     \
         uint32_t ed_ = (d_ == 1u) ? 0u : (d_ & 1u);                                        \
         uint32_t nc_ = (d_ == 1u) ? 1u : 0u;                                               \
-        (clkreg1) = (uint16_t)(0x1000u | (((vco_ >> 6) & 0x7u) << 13) |                     \
+        (clkreg1) = (uint16_t)(0x1000u | ((m_ & 0x7u) << 13) |                             \
                                ((ht_ & 0x3Fu) << 6) | (lt_ & 0x3Fu));                      \
-        (clkreg2) = (uint16_t)((ed_ << 7) | (nc_ << 6) | (vco_ & 0x3Fu));                  \
+        (clkreg2) = (uint16_t)((ed_ << 7) | (nc_ << 6) | ((m_ >> 3) & 0x3Fu));             \
     } while (0)
 
 /** 从 CLKOUTx / CLKFBOUT 的 ClkReg1 反推分频比。
@@ -197,18 +282,17 @@ static inline uint32_t dpm_mmcm_decode_divide(uint32_t clkreg1)
     return ((clkreg1 >> 6) & 0x3Fu) + (clkreg1 & 0x3Fu);
 }
 
-/** 由 DELAY_TIME 与输出分频反推相位（毫度）。
+/** 由一对 CLKOUTx 寄存器（ClkReg1/ClkReg2）与输出分频反推相位（毫度）。
  *
- * DELAY_TIME 是 **VCO 周期**的整数倍，而 1 个输出周期 = `divide` 个 VCO 周期，
- * 因此 `phase_mdeg = delay_time * 360000 / divide`。
- * 与 `DPM_MMCM_ENCODE_CLKOUT` 的 `delay = round(phase * divide / 360000)` 互逆。
+ * 与 `DPM_MMCM_ENCODE_CLKOUT` 互逆：`m = DELAY_TIME × 8 + PHASE_MUX`，
+ * `phase_mdeg = m × 45000 / divide`（四舍五入到整数毫度）。
  */
-static inline uint32_t dpm_mmcm_decode_phase_mdeg(uint32_t delay_time, uint32_t divide)
+static inline uint32_t dpm_mmcm_decode_phase_mdeg(uint32_t clkreg1, uint32_t clkreg2, uint32_t divide)
 {
-    if (divide == 0u) {
-        return 0u;
-    }
-    return (uint32_t)(((uint64_t)(delay_time & 0x3Fu) * 360000u) / (uint64_t)divide) % 360000u;
+    uint32_t mux = (clkreg1 >> 13) & 0x7u;
+    uint32_t delay = clkreg2 & 0x3Fu;
+
+    return dpm_mmcm_phase_code_to_mdeg((delay << 3) | mux, divide);
 }
 
 /** 从 DIVCLK 寄存器（MMCM 地址 0x16）反推 DIVCLK_DIVIDE。

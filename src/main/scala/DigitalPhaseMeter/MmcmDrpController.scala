@@ -31,6 +31,9 @@ import chisel3.util._
   * | 0x24 | POWER     | 读写  | MMCM 寄存器 0x28 的值（复位值 0xFFFF）    |
   * | 0x28 | LOAD      | W1S | 写 1 触发一次完整重配置                   |
   *
+  * 地址译码只看**页内偏移** `addr[11:0]`（BD 把本 IP 映射在 `0x43C1_0000` 的 4KB 段上， 而 AXI 互连不剥离基地址）：`addr[11:6] == 0` 且
+  * `addr[1:0] == 0` 才响应，高位不参与译码。 仿真激励必须按真实地址驱动（基地址 + 偏移），否则测不到这条路径——上板时曾因此 让 DRP 读写全部被丢弃。
+  *
   * ==DRP 时序==
   *
   * MMCM 要求 `DEN` 只拉高**一个 DCLK 周期**，且此时 `DADDR`/`DI`/`DWE` 有效； 之后等 `DRDY` 拉高表示该次访问完成。本模块用一个小状态机逐条发送
@@ -65,6 +68,8 @@ class MmcmDrpController(val addrWidth: Int = 32, val dataWidth: Int = 32, val re
     val drp_drdy = IO(Input(Bool()))
     // MMCM 锁定指示（异步电平）
     val locked = IO(Input(Bool()))
+    // 重配置复位（高有效），接到 MMCM 的 RST：重配置期间必须先把它拉高
+    val mmcm_reset = IO(Output(Bool()))
 
     // 主时钟域的复位：异步置位、同步释放
     private val mainReset = ResetSynchronizer(clock, resetn, resetDepth)
@@ -97,14 +102,16 @@ class MmcmDrpController(val addrWidth: Int = 32, val dataWidth: Int = 32, val re
         val loadPending = RegInit(false.B)
         // 调试计数：记录收到多少次写、多少次 LOAD（读寄存器 15 可查看）
 
-        // 寄存器索引只用到地址的 [5:2]，但整条 32 位地址必须被真正消费
-        // （否则 Verilator 的 -Wall 会对未使用的位报 UNUSEDSIGNAL）。
-        // 这里顺带做了一件事：只有落在本 IP 的 4KB 窗口内才响应，
-        // 窗口外的访问被忽略（读回 0），与「按地址块译码」的语义一致。
-        // 用「整条地址」做窗口判断：只有 [5:2]（寄存器索引）允许非零，
-        // 其余位必须为 0 —— 这样 32 位地址的每一位都被真正消费。
+        // 地址译码：BD 把本 IP 映射到 4KB 段（0x43C1_0000），寄存器索引只用到 [5:2]。
+        //
+        // 关键（上板实测踩到的缺陷）：AXI 互连**不剥离基地址**，slave 看到的是完整 32 位
+        // 地址（PS 写 0x43C1_0008 时 addr = 0x43C1_0008），因此窗口判断只能看**页内偏移**
+        // [11:0]：`addr[11:6]` 必须为 0（寄存器区只有 0x00..0x28）、`addr[1:0]` 必须为 0
+        // （32 位对齐）。高 20 位由 BD 的地址段（M01_AXI → 0x43C1_0000）保证。
+        // 早期版本按「整条地址 < 0x40」判断，xsim/Verilator 里激励给的是裸偏移能过，
+        // 上板时所有 DRP 读写都被当窗口外丢弃 → `SET_SIG` 永远回 ERR_BUSY。
         def inWindowOf(addr: UInt): Bool = {
-            val rest = Cat(addr(31, 6), addr(1, 0))
+            val rest = Cat(addr(11, 6), addr(1, 0))
             rest === 0.U
         }
         val inWindow = inWindowOf(axiLiteSlave.io.wr.bits.addr)
@@ -170,10 +177,19 @@ class MmcmDrpController(val addrWidth: Int = 32, val dataWidth: Int = 32, val re
             0.U
         )
 
-        // ---- DRP 状态机：顺序发送 8 笔写 ----
-        val sIdle :: sWrite :: sWait :: sDone :: Nil = Enum(4)
+        // ---- DRP 状态机：先按住 MMCM 复位，再顺序发送 8 笔写，最后放开复位 ----
+        //
+        // 为什么必须先拉高 MMCM 的 RST（上板实测 + unisim 行为模型的双重依据）：
+        //   * MMCM 的 DRP 写要求器件处于复位状态（unisim 模型在 RST 为低时直接报
+        //     `Error: RST need to be high when changing parameters through DRP`，
+        //     且把 @(negedge RST) 当作「新配置生效」的时刻）；
+        //   * 上板实测：不拉 RST 时**分频字立即生效、相位字不生效**（写相位字段后输出
+        //     相位纹丝不动），因为相位延迟单元只在复位/重新锁定时重新初始化。
+        // 因此重配置的完整时序是：RST=1 → 8 笔 DRP 写 → RST=0 → MMCM 重新锁定。
+        val sIdle :: sResetHold :: sWrite :: sWait :: sRelease :: sDone :: Nil = Enum(6)
         val state = RegInit(sIdle)
         val idx = RegInit(0.U(3.W))
+        val holdCnt = RegInit(0.U(4.W))
 
         val daddrTable = VecInit(
             Seq(0x14.U, 0x15.U, 0x08.U, 0x09.U, 0x0a.U, 0x0b.U, 0x16.U, 0x28.U)
@@ -184,26 +200,40 @@ class MmcmDrpController(val addrWidth: Int = 32, val dataWidth: Int = 32, val re
 
         drp_daddr := daddrTable(idx)
         drp_di := diTable(idx)
+        // DEN 与 DWE 都只在 sWrite 那一拍拉高：
+        //  * MMCM 要求 DEN 只拉高**一个** DCLK 周期（DADDR/DI/DWE 此时有效）；
+        //  * 厂商 unisim 模型对「DWE 连续多个 DCLK 拉高」直接报 DRC Error 并结束仿真。
         drp_den := state === sWrite
-        drp_dwe := true.B
+        drp_dwe := state === sWrite
+        // 复位在「按住 + 8 笔写 + 等 DRDY」期间保持拉高，写完放开
+        mmcm_reset := (state === sResetHold) || (state === sWrite) || (state === sWait)
 
         when(state === sIdle) {
             busy := false.B
+            holdCnt := 0.U
             when(loadPending) {
                 loadPending := false.B
                 idx := 0.U
                 busy := true.B
-                state := sWrite
+                state := sResetHold
             }
+        }.elsewhen(state === sResetHold) {
+            // 复位至少要按住几拍（MMCM 数据手册要求 RST 有效宽度；这里取 8 个 DCLK）
+            holdCnt := holdCnt + 1.U
+            when(holdCnt === 7.U) { state := sWrite }
         }.elsewhen(state === sWrite) {
             state := sWait
         }.elsewhen(state === sWait) {
             when(drp_drdy) {
-                when(idx === 7.U) { state := sDone }.otherwise {
+                when(idx === 7.U) { state := sRelease }.otherwise {
                     idx := idx + 1.U
                     state := sWrite
                 }
             }
+        }.elsewhen(state === sRelease) {
+            // 放开复位后 MMCM 重新锁定（locked 先掉后起），软件轮询 locked 判断完成
+            holdCnt := holdCnt + 1.U
+            when(holdCnt === 7.U) { state := sDone }
         }.otherwise { // sDone
             state := sIdle
         }

@@ -60,10 +60,11 @@ static uint32_t cmd_reply_err(dpm_cmd_ctx_t *c, uint8_t code, uint8_t *out, uint
     return (uint32_t)dpm_frame_encode(out, (size_t)out_cap, code, 0, 0u);
 }
 
-/** 回读的 `phaseField`：表示"写入的相位步数"。
+/** 回读的 `phaseField`：MMCM ClkReg2 的 DELAY_TIME 字段（整数 VCO 周期，0..63）。
  *
- * 当前 bitstream 下相位字未接到 MMCM（`DPM_DRP_PHASE_WRITABLE = 0`），该字段没有
- * 实际意义，按协议定稿一律回 0；补丁使相位可控后自动改为回真实步数。 */
+ * 方案 A 下相位可控（PS 直接编码 MMCM 寄存器），本字段回报实际写入的 DELAY_TIME；
+ * 完整相位（含 PHASE_MUX 的 1/8 VCO 周期细调）看响应里的 `phaseMilliDeg`。
+ * 旧 bitstream（`DPM_DRP_PHASE_WRITABLE = 0`）下按协议定稿一律回 0。 */
 static uint8_t phase_field_out(uint16_t field)
 {
 #if DPM_DRP_PHASE_WRITABLE
@@ -436,9 +437,8 @@ void dpm_cmd_tick(dpm_cmd_ctx_t *c, uint32_t now_ms)
  *   ClkReg2 = {EDGE[7], NO_COUNT[6], DELAY_TIME[5:0]}
  *
  * 分频比 = HIGH_TIME + LOW_TIME（divide==1 时是 no_count 的特例，单独处理）。
- * 相位：DELAY_TIME 是 1 个 VCO 周期的整数倍，换算回毫度是
- *   phase_mdeg = DELAY_TIME * 360000 / (4 * divide)
- * 该换算与 `dpm_sig.c` 的正向编码互为逆运算（四舍五入到整数毫度）。
+ * 相位 = PHASE_MUX × 1/8 VCO 周期 + DELAY_TIME × 1 VCO 周期，换算见
+ * `dpm_regs.h` 的 `dpm_mmcm_decode_phase_mdeg`（与正向编码互为逆运算）。
  */
 static void sig_from_drp(const dpm_cmd_ctx_t *c, dpm_sig_t *out)
 {
@@ -446,8 +446,9 @@ static void sig_from_drp(const dpm_cmd_ctx_t *c, dpm_sig_t *out)
     uint32_t fb2 = dpm_drp_rd(c->io, c->io_ctx, DPM_DRP_OFF_CLKFBOUT2);
     uint32_t c01 = dpm_drp_rd(c->io, c->io_ctx, DPM_DRP_OFF_CLKOUT0);
     uint32_t dv = dpm_drp_rd(c->io, c->io_ctx, DPM_DRP_OFF_DIVCLK);
+    uint32_t c11 = dpm_drp_rd(c->io, c->io_ctx, DPM_DRP_OFF_CLKOUT1);
     uint32_t c12 = dpm_drp_rd(c->io, c->io_ctx, DPM_DRP_OFF_CLKOUT1_2);
-    uint32_t mult, divclk, div, delay, unit;
+    uint32_t mult, divclk, div;
 
     (void)fb2;
     /* divide==1 是特例（NO_COUNT 置位、HIGH/LOW_TIME 是占位的 1），用共享解码函数 */
@@ -457,16 +458,14 @@ static void sig_from_drp(const dpm_cmd_ctx_t *c, dpm_sig_t *out)
     if (mult == 0u || div == 0u || divclk == 0u) {
         return;
     }
-    unit = dpm_sig_phase_unit_deg_milli();
 
-    delay = c12 & 0x3Fu; /* DELAY_TIME */
     out->mult = (uint16_t)mult;
     out->divclk = (uint16_t)divclk;
     out->div = (uint16_t)div;
     out->vco_hz = (uint32_t)(((uint64_t)c->clk.slow_hz * (uint64_t)mult) / (uint64_t)divclk);
     out->freq_hz = (uint32_t)(((uint64_t)out->vco_hz + (uint64_t)div / 2u) / (uint64_t)div);
-    out->phase_milli_deg = dpm_mmcm_decode_phase_mdeg(delay, div);
-    out->phase_field = (uint16_t)(out->phase_milli_deg / unit);
+    out->phase_milli_deg = dpm_mmcm_decode_phase_mdeg(c11, c12, div);
+    out->phase_field = (uint16_t)(c12 & 0x3Fu); /* DELAY_TIME */
     out->phase_step_ps = dpm_sig_phase_step_ps(out->vco_hz);
 }
 
@@ -657,11 +656,19 @@ static uint32_t handle_set_sig(dpm_cmd_ctx_t *c, const uint8_t *payload, uint8_t
     if (dpm_dec_set_sig(payload, len, &freq, &phase) == 0u) {
         return cmd_reply_err(c, DPM_RESP_ERR_PARAM, out, cap);
     }
-    if (freq == 0u || phase >= 180000u) {
+    if (freq == 0u || phase >= DPM_MMCM_PHASE_FULL_SCALE_MDEG) {
+        /* 相位请求的**协议范围**是 [0, 360000)：360° 与 0° 同义，满量程不接收。
+         * 「能不能实现」由 9 位相位码决定且与 D 有关，要等求解出 D 后再判（见下）。 */
         return cmd_reply_err(c, DPM_RESP_ERR_PARAM, out, cap);
     }
-    dpm_sig_solve(freq, phase, c->clk.slow_hz, dpm_sig_phase_unit_deg_milli(), &sig, &st);
+    dpm_sig_solve(freq, phase, c->clk.slow_hz, &sig, &st);
     if (st.ok == 0 || st.error_milli_hz > DPM_SIG_FREQ_TOL_MILLI_HZ(freq)) {
+        return cmd_reply_err(c, DPM_RESP_ERR_PARAM, out, cap);
+    }
+    /* 相位上界 = 9 位相位码（与 D 有关，见 dpm_regs.h 的注 2）：
+     * m > 511 时 MMCM 的 PHASE_MUX/DELAY_TIME 字段会截断，输出相位**回绕**而不是吸附，
+     * 这类请求必须显式拒绝（旧固件一律拒 ≥180°，对 D ≤ 63 的频点过于保守）。 */
+    if (dpm_mmcm_phase_code_fits(phase, sig.div) == 0u) {
         return cmd_reply_err(c, DPM_RESP_ERR_PARAM, out, cap);
     }
     /* DRP 重配置必须在 idle 时做：先等当前测量结束（有界），超时才回 ERR_BUSY。

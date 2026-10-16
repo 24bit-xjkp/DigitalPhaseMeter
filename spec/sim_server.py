@@ -74,7 +74,7 @@ def solve_sig(target_hz: int, f_in: int = F_SLOW) -> tuple[int, int, int]:
         vco = f_in * mult
         if not (600_000_000 <= vco <= 1_200_000_000):
             continue
-        for d in range(1, 128):
+        for d in range(1, 127):  # D ≤ 126：HIGH_TIME + LOW_TIME 各 6 位
             err_num = abs(vco - target_hz * d)
             cost = abs(vco - 1_000_000_000) // 1_000_000 + abs(d - 40)
             if best is None:
@@ -92,6 +92,49 @@ def solve_sig(target_hz: int, f_in: int = F_SLOW) -> tuple[int, int, int]:
     if best is None:
         raise ValueError("无解")
     return best[3], best[4], best[5]
+
+
+# 相位编码（方案 A）：MMCM 的相位 = PHASE_MUX（1/8 VCO 周期）+ DELAY_TIME（整数 VCO 周期），
+# 因此 9 位相位码 m = round(phase_mdeg × D / 45000)，网格 = 45000/D 毫度 = 45/D 度。
+# 这里**独立重写一遍**（不 import host/ps 的代码），三处实现对拍才有意义。
+PHASE_GRID_MDEG_NUM = 45_000
+#: 9 位相位码上限（DELAY_TIME 6 位 + PHASE_MUX 3 位）。
+PHASE_CODE_MAX = 0x1FF
+#: `m <= 511` ⟺ `phase_mdeg × D <= 23017499`（推导见 ps/include/dpm_regs.h）。
+PHASE_MAX_MDEG_NUM = 23_017_499
+#: 相位满量程（毫度）：360° 与 0° 同义，请求范围是 [0, 360000)。
+PHASE_FULL_SCALE_MDEG = 360_000
+
+
+def mmcm_phase_code(phase_mdeg: int, div: int) -> int:
+    """9 位相位码：`round(phase_mdeg × div / 45000)`（与 C/Python 同一公式，独立实现）。"""
+    return (int(phase_mdeg) * int(div) * 8 + 180_000) // 360_000
+
+
+def phase_max_mdeg(div: int) -> int:
+    """给定 D 时可请求的最大相位（毫度，含）：9 位相位码与满量程谁先撞上。"""
+    return min(PHASE_MAX_MDEG_NUM // int(div), PHASE_FULL_SCALE_MDEG - 1)
+
+
+def phase_code_fits(phase_mdeg: int, div: int) -> bool:
+    """相位请求是否落在 9 位相位码内（越界 = MMCM 字段截断、相位回绕，必须回 ERR_PARAM）。
+
+    旧规则是「相位必须 < 180°」，比硬件保守得多：`m <= 511` ⟺ `phase < 23017499/D`，
+    因此 D ≤ 63 时整个 0~360° 都可表示，D=125（8MHz）也能到 184.139°。
+    """
+    phase = int(phase_mdeg)
+    return 0 <= phase < PHASE_FULL_SCALE_MDEG and mmcm_phase_code(phase, div) <= PHASE_CODE_MAX
+
+
+def mmcm_achievable_mdeg(phase_mdeg: int, div: int) -> int:
+    """请求相位经 MMCM 网格量化后**真正能输出**的相位（毫度）。"""
+    code = mmcm_phase_code(phase_mdeg, div)
+    return ((code * PHASE_GRID_MDEG_NUM) + int(div) // 2) // int(div)
+
+
+def mmcm_delay_time(phase_mdeg: int, div: int) -> int:
+    """SET_SIG 回包的 `phaseField`：MMCM 的 DELAY_TIME 字段（= 相位码 >> 3）。"""
+    return (mmcm_phase_code(phase_mdeg, div) >> 3) & 0x3F
 
 
 # --------------------------------------------------------------- 仿真后端
@@ -137,13 +180,19 @@ class SimBackend:
 
     # ---- 片内源 ----
     def solve_sig(self, freq_hz: int, phase_mdeg: int) -> bool:
+        """求解工作点并把相位吸附到 MMCM 网格（与 PS 侧 SET_SIG 的回显口径一致）。"""
         try:
             vco, mult, div = solve_sig(freq_hz)
         except ValueError:
             return False
         self.freq_hz, self.phase_mdeg = freq_hz, phase_mdeg
         self.vco_hz, self.mult, self.div = vco, mult, div
-        self.phase_field = min(255, phase_mdeg // 45_000)
+        if self.phase_controllable:
+            self.phase_mdeg = mmcm_achievable_mdeg(phase_mdeg, div)
+            self.phase_field = mmcm_delay_time(phase_mdeg, div)
+        else:
+            self.phase_mdeg = self.FIXED_PHASE_MDEG
+            self.phase_field = 0
         return True
 
     # ---- 时序推进 ----
@@ -165,16 +214,17 @@ class SimBackend:
             self.finish_at = None
 
     # ---- 测量模型 ----
-    # 片内源相位差固定为 BD 初值 90°（实测：当前 bitstream 下 DRP 相位字不生效，
-    # 见 docs/ps-protocol.md 6.2 与 spec/drp_semantics.json 的 phase_controllable=false）
-    PHASE_CONTROLLABLE = False
+    # 方案 A（上板已实测）：相位可控，写 MMCM 的 PHASE_MUX/DELAY_TIME 即生效，
+    # 可实现相位 = 请求值吸附到 45°/D 网格（见 mmcm_achievable_mdeg）。
+    # 旧 clk_wiz_src bitstream 的行为（相位固定 90°）用 --phase-static 复现。
+    PHASE_CONTROLLABLE = True
     FIXED_PHASE_MDEG = 90_000
 
     def measure_model(self) -> tuple[int, int, int]:
         """按 docs/verify-plan.md 的模型算 (gate, edge, phase)。
 
         片内源：相位先被 DSP 采样网格量化成整数个高速周期（整数 ps + RNE）再乘参考沿数。
-        `PHASE_CONTROLLABLE = False` 时改用固定的 90°（模拟当前 bitstream 的真实行为）。
+        `PHASE_CONTROLLABLE = False` 时改用固定的 90°（模拟旧 bitstream 的真实行为）。
         """
         f_sig = self.vco_hz / self.div
         t_sig_ps_num, t_sig_ps_den = self.div * 10**12, self.vco_hz
@@ -187,7 +237,7 @@ class SimBackend:
         if edge == 0:
             return gate, 0, 0
         t_dsp_ps = 10**12 // self.f_dsp
-        phase_mdeg = self.phase_mdeg if self.PHASE_CONTROLLABLE else self.FIXED_PHASE_MDEG
+        phase_mdeg = self.phase_mdeg if self.phase_controllable else self.FIXED_PHASE_MDEG
         cycles = round_half_even(phase_mdeg * t_sig_ps, 360_000 * t_dsp_ps)
         return gate, edge, cycles * edge
 
@@ -335,11 +385,15 @@ class Session:
             if len(payload) != 8:
                 return encode(ERR_PARAM)
             freq, phase = struct.unpack("<II", payload)
-            # 约束与 docs/ps-protocol.md 第 6.3 节一致：VCO ≥ 600MHz 且 D ≤ 127
-            # → 可实现的最低频率约 600/127 = 4.72MHz，因此 4.8MHz 以下直接拒绝。
-            if not (4_800_000 <= freq <= 60_000_000) or phase >= 180_000:
+            # 约束与 docs/ps-protocol.md 第 6.4 节一致：VCO ≥ 600MHz 且 D ≤ 126
+            # → 可实现的最低频率约 600/126 = 4.76MHz，因此 4.8MHz 以下直接拒绝。
+            if not (4_800_000 <= freq <= 60_000_000) or phase >= PHASE_FULL_SCALE_MDEG:
                 return encode(ERR_PARAM)
             if not b.solve_sig(freq, phase):
+                return encode(ERR_PARAM)
+            # 相位上界 = 9 位相位码（与 D 有关，见 phase_code_fits）：越界请求会让 MMCM
+            # 的字段截断、相位回绕，必须显式拒绝而不是静默改相位。
+            if not phase_code_fits(phase, b.div):
                 return encode(ERR_PARAM)
             return encode(resp, struct.pack("<IIIHB", b.freq_hz, b.phase_mdeg, b.vco_hz,
                                             b.div, b.phase_field))
@@ -410,11 +464,13 @@ def main() -> int:
     ap.add_argument("--phase-mdeg", type=float, default=90e3)
     ap.add_argument("--gate", type=int, default=2000)
     ap.add_argument("--lock-lost", action="store_true", help="模拟 MMCM 失锁")
+    ap.add_argument("--phase-static", action="store_true",
+                    help="复现旧 clk_wiz_src bitstream：相位不可控，固定为 BD 初值 90°")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
     backend = SimBackend(int(args.freq_hz), int(args.phase_mdeg), args.gate,
-                         locked=not args.lock_lost)
+                         locked=not args.lock_lost, phase_controllable=not args.phase_static)
     session = Session(backend)
 
     if args.pty:

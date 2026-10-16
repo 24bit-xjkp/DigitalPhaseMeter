@@ -69,13 +69,13 @@ uint64_t dpm_signal_period_100ps(uint32_t freq_milli_hz);
 /** 片内信号源（MMCM 两路输出）的工作点。 */
 typedef struct {
     uint32_t freq_hz;      /**< 目标/实际输出频率（两路同频） */
-    uint32_t phase_milli_deg; /**< 目标相位差，1e-3 度 */
+    uint32_t phase_milli_deg; /**< **可实现**的相位差（已吸附到 45°/D 网格），1e-3 度 */
     uint32_t vco_hz;       /**< VCO 频率 */
     uint16_t mult;         /**< CLKFBOUT 倍频（整数） */
     uint16_t divclk;       /**< DIVCLK 分频（本设计恒为 1） */
     uint16_t div;          /**< CLKOUT 分频 D */
-    uint16_t phase_field;  /**< 写入相位寄存器的字段值 */
-    uint32_t phase_step_ps;/**< 相位字段 1 LSB 对应的时间（ps） */
+    uint16_t phase_field;  /**< MMCM 的 DELAY_TIME 字段（整数 VCO 周期，0..63） */
+    uint32_t phase_step_ps;/**< 相位 1 步（1/8 VCO 周期）对应的时间（ps） */
 } dpm_sig_t;
 
 /** 频率求解状态：是否找到、误差（1e-3 Hz）。 */
@@ -89,7 +89,7 @@ typedef struct {
  * 约束（`docs/ps-protocol.md` 第 6 节）：
  *   - `600MHz <= VCO <= 1200MHz`，`VCO = slow_hz * mult / divclk`；
  *   - `divclk = 1`，`mult = 12..24` 整数；
- *   - `1 <= div <= 127`：分频字段是配置字的**低字节**（直接存 D，不是 2D），
+ *   - `1 <= div <= 126`：分频 = `HIGH_TIME + LOW_TIME`（各 6 位），
  *     8 位可表示到 255，但硬上限取 127（`DPM_SIG_DIV_MAX`），超出不再考虑；
  *   - 不使用小数分频。
  *
@@ -101,15 +101,18 @@ typedef struct {
  * 该规则的输出就是冻结频点表：8/10/12.5/20/25MHz → `MULT=20`、`div=125/100/80/50/40`；
  * 5MHz → `600/12/120`；6.25MHz → `750/15/120`。**不要硬编码频点表**，按规则算。
  *
- * @param phase_unit_deg_milli 相位字段一个步长对应的度数（1e-3 度）。
- *        默认 `45000`（= 45° = 1/8 VCO 周期，候选 B）；若实测确认字段是「度数」
- *        （候选 A），传 `1000`。该单位必须与 `spec/drp_semantics.json` 一致。
+ * 相位：`out->phase_milli_deg` 是**可实现**的相位（吸附到 MMCM 的 1/8 VCO 周期网格，
+ * 即 `45°/div`；见 `dpm_regs.h` 的 `dpm_mmcm_phase_code`），不是请求值本身。
  */
 void dpm_sig_solve(uint32_t target_freq_hz, uint32_t phase_milli_deg, uint32_t slow_hz,
-                   uint32_t phase_unit_deg_milli, dpm_sig_t *out, dpm_sig_solve_t *st);
+                   dpm_sig_t *out, dpm_sig_solve_t *st);
 
-/** 分频比硬上限（见 `dpm_sig_solve` 的约束）。 */
-#define DPM_SIG_DIV_MAX 127u
+/** 分频比硬上限（见 `dpm_sig_solve` 的约束）。
+ *
+ * 分频在 MMCM 寄存器里编码成 `HIGH_TIME` + `LOW_TIME`（各 6 位），可表示的最大值是
+ * `63 + 63 = 126`：`D = 127` 的 `LOW_TIME = 64` 会被 6 位字段截断成 63，写下去实际是
+ * D=63（输出频率差一倍）。因此硬上限取 126，而不是分频字段能放的 255。 */
+#define DPM_SIG_DIV_MAX 126u
 /** BD 初始工作点：VCO = 50MHz × 20 = 1000MHz、D = 40（对应 25MHz）。 */
 #define DPM_SIG_BD_VCO_HZ 1000000000u
 #define DPM_SIG_BD_DIV 40u
@@ -122,7 +125,7 @@ void dpm_sig_solve(uint32_t target_freq_hz, uint32_t phase_milli_deg, uint32_t s
  *   - `clkout1`   / `clkout1_2`  → MMCM 0x0A / 0x0B（移相输出，相位差在这里）
  *
  * 编码规则见 `dpm_regs.h` 的 `DPM_MMCM_ENCODE_CLKOUT`（位域取自 XAPP888 v1.8，
- * 已对 clk_wiz Write DRP 生成值逐点校验）。PL 侧只搬值、不做算术。
+ * 相位拆分另按厂商 `mmcm_pll_drp_func_7s_mmcm.vh` 核对）。PL 侧只搬值、不做算术。
  * 任一输出指针可以为 NULL，表示不需要该值。
  */
 void dpm_sig_drp_words(const dpm_sig_t *sig, uint32_t *clkfbout, uint32_t *clkfbout2,

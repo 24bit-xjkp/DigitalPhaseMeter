@@ -2,13 +2,13 @@
  *  @brief 片内信号源（MMCM 两路输出）的工作点求解、DRP 配置字与写入时序。
  *
  * 分三块：
- *   1. 纯计算：`dpm_sig_solve`（频率/相位 → VCO、MULT、D、相位字段）与
- *      `dpm_sig_drp_words`（→ CLKFBOUT / CLKOUT0 / CLKOUT1 三个 DRP 字），可移植、无 IO；
- *   2. 单位换算：`dpm_sig_phase_unit_deg_milli()` 等，供宿主机仿真后端复用同一套单位；
- *   3. 写入时序：`dpm_sig_apply()` 按 `docs/ps-protocol.md` §6 的 5 步写 DRP 并等锁定。
+ *   1. 纯计算：`dpm_sig_solve`（频率/相位 → VCO、MULT、D、相位编码）与
+ *      `dpm_sig_drp_words`（→ CLKFBOUT / CLKOUT0 / CLKOUT1 三个寄存器对），可移植、无 IO；
+ *   2. 单位换算：`dpm_sig_phase_step_ps()` 等，供宿主机仿真后端复用同一套单位；
+ *   3. 写入时序：`dpm_sig_apply()` 按 `docs/ps-protocol.md` §6 的写入流程搬 DRP 寄存器。
  *
  * 三个约束来源：`docs/ps-protocol.md` §6、`ps/include/dpm_calc.h`（求解规则冻结）、
- * `ps/include/dpm_regs.h`（DRP 字编码：低字节 = D 本体、相位字段在 bit[15:8]）。
+ * `ps/include/dpm_regs.h`（MMCM 寄存器编码：相位 = DELAY_TIME + PHASE_MUX）。
  */
 
 #include "dpm_cmd.h"
@@ -16,19 +16,7 @@
 #include "dpm_io.h"
 #include "dpm_regs.h"
 
-/* ================================ 可配置项（未定稿项集中在这里） ============ */
-
-/** 相位字段一个步长对应的毫度（**未定稿项**，见协议 §6 的候选 A/B）。
- *
- *   - 候选 B（默认，45000）：字段 = 45° 的整数倍，1 步 = 1/8 VCO 周期；
- *   - 候选 A（1000）：字段 = 相位度数（1 LSB = 1 ps 延迟）。
- *
- * 交付前若 `spec/drp_semantics.json` 给出实测结论，只改这一处；
- * 宿主机仿真后端通过 `dpm_sig_phase_unit_deg_milli()` 取同一值，因此两边始终一致。
- */
-#ifndef DPM_SIG_PHASE_UNIT_DEG_MILLI
-#define DPM_SIG_PHASE_UNIT_DEG_MILLI 45000u
-#endif
+/* ================================ 可配置项 ================================ */
 
 /** VCO 允许范围（-1 速度等级）。 */
 #define DPM_SIG_VCO_MIN_HZ 600000000u
@@ -44,37 +32,20 @@
 
 /* ================================ 单位换算 ================================ */
 
-uint32_t dpm_sig_phase_unit_deg_milli(void)
+uint32_t dpm_sig_snap_phase_milli_deg(uint32_t phase_milli_deg, uint32_t divide)
 {
-    return (uint32_t)DPM_SIG_PHASE_UNIT_DEG_MILLI;
-}
-
-uint32_t dpm_sig_snap_phase_milli_deg(uint32_t phase_milli_deg)
-{
-    uint32_t unit = dpm_sig_phase_unit_deg_milli();
-    uint32_t field;
-
-    if (unit == 0u) {
-        return 0u;
-    }
-    /* 就近吸附（半点向上），再折算回毫度 */
-    field = (phase_milli_deg + unit / 2u) / unit;
-    return field * unit;
+    /* 硬件网格 = 1/8 VCO 周期 = 45°/D（见 `dpm_regs.h` 的编码说明）。
+     * 22.5°/D=40 这类「非 45° 整数倍」的请求因此能被精确表示，不再被吸附到 45°。 */
+    return dpm_mmcm_phase_code_to_mdeg(dpm_mmcm_phase_code(phase_milli_deg, divide), divide);
 }
 
 uint32_t dpm_sig_phase_step_ps(uint32_t vco_hz)
 {
-#if (DPM_SIG_PHASE_UNIT_DEG_MILLI == 1000u)
-    /* 候选 A：字段 = 度数，1 LSB = 1ps 延迟 */
-    (void)vco_hz;
-    return 1u;
-#else
-    /* 候选 B：1 步 = 1/8 VCO 周期 = 1.25e11 / f_vco（ps） */
+    /* 1 步 = 1/8 VCO 周期 = 1.25e11 / f_vco（ps）：1GHz → 125ps、600MHz → 208ps */
     if (vco_hz == 0u) {
         return 0u;
     }
     return (uint32_t)(125000000000ull / (uint64_t)vco_hz);
-#endif
 }
 
 /* ================================ 求解 ==================================== */
@@ -123,7 +94,7 @@ static int sig_candidate_better(uint64_t err_num, uint32_t div, uint32_t vco, ui
 }
 
 void dpm_sig_solve(uint32_t target_freq_hz, uint32_t phase_milli_deg, uint32_t slow_hz,
-                   uint32_t phase_unit_deg_milli, dpm_sig_t *out, dpm_sig_solve_t *st)
+                   dpm_sig_t *out, dpm_sig_solve_t *st)
 {
     uint32_t mult;
     uint32_t div;
@@ -137,8 +108,7 @@ void dpm_sig_solve(uint32_t target_freq_hz, uint32_t phase_milli_deg, uint32_t s
         st->ok = 0;
         st->error_milli_hz = 0u;
     }
-    if (out == 0 || st == 0 || target_freq_hz == 0u || slow_hz == 0u ||
-        phase_unit_deg_milli == 0u) {
+    if (out == 0 || st == 0 || target_freq_hz == 0u || slow_hz == 0u) {
         return;
     }
 
@@ -176,10 +146,12 @@ void dpm_sig_solve(uint32_t target_freq_hz, uint32_t phase_milli_deg, uint32_t s
     out->div = (uint16_t)best_div;
     /* 实际输出频率 = VCO / D（就近取整到 Hz） */
     out->freq_hz = (uint32_t)(((uint64_t)best_vco + (uint64_t)best_div / 2u) / (uint64_t)best_div);
-    out->phase_milli_deg = (uint32_t)(((uint64_t)phase_milli_deg + (uint64_t)phase_unit_deg_milli / 2u) /
-                                      (uint64_t)phase_unit_deg_milli) *
-                           phase_unit_deg_milli;
-    out->phase_field = (uint16_t)(out->phase_milli_deg / phase_unit_deg_milli);
+    /* 相位先吸附到硬件的 1/8 VCO 周期网格（= 45°/D），再回报吸附后的值：
+     * 请求 22.5°（D=40 时 20 步，可精确表示）不会再被吸附到 45°。
+     * 网格只与 D 有关，与 VCO 无关；`phase_field` 回报 MMCM 的 DELAY_TIME 字段
+     * （整数 VCO 周期，0..63），细调部分在 PHASE_MUX 里、由 phase_milli_deg 体现。 */
+    out->phase_milli_deg = dpm_sig_snap_phase_milli_deg(phase_milli_deg, best_div);
+    out->phase_field = (uint16_t)((dpm_mmcm_phase_code(phase_milli_deg, best_div) >> 3) & 0x3Fu);
     out->phase_step_ps = dpm_sig_phase_step_ps(best_vco);
 
     st->ok = 1;
@@ -199,8 +171,8 @@ void dpm_sig_drp_words(const dpm_sig_t *sig, uint32_t *clkfbout, uint32_t *clkfb
     /* 方案 A：**软件自己把频率/相位编码成 MMCM 的 16 位寄存器值**，
      * PL 侧的 dpm_src_drp 只负责按顺序写进 MMCM 的 DRP 口（硬件不含任何算术）。
      *
-     * 编码规则（位域取自官方 XAPP888 v1.8 Table 1/2，并用 clk_wiz 的 Write DRP
-     * 生成值逐点校验；参考实现见 build/analysis/golden/mmcm_encode.py）：
+     * 编码规则（位域与相位拆分见 `dpm_regs.h` 的 `DPM_MMCM_ENCODE_CLKOUT`，
+     * 相位部分依据厂商 `mmcm_pll_drp_func_7s_mmcm.vh` 的 `mmcm_pll_phase`）：
      *   ClkReg1 = {PHASE_MUX[15:13], 1'b1, HIGH_TIME[11:6], LOW_TIME[5:0]}
      *   ClkReg2 = {EDGE[7], NO_COUNT[6], DELAY_TIME[5:0]}
      * 相位差只加在 clk_out2（CLKOUT1）上，clk_out1 恒 0。
@@ -232,8 +204,8 @@ void dpm_sig_drp_words(const dpm_sig_t *sig, uint32_t *clkfbout, uint32_t *clkfb
 uint32_t dpm_sig_phase_word_mdeg(const dpm_sig_t *sig)
 {
     (void)sig;
-    /* 方案 A 下相位不再是一个独立的「毫度字」：它已经被编码进 CLKOUT1 的
-     * ClkReg2（DELAY_TIME 字段），见 `dpm_sig_drp_words`。
+    /* 方案 A 下相位不再是一个独立的「毫度字」：它被拆进 CLKOUT1 的
+     * PHASE_MUX / DELAY_TIME 两个字段，见 `dpm_sig_drp_words`。
      * 保留本函数只为兼容旧接口，返回值不再有硬件含义。 */
     return 0u;
 }

@@ -21,7 +21,8 @@
 #   s_axi_lite   AXI4-Lite 从口（4KB）：11 个寄存器（ID/STATUS/8 个 MMCM 寄存器/LOAD）
 #   clock        主时钟（AXI 与 DRP 同域，接 PS FCLK_CLK0 = 50MHz），关联 s_axi_lite
 #   resetn       异步复位输入，低有效
-#   drp_daddr / drp_di / drp_den / drp_dwe / drp_dout / drp_drdy
+#   drp_daddr / drp_di / drp_den / drp_dwe / drp_dout / drp_drdy（MMCM DRP 口）
+#   mmcm_reset（重配置复位，接 MMCM 的 RST：写 DRP 期间必须为高）
 #                MMCM 动态重配置口，接 vivado/rtl/dpm_mmcm_src.v 的对应端口
 #   locked       MMCM 锁定指示（异步电平，IP 内同步后进 STATUS.b0）
 

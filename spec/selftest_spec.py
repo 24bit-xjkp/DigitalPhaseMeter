@@ -65,7 +65,10 @@ def main() -> int:
     fresh = gen.build_vectors()
     check(golden["vectors"] == fresh["vectors"], "vectors.json 与 gen_golden.py 重新生成的结果一致")
     check(golden["freq_points_hz"] == fresh["freq_points_hz"], "频点集合一致")
-    check(golden["phase_points_mdeg"] == fresh["phase_points_mdeg"], "相位点集合一致")
+    check(golden["phase_points_mdeg"] == fresh["phase_points_mdeg"], "相位点集合并集一致")
+    check(golden["freq_points"] == fresh["freq_points"], "逐频点相位点表一致（含各频点相位上界）")
+    check(golden.get("phase_code_max") == 0x1FF and golden.get("phase_max_mdeg_num") == 23_017_499,
+          "金标准写明 9 位相位码上限与相位上界分子（m ≤ 511）")
 
     print("[2] 金标准向量自洽")
     for v in golden["vectors"]:
@@ -80,7 +83,12 @@ def main() -> int:
         p_calc = (360_000 * v["phase_cnt"] * gen.F_SLOW_HZ) // (v["gate_cnt"] * gen.F_DSP_HZ)
         check(v["freq_milli_hz"] == f_calc, f"{tag}: freq 定点公式可复算")
         check(v["phase_milli_deg"] == p_calc, f"{tag}: phase 定点公式可复算")
-        check(v["phase_requested_mdeg"] < 180_000, f"{tag}: 相位 < 180°（映射前提）")
+        check(v["phase_requested_mdeg"] < 360_000, f"{tag}: 相位 < 360°（满量程）")
+        # 相位上界 = 9 位相位码（按 D 逐点）：>180° 的请求在相位码范围内同样合法
+        check(gen.mmcm_phase_code(v["phase_requested_mdeg"], v["div"]) <= gen.PHASE_CODE_MAX,
+              f"{tag}: 相位码 ≤ {gen.PHASE_CODE_MAX}（m = round(相位×D/45000)）")
+        check(v["phase_requested_mdeg"] <= gen.phase_max_mdeg(v["div"]),
+              f"{tag}: 相位 ≤ 该频点上界 {gen.phase_max_mdeg(v['div'])} mdeg")
 
     print("[2b] 溢出安全形式 == 朴素公式（随机抽样，逐位一致）")
     rng = random.Random(20251015)
@@ -106,18 +114,36 @@ def main() -> int:
                       ("0x30u", "DPM_REG_SIG_STATUS")]:
         check(re.search(rf"#define {name} {re.escape(off)}", regs) is not None,
               f"{name} 偏移为 {off}")
-    check("#define DPM_DRP_DIVIDE_FIELD(div) ((uint32_t)(div) & 0xFFu)" in regs,
-          "分频字段 = D 本体（低字节），不是 2D")
-    check("#define DPM_DRP_IDX_CLKOUT1_PHASE 6u" in regs,
-          "clk_out2 相位字索引为 6（0x218），独立毫度字而非分频字里的字段")
-    check("#define DPM_DRP_PHASE_MDEG(mdeg) ((uint32_t)(mdeg))" in regs,
-          "相位字单位是整数毫度")
-    check("#define DPM_DRP_STATUS_OFF 0x004u" in regs,
-          "DRP 状态寄存器在偏移 0x004（不是字 31）")
-    check("#define DPM_DRP_PHASE_WRITABLE 0" in regs,
-          "当前 bitstream 下相位不可在线改（实测结论）")
-    check("#define DPM_DRP_LOAD_OFF 0x25Cu" in regs, "Load 寄存器偏移 0x25C")
+    # 方案 A：PL 侧只有 MMCM 的 16 位寄存器镜像 + LOAD（0x43C1_0000 段）
+    for off, name in [("0x00u", "DPM_DRP_OFF_ID"), ("0x04u", "DPM_DRP_OFF_STATUS"),
+                      ("0x08u", "DPM_DRP_OFF_CLKFBOUT"), ("0x0Cu", "DPM_DRP_OFF_CLKFBOUT2"),
+                      ("0x10u", "DPM_DRP_OFF_CLKOUT0"), ("0x14u", "DPM_DRP_OFF_CLKOUT0_2"),
+                      ("0x18u", "DPM_DRP_OFF_CLKOUT1"), ("0x1Cu", "DPM_DRP_OFF_CLKOUT1_2"),
+                      ("0x20u", "DPM_DRP_OFF_DIVCLK"), ("0x24u", "DPM_DRP_OFF_POWER"),
+                      ("0x28u", "DPM_DRP_OFF_LOAD")]:
+        check(re.search(rf"#define {name} {re.escape(off)}", regs) is not None,
+              f"{name} 偏移为 {off}（方案 A 的寄存器镜像）")
+    check("#define DPM_DRP_PHASE_WRITABLE 1" in regs,
+          "相位可在线改（PS 直接编码 MMCM 的 PHASE_MUX/DELAY_TIME）")
+    check("#define DPM_DRP_STATUS_OFF 0x04u" in regs, "DRP 状态寄存器在偏移 0x04（bit0 = locked）")
+    check("DPM_MMCM_PHASE_STEP_MDEG_NUM 45000u" in regs, "相位网格分子 45000（= 45°/D 的分子）")
+    # 相位拆分必须与厂商 mmcm_pll_phase 一致：小数进 PHASE_MUX、整数进 DELAY_TIME
+    check(re.search(r"#define DPM_MMCM_ENCODE_CLKOUT", regs) is not None, "存在 MMCM 寄存器编码宏")
+    check("((m_ & 0x7u) << 13)" in regs and "((m_ >> 3) & 0x3Fu)" in regs,
+          "PHASE_MUX = 相位码低 3 位的分数、DELAY_TIME = 相位码 >> 3（与 mmcm_pll_phase 一致）")
     check("#define DPM_VERSION_VALUE 0x44504D02u" in regs, "VERSION 期望值 0x44504D02")
+
+    print("[3b] 分频上限三处一致（D ≤ 126：HIGH_TIME + LOW_TIME 各 6 位）")
+    doc = read(os.path.join(ROOT, "docs", "ps-protocol.md"))
+    calc = read(os.path.join(ROOT, "ps", "include", "dpm_calc.h"))
+    host_sig = read(os.path.join(ROOT, "host", "dpm_host", "sig.py"))
+    check(re.search(r"#define DPM_SIG_DIV_MAX 126u", calc) is not None,
+          "C 侧 DPM_SIG_DIV_MAX = 126")
+    check(re.search(r"^DIV_MAX = 126$", host_sig, re.M) is not None,
+          "上位机 DIV_MAX = 126")
+    check(gen.DIV_HARD_MAX == 126, f"金标准生成器硬上限 126（实际 {gen.DIV_HARD_MAX}）")
+    check("D ∈ 1..126" in doc or "D ≤ 126" in doc,
+          "协议文档写明分频上限 126（127 的 LOW_TIME 装不进 6 位）")
 
     print("[4] C 头文件命令码 vs 协议文档")
     proto = read(os.path.join(ROOT, "ps", "include", "dpm_proto.h"))
@@ -145,10 +171,21 @@ def main() -> int:
         row = re.search(rf"\|\s*{re.escape(mhz_txt)}\s*MHz\s*\|\s*{re.escape(vco_mhz)}\s*\|\s*"
                         rf"{mult}\s*\|\s*1\s*\|\s*{div}\s*\|", doc)
         check(row is not None, f"协议文档频点表含 {mhz_txt}MHz → VCO={vco_mhz} MULT={mult} D={div}")
-    phase_list = ", ".join(str(p // 1000) for p in golden["phase_points_mdeg"])
-    check(phase_list in doc, f"协议文档的相位点列表与金标准一致（{phase_list}）")
-    check("phase_controllable" in doc or "相位不可在线改" in doc,
-          "协议文档写明当前相位不可在线改的实测结论")
+    phase_list = ", ".join(f"{p / 1000:g}" for p in golden["phase_points_mdeg"])
+    check(phase_list in doc, f"协议文档的相位点并集与金标准一致（{phase_list}）")
+    # 逐频点相位点表：>180° 的测试点受 9 位相位码限制，各频点能测的范围不同
+    for fp in golden["freq_points"]:
+        per_freq = ", ".join(f"{p / 1000:g}" for p in fp["phases_mdeg"])
+        check(per_freq in doc,
+              f"协议文档相位点表含 {fp['freq_hz'] / 1e6:g}MHz 的相位点（{per_freq}）")
+    check("23017499" in doc or "m ≤ 511" in doc or "m <= 511" in doc,
+          "协议文档写明相位上界 = 9 位相位码（m ≤ 511 / 23017499）")
+    check("0x43C1_0000" in doc and "MMCM 寄存器镜像" in doc,
+          "协议文档写明方案 A 的寄存器镜像段（0x43C1_0000）")
+    check("PHASE_MUX" in doc and "DELAY_TIME" in doc and "45°/D" in doc,
+          "协议文档写明相位编码（PHASE_MUX/DELAY_TIME，网格 45°/D）")
+    check("必须先拉高 MMCM 的 RST" in doc,
+          "协议文档写明重配置必须先拉高 MMCM 的 RST（写 DRP 的前提）")
 
     print(f"\n共 {CHECKS} 项检查，失败 {len(FAILURES)} 项")
     if FAILURES:

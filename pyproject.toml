@@ -5,13 +5,16 @@ build-backend = "uv_build"
 [project]
 name = "dpm-host"
 version = "0.1.0"
-description = "DigitalPhaseMeter PC 侧 Python 上位机（串口协议客户端、CLI、Tk GUI 与 PL 仿真后端）"
+description = "DigitalPhaseMeter PC 侧 Python 上位机（串口协议客户端、CLI、PySide6 GUI 与 PL 仿真后端）"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "24bit-xjkp", email = "2283572185@qq.com" }]
-# 运行时依赖只允许纯标准库 + pyserial；GUI 用标准库 tkinter，不引入其它三方包。
-dependencies = ["pyserial>=3.5"]
+# 运行时依赖：pyserial（串口）+ PySide6（GUI）。开发期依赖见下面的 dependency-groups。
+dependencies = [
+    "pyserial>=3.5",
+    "pyside6>=6.12.0",
+]
 
 [dependency-groups]
 dev = ["black>=26.5.1", "isort>=9.0.1", "pytest>=9.1.1", "pytest-xdist>=3.8.0"]
@@ -44,3 +47,17 @@ exclude = '''
 [tool.isort]
 profile = "black"
 line_length = 140
+
+[tool.pytest.ini_options]
+# PC 侧上位机的测试套件（`uv run pytest` 不带参数即可全量收集）。
+# 两种调用都能工作：仓库根目录 `uv run pytest`、`host/` 目录 `uv run pytest`
+# （rootdir 都落在仓库根，`testpaths` 与 `pythonpath` 相对 rootdir 解析）。
+testpaths = ["host/tests"]
+# 无需安装即可 `import dpm_host`；host/tests/conftest.py 里还有一层等价兜底。
+pythonpath = ["host"]
+addopts = "-ra --strict-markers"
+# 标记只用于筛选/展示，默认**全部执行**（不在 addopts 里排除）。
+markers = [
+    "slow: 运行时间较长的用例（真实等待超时/流通知，默认执行）",
+    "pty: 依赖真实伪终端与子进程的用例（默认执行）",
+]

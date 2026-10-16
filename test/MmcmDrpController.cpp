@@ -33,6 +33,14 @@ namespace
 
     constexpr auto clock_period{20_ns};
 
+    /// IP 在 BD 里的基地址（`vivado/create_bd.tcl` 的 M01_AXI → 0x43C1_0000）。
+    ///
+    /// 激励必须按**真实地址**（基地址 + 偏移）驱动：AXI 互连不剥离基地址，slave 看到的是
+    /// 完整 32 位地址。历史上这里按裸偏移（`idx * 4`）驱动，掩盖了「窗口判断误用高位地址」
+    /// 的缺陷——上板时所有 DRP 读写都被丢弃、SET_SIG 恒回 ERR_BUSY。
+    constexpr std::uint32_t kIpBase{0x43C1'0000u};
+    constexpr std::uint32_t ip_addr(std::uint32_t word_index) { return kIpBase + word_index * 4u; }
+
     // 寄存器字索引（字节偏移 = idx * 4）
     constexpr std::uint32_t kId{0};
     constexpr std::uint32_t kStatus{1};
@@ -53,6 +61,8 @@ namespace
     {
         std::uint32_t addr;
         std::uint32_t data;
+        /// 该笔写发生时 MMCM 重配置复位是否已拉高（要求恒为 1）
+        std::uint32_t reset_level;
     };
 
     /// DUT 端口包装：AXI4-Lite 从口 + DRP 从端模型 + locked
@@ -85,6 +95,8 @@ namespace
         bit_slice<CData> drp_drdy;
         // MMCM 锁定
         bit_slice<CData> locked;
+        // 重配置复位（写 DRP 期间必须为高）
+        bit_slice<CData> mmcm_reset;
 
         explicit port_t(dut_t& dut) :
             clock{dut.clock}, resetn{dut.resetn}, awaddr{dut.s_axi_lite_awaddr, 32zu, dec_unsigned},
@@ -96,7 +108,8 @@ namespace
             arready{dut.s_axi_lite_arready, boolean}, rdata{dut.s_axi_lite_rdata, 32zu, dec_unsigned},
             rvalid{dut.s_axi_lite_rvalid, boolean}, rready{dut.s_axi_lite_rready, boolean},
             drp_daddr{dut.drp_daddr, 7zu, dec_unsigned}, drp_di{dut.drp_di, 16zu, dec_unsigned}, drp_den{dut.drp_den, boolean},
-            drp_dwe{dut.drp_dwe, boolean}, drp_dout{dut.drp_dout}, drp_drdy{dut.drp_drdy, boolean}, locked{dut.locked, boolean}
+            drp_dwe{dut.drp_dwe, boolean}, drp_dout{dut.drp_dout}, drp_drdy{dut.drp_drdy, boolean}, locked{dut.locked, boolean},
+            mmcm_reset{dut.mmcm_reset, boolean}
         {
         }
 
@@ -110,7 +123,7 @@ namespace
     /// **同一拍**状态机就可能发出第一笔 DRP 写，若等写完成后再开始观察会漏掉第一笔。
     task<void> axi_write(port_t& port, std::uint32_t word_index, std::uint32_t data, std::vector<DrpWrite>* sink = nullptr)
     {
-        port.awaddr = static_cast<std::uint64_t>(word_index) * 4u;
+        port.awaddr = ip_addr(word_index);
         port.awvalid = 1;
         port.wdata = data;
         port.wstrb = 0xF;
@@ -119,7 +132,8 @@ namespace
         co_await port.stimulate();
         if((sink != nullptr) && (port.drp_den != 0u) && (port.drp_dwe != 0u))
         {
-            sink->push_back({static_cast<std::uint32_t>(port.drp_daddr), static_cast<std::uint32_t>(port.drp_di)});
+            sink->push_back({static_cast<std::uint32_t>(port.drp_daddr), static_cast<std::uint32_t>(port.drp_di),
+                             static_cast<std::uint32_t>(port.mmcm_reset)});
         }
         // 等 bvalid
         for(std::size_t i{0zu}; i != 20zu && port.bvalid == 0u; ++i)
@@ -128,7 +142,8 @@ namespace
             co_await port.stimulate();
             if((sink != nullptr) && (port.drp_den != 0u) && (port.drp_dwe != 0u))
             {
-                sink->push_back({static_cast<std::uint32_t>(port.drp_daddr), static_cast<std::uint32_t>(port.drp_di)});
+                sink->push_back({static_cast<std::uint32_t>(port.drp_daddr), static_cast<std::uint32_t>(port.drp_di),
+                             static_cast<std::uint32_t>(port.mmcm_reset)});
             }
         }
         port.awvalid = 0;
@@ -141,7 +156,7 @@ namespace
     /// rready 常为 1，因此读到 rvalid 的那一拍即完成握手，直接取 rdata。
     task<std::uint32_t> axi_read(port_t& port, std::uint32_t word_index)
     {
-        port.araddr = static_cast<std::uint64_t>(word_index) * 4u;
+        port.araddr = ip_addr(word_index);
         port.arvalid = 1;
         std::uint32_t value{0};
         bool got{false};
@@ -189,7 +204,8 @@ namespace
             co_await port.stimulate();
             if((port.drp_den != 0u) && (port.drp_dwe != 0u))
             {
-                writes.push_back({static_cast<std::uint32_t>(port.drp_daddr), static_cast<std::uint32_t>(port.drp_di)});
+                writes.push_back({static_cast<std::uint32_t>(port.drp_daddr), static_cast<std::uint32_t>(port.drp_di),
+                                  static_cast<std::uint32_t>(port.mmcm_reset)});
             }
         }
         co_return writes;
@@ -232,6 +248,12 @@ namespace
          {kPower, 0xFFFF},
          }
     };
+
+    /// 按**字索引**（不是数组下标）取 kPattern 里的值：kPattern 从 kClkfbout 起顺序排列。
+    constexpr std::uint32_t pattern_value(std::uint32_t word_index)
+    {
+        return kPattern.at(word_index - kClkfbout).second;
+    }
 }  // namespace
 
 TEST_CASE("MmcmDrpController：ID 与配置寄存器读写")
@@ -268,6 +290,75 @@ TEST_CASE("MmcmDrpController：ID 与配置寄存器读写")
     }
 }
 
+TEST_CASE("MmcmDrpController：地址译码只看页内偏移（基地址 + 偏移）")
+{
+    // 回归用例：地址译码必须接受「BD 基地址 + 页内偏移」的完整 32 位地址
+    // （上板实测：早期实现按 addr[31:6] == 0 判断窗口，真实地址 0x43C1_0008 被判为窗口外，
+    //  所有 DRP 读写被丢弃 → SET_SIG 恒回 ERR_BUSY）。同时确认页内越界偏移仍被忽略。
+    dut_context_t ctx{};
+    ctx.set_base_name("MmcmDrpController.window");
+    port_t port{ctx.dut()};
+    ctx.add_task(generate_clock(port.clock, clock_period));
+    ctx.add_task(max_eval_time(20_us));
+
+    std::optional<std::uint32_t> id_at_base{};
+    std::optional<std::uint32_t> clkout1_at_base{};
+    std::optional<std::uint32_t> read_out_of_page{};
+    std::optional<std::uint32_t> read_in_page_but_unmapped{};
+    ctx.add_task([&] -> task<void> {
+        co_await init_dut(port);
+        // 基地址 + 偏移：必须命中（早期实现这里读回 0）
+        id_at_base = co_await axi_read(port, kId);
+        co_await axi_write(port, kClkout1, pattern_value(kClkout1));
+        clkout1_at_base = co_await axi_read(port, kClkout1);
+        // 页内、但越出寄存器区的偏移（0x40 起，addr[11:6] != 0）：必须被忽略（读回 0）
+        port.araddr = kIpBase + 0x40u;
+        port.arvalid = 1;
+        for(std::size_t i{0zu}; i != 20zu && !read_in_page_but_unmapped.has_value(); ++i)
+        {
+            co_await port.stimulate();
+            if((port.rvalid != 0u) && (port.rready != 0u))
+            {
+                read_in_page_but_unmapped = static_cast<std::uint32_t>(port.rdata);
+            }
+        }
+        port.arvalid = 0;
+        co_await port.stimulate();
+        // 同一页里的另一个越界偏移（0x80）：同样读回 0。
+        // 注：地址的 [31:12] 不参与译码——BD 的地址段（M01_AXI → 0x43C1_0000）保证互连
+        // 只把本段内的传输送到这里，因此别的 4KB 段（如 0x43C0_xxxx）根本不会到达本 IP；
+        // 换言之 `基地址 + 0x1000` 与 `基地址` 的低 12 位相同，不应该、也无法被本模块区分。
+        port.araddr = kIpBase + 0x80u;
+        port.arvalid = 1;
+        for(std::size_t i{0zu}; i != 20zu && !read_out_of_page.has_value(); ++i)
+        {
+            co_await port.stimulate();
+            if((port.rvalid != 0u) && (port.rready != 0u))
+            {
+                read_out_of_page = static_cast<std::uint32_t>(port.rdata);
+            }
+        }
+        port.arvalid = 0;
+        co_await eval_finish();
+    }());
+
+    ctx.loop_until_finish(20_us);
+
+    REQUIRE(id_at_base.has_value());
+    // REQUIRE 失败会终止用例，因此此处访问是安全的
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK_EQ(*id_at_base, 0x44504D03u);
+    REQUIRE(clkout1_at_base.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK_EQ(*clkout1_at_base, pattern_value(kClkout1));
+    REQUIRE(read_in_page_but_unmapped.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK_EQ(*read_in_page_but_unmapped, 0u);
+    REQUIRE(read_out_of_page.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    CHECK_EQ(*read_out_of_page, 0u);
+}
+
 TEST_CASE("MmcmDrpController：写 LOAD 触发 8 笔 DRP 写且顺序/数据正确")
 {
     dut_context_t ctx{};
@@ -286,7 +377,7 @@ TEST_CASE("MmcmDrpController：写 LOAD 触发 8 笔 DRP 写且顺序/数据正�
         // 写 LOAD=1 触发重配置：写期间就开始收集，避免漏掉同拍发出的第一笔
         // LOAD 写在**同一拍**就可能触发第一笔 DRP 写，因此把 LOAD 握手与 DRP 采样
         // 放进同一个逐拍循环，保证不漏拍。
-        port.awaddr = static_cast<std::uint64_t>(kLoad) * 4u;
+        port.awaddr = ip_addr(kLoad);
         port.awvalid = 1;
         port.wdata = 1u;
         port.wstrb = 0xF;
@@ -297,7 +388,8 @@ TEST_CASE("MmcmDrpController：写 LOAD 触发 8 笔 DRP 写且顺序/数据正�
             co_await port.stimulate();
             if((port.drp_den != 0u) && (port.drp_dwe != 0u))
             {
-                after.push_back({static_cast<std::uint32_t>(port.drp_daddr), static_cast<std::uint32_t>(port.drp_di)});
+                after.push_back({static_cast<std::uint32_t>(port.drp_daddr), static_cast<std::uint32_t>(port.drp_di),
+                                 static_cast<std::uint32_t>(port.mmcm_reset)});
             }
             if(port.bvalid != 0u)
             {
@@ -326,6 +418,15 @@ TEST_CASE("MmcmDrpController：写 LOAD 触发 8 笔 DRP 写且顺序/数据正�
     CHECK_EQ(after[5].data, 0x0014u);  // CLKOUT1_2 -> 0x0B
     CHECK_EQ(after[6].data, 0x1041u);  // DIVCLK    -> 0x16
     CHECK_EQ(after[7].data, 0xFFFFu);  // POWER     -> 0x28
+    // 8 笔 DRP 写全部在 MMCM 重配置复位拉高期间发出（MMCM 的 DRP 写要求器件处于复位，
+    // 否则相位延迟单元不重新初始化——上板实测「分频字生效、相位字不生效」即此故）
+    for(std::size_t i{0zu}; i != 8zu; ++i)
+    {
+        CAPTURE(i);
+        CHECK_EQ(after[i].reset_level, 1u);
+    }
+    // 写完之后复位必须放开（否则 MMCM 不会重新锁定）
+    CHECK_EQ(static_cast<std::uint32_t>(port.mmcm_reset), 0u);
 }
 
 TEST_CASE("MmcmDrpController：DEN 每笔只拉高一拍，busy 在重配置期间为 1")
@@ -342,7 +443,7 @@ TEST_CASE("MmcmDrpController：DEN 每笔只拉高一拍，busy 在重配置期�
     ctx.add_task([&] -> task<void> {
         co_await init_dut(port);
         busy_idle_before = co_await axi_read(port, kStatus);
-        port.awaddr = static_cast<std::uint64_t>(kLoad) * 4u;
+        port.awaddr = ip_addr(kLoad);
         port.awvalid = 1;
         port.wdata = 1u;
         port.wstrb = 0xF;

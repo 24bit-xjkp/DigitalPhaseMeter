@@ -31,6 +31,11 @@
  * MMCME2_ADV 的同名端口。DCLK 由外部（`MmcmDrpController` 所在的主时钟域）驱动，
  * 这里把它接成 `drpDclk` 输入。
  *
+ * `drpReset` 是**重配置复位**（高有效，由 `MmcmDrpController` 在写 DRP 期间拉高），
+ * 与系统复位 `reset` 相或后接 MMCM 的 `RST`。MMCM 的 DRP 写要求器件处于复位状态，
+ * 且相位延迟单元只在复位/重新锁定时重新初始化——不拉这个复位时实测「分频字生效、
+ * 相位字不生效」。
+ *
  * ## 注意
  *
  * 本模块只负责时钟产生与门控；**不改变任何 MMCM 配置**。复位后 MMCM 使用
@@ -72,7 +77,9 @@ module dpm_mmcm_src #(
     input  wire        drpDen,
     input  wire        drpDwe,
     output wire [15:0] drpDout,
-    output wire        drpDrdy
+    output wire        drpDrdy,
+    /// 重配置复位（高有效）：控制器在写 DRP 期间拉高，与系统复位相或后接 MMCM.RST
+    input  wire        drpReset
 );
 
     wire clkfbout;
@@ -95,7 +102,8 @@ module dpm_mmcm_src #(
     wire clkout6_unused;
     wire clkfboutb_unused;
 
-    assign reset_high = reset;
+    // MMCM 的复位 = 系统复位 或 重配置复位（DRP 写期间必须让 MMCM 处于复位）
+    assign reset_high = reset | drpReset;
 
     // Safe Clock Startup：每个输出各自 8 位移位寄存器，连续 8 拍锁定后才放行。
     // ASYNC_REG + KEEP 与厂商生成物一致（该寄存器由复位异步清零）。

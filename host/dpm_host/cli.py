@@ -523,12 +523,8 @@ def cmd_sigtable(args: argparse.Namespace, client: DpmClient | None) -> int:
         print_json(
             {
                 "semantics": {
-                    "mode": semantics.mode,
-                    "phase_unit_deg_milli": semantics.phase_unit_deg_milli,
-                    "phase_unit_ps_per_lsb": (
-                        float(semantics.phase_unit_ps_per_lsb) if semantics.phase_unit_ps_per_lsb is not None else None
-                    ),
                     "phase_controllable": semantics.phase_controllable,
+                    "phase_grid_mdeg_num": S.PHASE_GRID_MDEG_NUM,
                     "path": semantics.path,
                     "source": semantics.source,
                 },
@@ -582,9 +578,18 @@ def cmd_scan(args: argparse.Namespace, client: DpmClient) -> int:
         print(f"扫描计划：{len(freqs)} 个频点 × {len(phases)} 个相位点 = {len(freqs) * len(phases)} 行")
         print(f"相位可控性：{'是' if sem.phase_controllable else '否（实现相位恒为静态 ' + f'{sem.phase_static_milli_deg / 1000:.3f}' + '°）'}"
               f"，来源 {sem.path or '回退'}")
+        skipped: list[str] = []
         for f in freqs:
             sol = S.solve_sig(f, 0, client.slow_hz, S.current_semantics())
             print(f"  {f / 1e6:>9.4f} MHz → {sol.describe()}")
+            for p in phases:
+                # 相位上界 = 9 位相位码（按 D 逐点）：这些点服务端会回 ERR_PARAM，扫描会跳过
+                if sol.div and not S.phase_code_fits(int(round(p * 1000)), sol.div):
+                    skipped.append(f"{f / 1e6:g}MHz/{p:g}°")
+        if skipped:
+            head = "、".join(skipped[:6]) + ("…" if len(skipped) > 6 else "")
+            print(f"  其中 {len(skipped)} 个 (频点, 相位) 超出相位码上界（`m ≤ 511`），会被跳过：{head}")
+            print(f"  实际可扫 {len(freqs) * len(phases) - len(skipped)} 行")
     rows: list[dict] = []
 
     def on_row(row: dict) -> None:

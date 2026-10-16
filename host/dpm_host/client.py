@@ -713,7 +713,20 @@ class DpmClient:
             for phase_deg in phases_deg:
                 phase_mdeg = int(round(float(phase_deg) * 1000))
                 self.wait_idle(timeout=timeout)
-                info = self.set_sig(freq_hz, phase_mdeg)
+                try:
+                    info = self.set_sig(freq_hz, phase_mdeg)
+                except DpmError as exc:
+                    # 相位上界 = 9 位相位码（按 D 逐点，见 docs/ps-protocol.md §6.2）：越界的
+                    # (频点, 相位) 组合服务端回 ERR_PARAM。这是**该点不可实现**，不是链路故障，
+                    # 因此跳过该点继续扫（否则一个越界点会让整轮扫描中断）。
+                    # 其它错误码（如 ERR_BUSY）仍然抛出。
+                    if exc.code != P.Cmd.ERR_PARAM:
+                        raise
+                    emit(
+                        f"跳过 {freq_hz / 1e6:g}MHz/{phase_mdeg / 1000:g}°："
+                        f"SET_SIG 回 ERR_PARAM（相位超出该频点的 9 位相位码上界）"
+                    )
+                    continue
                 if max_error_milli_hz is not None and abs(info.freq_hz - freq_hz) * 1000 > max_error_milli_hz:
                     emit(f"跳过 {freq_hz / 1e6:g}MHz：实现频率 {info.freq_hz / 1e6:g}MHz 偏差过大")
                     continue

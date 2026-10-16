@@ -133,23 +133,23 @@ static void txn(dpm_model_t *m)
  * 方案 A 下寄存器就是 MMCM 的原始 16 位值，按 XAPP888 的位域解码：
  *   ClkReg1 = {PHASE_MUX[15:13], 1'b1, HIGH_TIME[11:6], LOW_TIME[5:0]}
  *   ClkReg2 = {EDGE[7], NO_COUNT[6], DELAY_TIME[5:0]}
- * 分频比 = HIGH_TIME + LOW_TIME；相位由 DELAY_TIME（VCO 周期）换算回毫度。 */
+ * 分频比 = HIGH_TIME + LOW_TIME；相位 = PHASE_MUX × 1/8 VCO 周期 + DELAY_TIME × 1 VCO 周期。 */
 static int internal_point(const dpm_model_t *m, uint32_t *vco_hz, uint32_t *div, uint32_t *phase_mdeg)
 {
     uint32_t fb = m->drp[DPM_DRP_OFF_CLKFBOUT / 4u];
     uint32_t c0 = m->drp[DPM_DRP_OFF_CLKOUT0 / 4u];
+    uint32_t c11 = m->drp[DPM_DRP_OFF_CLKOUT1 / 4u];
     uint32_t c12 = m->drp[DPM_DRP_OFF_CLKOUT1_2 / 4u];
     uint32_t dv = m->drp[DPM_DRP_OFF_DIVCLK / 4u];
     /* divide==1 时 NO_COUNT 置位、HIGH/LOW_TIME 都是占位的 1，必须用共享解码函数 */
     uint32_t mult = dpm_mmcm_decode_divide(fb);
     uint32_t divclk = dpm_mmcm_decode_divclk(dv);
     uint32_t d = dpm_mmcm_decode_divide(c0);
-    uint32_t delay = c12 & 0x3Fu;
     uint32_t v;
 
 #ifdef DPM_MODEL_DEBUG
-    fprintf(stderr, "DBG ip: fb=0x%04X dv=0x%04X c0=0x%04X c12=0x%04X -> mult=%u divclk=%u d=%u\n",
-            fb, dv, c0, c12, mult, divclk, d);
+    fprintf(stderr, "DBG ip: fb=0x%04X dv=0x%04X c0=0x%04X c11=0x%04X c12=0x%04X -> mult=%u divclk=%u d=%u\n",
+            fb, dv, c0, c11, c12, mult, divclk, d);
 #endif
     if (mult == 0u || divclk == 0u || d == 0u) {
         return 0;
@@ -161,7 +161,7 @@ static int internal_point(const dpm_model_t *m, uint32_t *vco_hz, uint32_t *div,
     *vco_hz = v;
     *div = d;
     if (phase_mdeg != 0) {
-        *phase_mdeg = dpm_mmcm_decode_phase_mdeg(delay, d);
+        *phase_mdeg = dpm_mmcm_decode_phase_mdeg(c11, c12, d);
     }
     return 1;
 }
@@ -181,7 +181,7 @@ void dpm_model_internal_point(const dpm_model_t *m, uint32_t *vco_hz, uint32_t *
         *div = d;
     }
     if (phase_mdeg != 0) {
-        *phase_mdeg = f; /* 寄存器文件里相位字的内容（毫度）；当前未接线，不参与测量 */
+        *phase_mdeg = f; /* 由 PHASE_MUX/DELAY_TIME 反推的实现相位（毫度） */
     }
 }
 

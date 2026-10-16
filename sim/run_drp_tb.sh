@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 #
+#
+# 【已作废·仅作历史记录】本脚本依赖已被方案 A 取代的 `clk_wiz_src` IP（已从 create_bd.tcl 删除），
+# 现在**跑不起来**；产出见 docs/verify-drp.md 与 docs/verify-report.md §3。
+# 当前方案的联调见 sim/run_handoff_tb.sh。
 # 用 Vivado 自带 xsim 跑 clk_wiz_src（MMCM + 动态重配置）的 DRP 位域语义实测激励
 # sim/tb_clk_wiz_src_drp.sv。
 #

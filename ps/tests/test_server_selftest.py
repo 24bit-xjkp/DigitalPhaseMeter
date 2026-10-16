@@ -5,7 +5,8 @@
   - 帧层的正向/负向：CRC 错、LEN 越界、噪声字节、未知命令、响应方向帧；
   - 全部命令码 0x01..0x0E + 通知帧 0x81/0x82；
   - 错误路径：非法 mode/source/freq/相位/PAYLOAD 长度 → 0xFE；未锁定选片内源、忙时命令 → 0xFF；
-  - 7 个冻结频点 × 4 个冻结相位点与 `spec/golden/vectors.json` 逐位对齐（gate/edge/phase 与定点输出）；
+  - 11 个冻结频点 × 逐频点相位点（含 >180° 的用例）与 `spec/golden/vectors.json` 逐位对齐
+    （gate/edge/phase 与定点输出）；
   - 单次/连续模式、流上报、结果覆盖丢失（lostCount/EVENT）。
 
 用法：
@@ -367,28 +368,40 @@ def test_gate_mode_source(sv: Server) -> None:
 
 
 def test_sig_and_golden(sv: Server, golden: dict, verbose: bool) -> None:
-    """7 个冻结频点 × 4 个冻结相位点：求解结果与 golden 一致，测量值与 golden 的 90° 行一致。
+    """11 个冻结频点 × 逐频点相位点（含 >180°）：求解结果与 golden 一致，测量值也一致。
 
-    相位说明（重要）：实测结论是**当前 bitstream 下 clk_out2 的相位不可在线改**
-    （`spec/drp_semantics.json` 的 `phase_controllable: false`，恒为静态 90.000°）。
-    因此：
-      - `SET_SIG` 仍按请求相位写 0x218 并在响应里回显**写入值**（补丁后即可生效）；
-      - 但 `GET_MEAS` 测出来的相位是 90° 那一行（模型照实建模），
-        所以对 0/45/135° 的请求，测量相位应当等于同频点 90° 行的期望值。
+    相位说明（方案 A）：相位由 PS 直接编码进 MMCM 的 PHASE_MUX（1/8 VCO 周期）+
+    DELAY_TIME（整数 VCO 周期），网格 = `45°/D`。冻结相位点全部落在网格上，因此
+    `phaseMilliDeg` 精确回显请求值；测量相位应等于**同频点同请求相位**那一行。
+
+    相位点**逐频点不同**（`golden["freq_points"][*]["phases_mdeg"]`）：上界是 9 位相位码
+    `m = round(相位×D/45000) ≤ 511`，D=125（8MHz/6.4MHz）只能到 183.960°、
+    D=120（5MHz/6.25MHz）到 191.625°、D=32（31.25MHz）能到 315°。
     """
     vectors = golden["vectors"]
-    unit = golden["phase_unit_deg_mdeg"]
-    check("golden 相位量化单位 = 45000 毫度/步", unit == 45_000, str(unit))
+    grid = golden["phase_grid_mdeg_num"]
+    check("golden 相位网格分子 = 45000（1/8 VCO 周期 → 45°/D）", grid == 45_000, str(grid))
+    check("golden 写明 9 位相位码上限（m ≤ 511）与上界分子 23017499",
+          golden.get("phase_code_max") == 0x1FF and golden.get("phase_max_mdeg_num") == 23_017_499,
+          f"phase_code_max={golden.get('phase_code_max')} "
+          f"phase_max_mdeg_num={golden.get('phase_max_mdeg_num')}")
     rows = {(v["freq_hz"], v["phase_requested_mdeg"]): v for v in vectors}
     freqs = sorted({v["freq_hz"] for v in vectors})
-    phases = sorted({v["phase_requested_mdeg"] for v in vectors})
+    # 逐频点相位点表：与 golden 的 freq_points 一致（不是所有频点都能测所有相位）
+    by_freq = {fp["freq_hz"]: fp for fp in golden["freq_points"]}
+    check("golden 逐频点相位点表与向量一致",
+          all(sorted(rows[f, p]["phase_requested_mdeg"] for p in fp["phases_mdeg"]) ==
+              sorted(fp["phases_mdeg"]) for f, fp in by_freq.items()),
+          f"{sum(len(fp['phases_mdeg']) for fp in by_freq.values())} 组")
 
     n_ok = 0
+    n_over180 = 0
     for freq in freqs:
-        for phase in phases:
+        for phase in sorted(by_freq[freq]["phases_mdeg"]):
             v_solve = rows[(freq, phase)]        # 求解/回显期望（随请求相位变化）
             v_meas = rows[(freq, phase)]         # 实测期望：相位跟随写入值（补丁已生效）
             tag = f"{freq/1e6:g}MHz/{phase/1000:g}°"
+            n_over180 += 1 if phase >= 180_000 else 0
 
             pl = sv.expect_ok(CMD_SET_SIG, u32(freq) + u32(phase), timeout=10.0)
             check(f"{tag} SET_SIG 响应长度 = 15", len(pl) == 15, pl.hex())
@@ -398,11 +411,13 @@ def test_sig_and_golden(sv: Server, golden: dict, verbose: bool) -> None:
                   rf == v_solve["freq_hz"] and rvco == v_solve["vco_hz"] and rdiv == v_solve["div"],
                   f"f={rf} VCO={rvco} D={rdiv} vs golden f={v_solve['freq_hz']} "
                   f"VCO={v_solve['vco_hz']} D={v_solve['div']}")
-            # 方案 A 下相位可在线改，phaseField = 吸附后的相位 / 45° 步长
-            check(f"{tag} phaseField = 相位/45° 步长",
-                  rfield == rp // unit, f"field={rfield} 期望 {rp // unit}（rp={rp}）")
-            check(f"{tag} 回显的写入相位 = 吸附到 45° 网格后的值",
-                  rp == v_solve["phase_requested_mdeg"] // unit * unit, f"{rp}")
+            # 方案 A：phaseField = MMCM 的 DELAY_TIME（整数 VCO 周期）＝ 相位码 >> 3
+            want_code = (rp * rdiv * 8 + 180_000) // 360_000
+            check(f"{tag} phaseField = DELAY_TIME（相位码 >> 3）",
+                  rfield == ((want_code >> 3) & 0x3F),
+                  f"field={rfield} 期望 {(want_code >> 3) & 0x3F}（rp={rp} D={rdiv}）")
+            check(f"{tag} 回显的写入相位 = 请求值（冻结相位点都在 45°/D 网格上）",
+                  rp == v_solve["phase_requested_mdeg"], f"{rp}")
 
             pl = sv.expect_ok(CMD_GET_SIG)
             check(f"{tag} GET_SIG 与 SET_SIG 一致",
@@ -431,20 +446,37 @@ def test_sig_and_golden(sv: Server, golden: dict, verbose: bool) -> None:
             if verbose:
                 print(f"    {tag}: 写相位={rp/1000:g}° 实测相位={pmdeg/1000:.3f}° "
                       f"f={freq_hz} Hz gate={gate} edge={edge} phase={phase_cnt} seq={seq}")
-    check(f"golden 覆盖 {len(freqs)} 频点 × {len(phases)} 相位点 = {len(vectors)} 组",
-          len(freqs) * len(phases) == len(vectors) and n_ok == len(vectors),
-          f"{n_ok}/{len(vectors)}")
+    check(f"golden 覆盖 {len(freqs)} 个频点、{len(vectors)} 组（逐频点相位点，含 ≥180° 的 "
+          f"{n_over180} 组）", n_ok == len(vectors), f"{n_ok}/{len(vectors)}")
 
     # 错误路径：非法频率 / 相位 / PAYLOAD 长度
     sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(3_000_000) + u32(0))       # 低于可达下限
     sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(2_000_000_000) + u32(0))   # 高于 VCO 上限（2GHz 无解）
-    sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(25_000_000) + u32(180_000))  # 相位必须 < 180°
+    # 相位上界 = 9 位相位码（按 D 逐点）：8MHz（D=125）的 200° 需要相位码 556 > 511，
+    # MMCM 的字段会截断、相位回绕，必须拒绝；D=40（25MHz）则能表示整个 0~360°。
+    sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(8_000_000) + u32(200_000))
+    sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(6_400_000) + u32(184_500))  # D=125，上界 184.139°
+    sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(25_000_000) + u32(360_000))  # 满量程（= 0°）
     sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(25_000_000) + u32(0)[:3])
     sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(0) + u32(0))
-    # 22.5° 不在 45° 网格上：就近吸附（半点向上 → 45°）并回显实际写入值
+    # 22.5° 在 25MHz（D=40）下正好是 20 个 1/8 VCO 周期步：精确可表示（旧固件按 45°
+    # 吸附的缺陷已修，见 docs/onboard-ax7010.md §5）
     pl = sv.expect_ok(CMD_SET_SIG, u32(25_000_000) + u32(22_500))
-    check("SET_SIG(22.5°) 吸附到 45° 网格（半点向上 → 45°）并回显",
-          rd_u32(pl, 4) == 45_000 and pl[14] == 1, pl.hex())
+    check("SET_SIG(22.5°) 精确落在 45°/D 网格上并回显 22500",
+          rd_u32(pl, 4) == 22_500 and pl[14] == 2, pl.hex())
+    # D=125（8MHz）的网格是 0.36°：22.5° 吸附到最近的格点 22.680°
+    pl = sv.expect_ok(CMD_SET_SIG, u32(8_000_000) + u32(22_500))
+    check("SET_SIG(22.5°@8MHz) 吸附到网格点 22680 并回显",
+          rd_u32(pl, 4) == 22_680, pl.hex())
+    # >180° 的合法用例（旧固件一律拒 ≥180°，属过度保守）：
+    #   25MHz（D=40）270° = 相位码 240 → DELAY_TIME 30、PHASE_MUX 0；
+    #   8MHz（D=125）183.96° = 相位码上界 511 → DELAY_TIME 63、PHASE_MUX 7。
+    pl = sv.expect_ok(CMD_SET_SIG, u32(25_000_000) + u32(270_000))
+    check("SET_SIG(270°@25MHz) 合法：回显 270000、phaseField=30",
+          rd_u32(pl, 4) == 270_000 and pl[14] == 30, pl.hex())
+    pl = sv.expect_ok(CMD_SET_SIG, u32(8_000_000) + u32(183_960))
+    check("SET_SIG(183.96°@8MHz) 合法：回显 183960、phaseField=63（相位码 511）",
+          rd_u32(pl, 4) == 183_960 and pl[14] == 63, pl.hex())
 
 
 def test_result_clear(sv: Server) -> None:

@@ -7,8 +7,11 @@ AXI4 接口与顶层 IP 的验证用 **Vivado 自带 xsim + SystemVerilog 测试
 
 | 文件                            | 说明                                                             |
 | ------------------------------- | ---------------------------------------------------------------- |
-| `tb_digital_phase_meter_top.sv` | 顶层 IP 的测试激励：AXI4-Lite 主机 BFM、测量激励与结果寄存器校验 |
+| `tb_digital_phase_meter_top.sv` | 顶层 IP 的测试激励：AXI4-Lite 主机 BFM、测量激励与结果寄存器校验（**理想信号源**驱动 `srcSig1/srcSig2`） |
 | `run_xsim.sh`                   | 一键脚本：生成 RTL → `xvlog` 编译 → `xelab` 细化 → `xsim` 运行   |
+| `tb_src_handoff.sv`             | **片内源 ↔ 测量通路联调**：真实 `dpm_mmcm_src`（MMCME2_ADV）+ `MmcmDrpController` + `DigitalPhaseMeterTop`；激励按**完整地址**写 MMCM 寄存器镜像，并直接量两路输出的周期与相位差 |
+| `run_handoff_tb.sh`             | 上面那份激励的运行脚本（默认 4 个代表点；xsim 跑 MMCM 行为模型一次锁定约 1~2ms 仿真时间） |
+| `tb_clk_wiz_src_drp.sv`、`run_drp_tb.sh` | **已作废**：旧 `clk_wiz_src` 方案的 DRP 语义探针，依赖的 IP 已删除、跑不起来；保留是为了让 `docs/verify-drp.md` 的结论可追溯 |
 
 ## 运行
 
@@ -19,6 +22,10 @@ sim/run_xsim.sh --gui        # 运行结束后用 xsim GUI 打开波形
 sim/run_xsim.sh --clean      # 先清理 build/xsim
 XILINX_VIVADO=/path/to/Vivado sim/run_xsim.sh    # 指定 Vivado 安装路径
 ```
+
+联调激励（`run_handoff_tb.sh`）另需 `build/chisel/MmcmDrpController/` 与 `vivado/rtl/dpm_mmcm_src.v`，
+并链接 unisims_ver 的 `MMCME2_ADV`；它**必须按真实地址**（`0x43C1_0000 + 偏移`）驱动 AXI，
+否则测不出地址译码类缺陷（本项目踩过，见 `dpm-vivado-ip`）。
 
 脚本用 `build/chisel/DigitalPhaseMeterTop/` 下的生成产物仿真：每个模块只有**一份**产物
 （复位同步是纯 RTL 的 `ResetSynchronizer`，异步置位、与各域时钟同步释放），Verilator、xsim

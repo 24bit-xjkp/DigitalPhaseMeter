@@ -136,6 +136,22 @@ ctx.add_task(generate_reset(port.dst_reset, port.dst_clock));   // 目的域自�
 - 激励最后用 `wait_stimulate` 多等几个周期再 `eval_finish()`，避免波形被截断。
 - 每个用例结束时 `MESSAGE(ctx.stats())` 打印仿真时间与速度，便于判断闸门时间是否合理。
 
+### 8. AXI 激励必须按**真实地址**驱动（基地址 + 偏移）
+
+AXI 互连**不剥离基地址**，从口看到的是完整 32 位地址。测 AXI 从口时如果按「裸偏移」
+（`word_index * 4`）驱动，就测不出「窗口判断误用高位地址」这类缺陷——本项目踩过：
+`MmcmDrpController` 早期按 `addr[31:6] == 0` 判窗口，Verilator 用例按裸偏移能过，
+上板时真实地址 `0x43C1_0008` 被判为窗口外，所有 DRP 读写被丢弃、`SET_SIG` 恒回 `ERR_BUSY`。
+现在 `test/MmcmDrpController.cpp` 用 `kIpBase + word*4` 驱动，并有一条专门的地址译码用例。
+
+### 9. AXI BFM 的握手采样顺序
+
+从口在握手那一拍的下一个周期就会拉低 `awready`/`wready`（地址/数据被锁存），因此
+**不能**写成「等 AW 握手 → 等 W 握手」：第二个 `while (!(wvalid && wready))` 会永远等不到。
+要么把两个通道同拍举起、在 `@(posedge clk)` **之前**判断握手，要么按
+`sim/tb_digital_phase_meter_top.sv` 的顺序（AW 握手 → 撤销 → W 握手 → 撤销 → 等 B）。
+本项目 `sim/tb_src_handoff.sv` 早期版本因为这条把整条联调卡死在第一笔写。
+
 ## 验证取向：把被测模块当仪表，而不是复刻它的时序
 
 本项目的测试约定是**黑盒精度验证**：用 `verilator_utils::approx` 把测量结果与理论值对比，检查偏差是否落在容限内，而不逐周期建模内部状态机。

@@ -45,25 +45,39 @@ F_DSP_HZ = 400_000_000      # 高速（DSP/测量）时钟
 TARGET_GATE = 2000          # 默认闸门目标（低速周期数）→ 40µs
 
 # 冻结的验证频点：目标频率 → (VCO, MULT, DIVCLK=1, D)
-# 该表必须与 `solve_sig()` 的规则输出一致（文件末尾的 assert 会校验）。
-# 约束：600 ≤ VCO ≤ 1200 MHz、分频字段 = D ≤ 255
+# 该表必须与 `solve_sig()` 的规则输出一致（build_vectors 会断言）。
+# 约束：600 ≤ VCO ≤ 1200 MHz、分频字段 = D ≤ 126
+#
+# 10 个频点覆盖 4 个 VCO（600/750/800/1000MHz）、MULT 12/15/16/20 与
+# D = 20/25/40/50/80/100/120/125。选取规则（三条都要满足，见下方说明）：
+#   1. 只取**求解规则输出**的精确工作点（频率误差 0）；
+#   2. 信号周期是整数 ps（`t_sig = D×10^12/VCO`），金标准生成器因此全程整数运算
+#      ——7.5/15/30MHz 这类含因子 3 的频率周期不是整数 ps，不入表；
+#   3. 信号周期是 **DSP 周期（2.5ns）的整数倍**，即 `8D / MULT` 为整数：此时每个信号
+#      周期的相位计数窗口都是同一个整数，`phaseCnt % edgeCnt == 0` 严格成立。
+#      非整数时窗口在 k 与 k+1 之间交替（xsim 联调实测：6.4MHz/VCO=800/D=125 →
+#      `phaseCnt % edgeCnt = 129`），金标准的 `phaseCnt = round(相位/T_dsp)×edge_cnt`
+#      就只是近似值；因此这类频率（6.4/15.625/31.25MHz 等）一律不入冻结表。
 FREQ_POINTS_HZ = {
     5_000_000: (600_000_000, 12, 120),
     6_250_000: (750_000_000, 15, 120),
     8_000_000: (1_000_000_000, 20, 125),
     10_000_000: (1_000_000_000, 20, 100),
     12_500_000: (1_000_000_000, 20, 80),
+    16_000_000: (800_000_000, 16, 50),
     20_000_000: (1_000_000_000, 20, 50),
     25_000_000: (1_000_000_000, 20, 40),
+    40_000_000: (1_000_000_000, 20, 25),
+    50_000_000: (1_000_000_000, 20, 20),
 }
 
 # BD 的初始工作点：VCO = 50MHz × 20 = 1000MHz、D = 40（25MHz）
 BD_VCO_HZ = 1_000_000_000
 BD_DIV = 40
 # BD 初始工作点所在的分频范围（CLKOUT_DIVIDE 用 `DIVIDE_F` 表达的常见区间）
-BD_DIV_MAX = 127
+BD_DIV_MAX = 126
 # 分频比硬上限：超过它不再考虑（见 solve_sig 的说明）
-DIV_HARD_MAX = 127
+DIV_HARD_MAX = 126
 
 
 def solve_sig(target_freq_hz: int, f_in_hz: int = F_SLOW_HZ) -> tuple[int, int, int]:
@@ -71,14 +85,14 @@ def solve_sig(target_freq_hz: int, f_in_hz: int = F_SLOW_HZ) -> tuple[int, int, 
 
     规则（冻结，**按顺序逐级比较**）：
       1. `DIVCLK = 1`、`MULT ∈ 12..24` 整数、`VCO = f_in × MULT ∈ [600, 1200] MHz`、
-         `D ∈ 1..127`（分频字段 8 位可表示到 255，但硬上限取 127：见下）、不使用小数分频；
+         `D ∈ 1..126`（分频编码成 HIGH_TIME + LOW_TIME 各 6 位，上限 63+63=126）、不使用小数分频；
       2. 先最小化频率误差 `|VCO/D - f_target|`；
       3. 同误差（含多个精确解）时取 `cost = |VCO - 1000MHz| / 1MHz + |D - 40|` 最小者，
          即尽量贴近 BD 的初始工作点 `(VCO=1000MHz, D=40)`。
 
     该规则的输出就是冻结频点表（`FREQ_POINTS_HZ` 与之一致，由 `build_vectors()` 断言）：
     8/10/12.5/20/25MHz 落在 `MULT=20, D=125/100/80/50/40`；5MHz 在 1000MHz 下需要 D=200
-    （超硬上限 127），取 `600/12/120`；6.25MHz 的候选精确解里 `750/15/120` 的 cost 最小
+    （超硬上限 126），取 `600/12/120`；6.25MHz 的候选精确解里 `750/15/120` 的 cost 最小
     （cost = 250+80 = 330 < `600/12/96` 的 456）。
 
     返回 `(vco_hz, mult, div)`；无解抛异常。
@@ -116,9 +130,82 @@ def solve_sig(target_freq_hz: int, f_in_hz: int = F_SLOW_HZ) -> tuple[int, int, 
         raise ValueError(f"目标频率 {target_freq_hz} 无解")
     return best[3], best[4], best[5]
 
-# 冻结的相位点（度）：MMCM 相位字段的自然网格 = 1/8 VCO 周期 = 45°（VCO 越高步长越小，
-# 但字段本身是整数，写 1 个单位即 45°）。全部 < 180°，满足相位映射前提。
-PHASE_POINTS_MDEG = [0, 45_000, 90_000, 135_000]
+# 相位扫描点：45° 网格的基础点（含 180° 边界）+ 需要 PHASE_MUX 细调的 22.5°
+# + >180° 的 45° 倍数点。**不是所有频点都能测所有点**：上界由 9 位相位码决定，
+# 见 `phase_points_for()`。
+PHASE_BASE_MDEG = (0, 45_000, 90_000, 135_000, 180_000)
+PHASE_HALF_MDEG = 22_500                       # 仅 D 为偶数时精确落在 45°/D 网格上
+PHASE_OVER180_MDEG = (225_000, 270_000, 315_000)  # 相位码 5D/6D/7D ≤ 511 时才可用
+PHASE_CODE_MAX = 0x1FF                         # 9 位相位码（DELAY_TIME 6 位 + PHASE_MUX 3 位）
+PHASE_FULL_SCALE_MDEG = 360_000
+#: `m <= 511` ⟺ `phase_mdeg × D <= 23017499`（推导见 `ps/include/dpm_regs.h`）。
+PHASE_MAX_MDEG_NUM = 23_017_499
+
+
+def mmcm_phase_code(phase_mdeg: int, div: int) -> int:
+    """把请求相位编码成 MMCM 的 9 位相位码 `m = round(phase_mdeg × div / 45000)`。
+
+    `m` 的单位是 1/8 VCO 周期：`m` 的低 6 位进 DELAY_TIME（整数 VCO 周期）、
+    高 3 位进 PHASE_MUX（1/8 VCO 周期），与厂商 `mmcm_pll_phase` /
+    `mmcm_pll_count_calc` 的拆分一致（见 `ps/include/dpm_regs.h`）。
+    由此可实现的相位网格 = `45000/div` 毫度 = `45/div` 度。
+    """
+    num = phase_mdeg * div * 8 + 180_000
+    return num // 360_000
+
+
+def mmcm_achievable_mdeg(phase_mdeg: int, div: int) -> int:
+    """请求相位经 MMCM 网格量化后**真正能输出**的相位（毫度）。"""
+    code = mmcm_phase_code(phase_mdeg, div)
+    return (code * 45_000 + div // 2) // div
+
+
+def phase_max_mdeg(div: int) -> int:
+    """给定分频 D 时可**请求**的最大相位（毫度，含）：9 位相位码与满量程谁先撞上。"""
+    return min(PHASE_MAX_MDEG_NUM // div, PHASE_FULL_SCALE_MDEG - 1)
+
+
+def phase_code_top_mdeg(div: int) -> int:
+    """相位码上界点（`m = 511`）对应的可请求相位（毫度），已保证落在网格上。
+
+    `m = 511` 是硬件能表示的最大延迟（DELAY_TIME=63、PHASE_MUX=7）。这个点用于
+    保证**每个频点都有 >180° 的用例**：D ≥ 103 时 225° 已经越界（`5D > 511`）。
+    """
+    p = (PHASE_CODE_MAX * 45_000 + div // 2) // div
+    assert mmcm_phase_code(p, div) == PHASE_CODE_MAX, f"D={div} 的上界点 {p} 编码不是 511"
+    assert mmcm_achievable_mdeg(p, div) == p, f"D={div} 的上界点 {p} 不在网格上"
+    return p
+
+
+def phase_points_for(div: int) -> list[int]:
+    """某个频点（分频 D）要测的相位点（毫度，升序）。
+
+    规则（与 `host/dpm_host/sig.py::phase_code_fits`、`ps/include/dpm_regs.h::
+    dpm_mmcm_phase_code_fits` 同一判据）：
+
+    1. 必含 `0/45/90/135/180`——45° 的整数倍恒落在 `45°/D` 网格上，且 180° 的相位码
+       是 `4D ≤ 504`，所有合法 D（≤126）都能表示（旧固件一律拒 ≥180°，本次放宽）；
+    2. D 为偶数时含 22.5°（= `D/2` 个网格步）；
+    3. 含 >180° 的 45° 倍数（225/270/315）中相位码 ≤ 511 的那些：
+       225° → `5D ≤ 511` ⟺ D ≤ 102；270° → D ≤ 85；315° → D ≤ 73；
+    4. 若该频点没有任何 >180° 的 45° 倍数可用（D ≥ 103），补上**相位码上界点**
+       （`m = 511`，硬件能表示的最大相位），保证每个频点都有 >180° 的用例。
+    """
+    if div <= 0:
+        raise ValueError(f"D 必须为正数，实际 {div}")
+    points = list(PHASE_BASE_MDEG)
+    if div % 2 == 0:
+        points.append(PHASE_HALF_MDEG)
+    over = [p for p in PHASE_OVER180_MDEG if mmcm_phase_code(p, div) <= PHASE_CODE_MAX]
+    points.extend(over)
+    if not over:
+        points.append(phase_code_top_mdeg(div))
+    points = sorted(set(points))
+    for p in points:
+        assert p < PHASE_FULL_SCALE_MDEG, f"D={div} 的相位点 {p} 超过满量程"
+        assert mmcm_phase_code(p, div) <= PHASE_CODE_MAX, f"D={div} 的相位点 {p} 越界"
+        assert mmcm_achievable_mdeg(p, div) == p, f"D={div} 的相位点 {p} 不在 45°/D 网格上"
+    return points
 
 
 def fixed_point(gate_cnt: int, edge_cnt: int, phase_cnt: int,
@@ -168,19 +255,37 @@ def build_vector(freq_hz: int, vco_hz: int, mult: int, div: int, phase_mdeg: int
     assert abs(f_actual - freq_hz) < 1.0, f"频点 {freq_hz} 与实际 {f_actual} 不符"
     assert div <= 255, f"D={div} 超出分频字段范围"
     assert 600_000_000 <= vco_hz <= 1_200_000_000, f"VCO={vco_hz} 越界"
-    assert phase_mdeg < 180_000, "相位点必须 < 180°（半个信号周期）"
+    # 相位上界 = 9 位相位码（按 D 逐点），>180° 的请求在相位码范围内同样可测
+    assert phase_mdeg < PHASE_FULL_SCALE_MDEG, "相位点必须 < 360°（满量程与 0° 同义）"
+    assert mmcm_phase_code(phase_mdeg, div) <= PHASE_CODE_MAX, (
+        f"{freq_hz}Hz/{phase_mdeg}mdeg 的相位码 {mmcm_phase_code(phase_mdeg, div)} 超出 9 位"
+        f"（上界 {phase_max_mdeg(div)} mdeg）")
 
     t_dsp_ps = 10**12 // F_DSP_HZ          # DSP 周期，ps（400MHz → 2500ps，整除）
     t_sig_ps_num = div * 10**12            # 信号周期 ps 的分子（vco_hz 整除情形）
     assert t_sig_ps_num % vco_hz == 0, "信号周期必须是整数 ps（频点表保证）"
     t_sig_ps = t_sig_ps_num // vco_hz
+    # 信号周期必须是 DSP 周期的整数倍：此时每个信号周期的相位计数窗口都是同一个整数，
+    # `phaseCnt = round(相位/T_dsp) × edgeCnt` 才是**严格**等式（`phaseCnt % edgeCnt == 0`）。
+    assert t_sig_ps % t_dsp_ps == 0, (
+        f"{freq_hz}Hz 的周期 {t_sig_ps}ps 不是 DSP 周期 {t_dsp_ps}ps 的整数倍"
+        "（相位计数窗口会在 k 与 k+1 之间交替，金标准的 phase_cnt 只是近似）")
+
+    # 相位先被 MMCM 的 1/8 VCO 周期网格量化（方案 A：PS 直接编码 DELAY_TIME/PHASE_MUX），
+    # 再由测量通路量化到 DSP 采样网格。`phase_points_for()` 给出的每个点（含 >180° 的
+    # 上界点）都精确落在该频点的 45°/D 网格上，因此 `mmcm_mdeg == phase_mdeg`；
+    # `assert` 把这个前提固化下来，改频点/相位点时不会静默漂移。
+    code = mmcm_phase_code(phase_mdeg, div)
+    mmcm_mdeg = mmcm_achievable_mdeg(phase_mdeg, div)
+    assert mmcm_mdeg == phase_mdeg, (
+        f"{freq_hz}Hz/{phase_mdeg}mdeg 不在 MMCM 网格（45/{div} 度）上：实际 {mmcm_mdeg}")
 
     gate_cnt = gate_count(f_actual)
     # 参考沿数：窗口长度 / 参考周期 = gate_cnt * T_slow / T_sig = gate_cnt * f_sig / f_slow
     edge_cnt = (gate_cnt * freq_hz) // F_SLOW_HZ
 
     # 真实相位差（ps）→ 量化到 DSP 采样网格（整数个 DSP 周期）
-    phase_ps_num = phase_mdeg * t_sig_ps       # 分子（单位 1e-3 度 · ps）
+    phase_ps_num = mmcm_mdeg * t_sig_ps       # 分子（单位 1e-3 度 · ps）
     dsp_cycles = round_half_even(phase_ps_num, 360_000 * t_dsp_ps) if edge_cnt else 0
     phase_ps_actual = dsp_cycles * t_dsp_ps
     phase_cnt = dsp_cycles * edge_cnt
@@ -202,7 +307,12 @@ def build_vector(freq_hz: int, vco_hz: int, mult: int, div: int, phase_mdeg: int
         "divclk": 1,
         "div": div,
         "phase_requested_mdeg": phase_mdeg,
-        "phase_field_45deg": phase_mdeg // 45_000,
+        # MMCM 相位码：低 6 位 = DELAY_TIME（SET_SIG 回包的 phaseField）、高 3 位 = PHASE_MUX
+        "phase_code": code,
+        "phase_field": (code >> 3) & 0x3F,
+        "phase_mux": code & 0x7,
+        "phase_mmcm_mdeg": mmcm_mdeg,
+        "phase_grid_mdeg_num": 45_000,
         "gate_cnt": gate_cnt,
         "edge_cnt": edge_cnt,
         "phase_cnt": phase_cnt,
@@ -220,13 +330,26 @@ def build_vector(freq_hz: int, vco_hz: int, mult: int, div: int, phase_mdeg: int
 
 def build_vectors() -> dict:
     vectors = []
+    freq_points = []
     for freq_hz, (vco_hz, mult, div) in FREQ_POINTS_HZ.items():
         solved = solve_sig(freq_hz)
         assert solved == (vco_hz, mult, div), (
             f"频点 {freq_hz} 的解 {solved} 与冻结表 {(vco_hz, mult, div)} 不一致："
             "表必须等于求解规则的输出")
-        for phase_mdeg in PHASE_POINTS_MDEG:
+        phases = phase_points_for(div)
+        freq_points.append({
+            "freq_hz": freq_hz,
+            "vco_hz": vco_hz,
+            "mult": mult,
+            "div": div,
+            "phases_mdeg": phases,
+            "phase_max_mdeg": phase_max_mdeg(div),
+            # 相位码上界点（m = 511）对应的可请求相位；D 小时会超过满量程（被请求范围截断）
+            "phase_code_top_mdeg": min(phase_code_top_mdeg(div), PHASE_FULL_SCALE_MDEG - 1),
+        })
+        for phase_mdeg in phases:
             vectors.append(build_vector(freq_hz, vco_hz, mult, div, phase_mdeg))
+    union = sorted({p for fp in freq_points for p in fp["phases_mdeg"]})
     return {
         "source": "spec/gen_golden.py（独立参考实现，按 docs/ps-protocol.md 第 5/6 节）",
         "model": {
@@ -237,8 +360,15 @@ def build_vectors() -> dict:
         "clocks": {"f_slow_hz": F_SLOW_HZ, "f_dsp_hz": F_DSP_HZ},
         "target_gate": TARGET_GATE,
         "freq_points_hz": sorted(FREQ_POINTS_HZ.keys()),
-        "phase_points_mdeg": PHASE_POINTS_MDEG,
-        "phase_unit_deg_mdeg": 45_000,
+        # 每个频点的相位点集**不同**（上界 = 9 位相位码，按 D 逐点），
+        # phase_points_mdeg 是所有频点相位点的并集（报告/文档用）
+        "freq_points": freq_points,
+        "phase_points_mdeg": union,
+        # 相位网格：MMCM 的 1/8 VCO 周期 = 45000/div 毫度（方案 A，见 ps/include/dpm_regs.h）
+        "phase_grid_mdeg_num": 45_000,
+        "phase_code_bits": 9,
+        "phase_code_max": PHASE_CODE_MAX,
+        "phase_max_mdeg_num": PHASE_MAX_MDEG_NUM,
         "vectors": vectors,
     }
 
@@ -255,8 +385,10 @@ def main() -> int:
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(data, fh, ensure_ascii=False, indent=2)
         fh.write("\n")
+    n_over = sum(1 for v in data["vectors"] if v["phase_requested_mdeg"] >= 180_000)
     print(f"写入 {args.out}：{len(data['vectors'])} 条向量"
-          f"（{len(data['freq_points_hz'])} 个频点 × {len(data['phase_points_mdeg'])} 个相位点）")
+          f"（{len(data['freq_points_hz'])} 个频点，相位点每频点不等，并集 "
+          f"{len(data['phase_points_mdeg'])} 个；其中 ≥180° 的 {n_over} 条）")
     if args.do_print:
         print(f"{'f_sig':>10} {'phase_req':>10} {'gate':>6} {'edge':>6} {'phaseCnt':>9} "
               f"{'f_meas/kHz':>11} {'phase/deg':>10} {'step/deg':>9}")

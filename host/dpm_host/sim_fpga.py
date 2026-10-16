@@ -17,9 +17,7 @@
    | 0x28  | CAPS          | `0x00030104`（4 字/条、深度 1、寄存器通道、带片内源）        |
    | 0x2C  | SIG_CTRL      | b0 enable、b1 srcSelect                                     |
    | 0x30  | SIG_STATUS    | b0 enable、b1 srcSelect、b2 srcLocked、b3 sourceReady        |
-   | 0x200+4n | MMCM DRP 配置字（n = 0..31），0x25C = LOAD（bit0 触发、bit1 SADDR；0x07 与 0x03 等价） |
-   | 0x100    | 模型里的 clk_wiz locked 状态（真实硬件是 clk_wiz 段偏移 0x004；0x27C 实测恒 0） |
-   | 0x218    | clk_out2 相位字（毫度；当前 IP 未接线，`phase_model=controllable` 时才生效） |
+   | 0x100 + off | 片内源 DRP 段（另一个 AXI 从口，真实基地址 `0x43C1_0000`）：0x00 ID、0x04 STATUS（b0 locked）、0x08..0x24 八个 MMCM 寄存器镜像、0x28 LOAD（写 1 触发） |
 
    `SIG_CTRL` **同拍生效**：片内源使能门控与「外部引脚/片内源」二选一都在主时钟域完成
    （与写寄存器的寄存器堆同域），不存在跨时钟域送达延迟。写入后软件寄存器立刻更新，输入选择
@@ -41,15 +39,13 @@
    延迟差、异步采样链的 CDC 亚稳态、闸门停止握手的额外低速周期（RTL 里 stop 要等
    `sig2` 下一个上升沿，容限见 dpm-measurement-model）。
 
-3. **假 MMCM**：按实测的 DRP 语义建模（`spec/drp_semantics.json`）——低字节 = 分频比 D 本体、
-   LOAD 的 bit0 触发/bit1 选择静态或动态配置、相位量化到 1/8 VCO 周期；LOAD 后重新锁定
+3. **假 MMCM**（方案 A）：PL 侧只有「MMCM 的 16 位寄存器镜像 + LOAD」，频率与相位都由
+   `dpm_host.sig` 编码成 MMCM 位域（`DELAY_TIME` = 整数 VCO 周期、`PHASE_MUX` = 1/8 VCO
+   周期，网格 `45°/D`）。写镜像不立即生效，LOAD（写 1）才整批生效并重新锁定
    （`srcLocked` 先 0 后 1）。相位模型由 `phase_model` 决定：
 
-   - ``controllable``：相位字（0x218，毫度）生效，用于上位机相位通路自测；
-   - ``static``：复现实测的当前 bitstream（相位字未接线，clk_out2 相位恒为静态 90°）；
-   - ``auto``（默认）：跟随 `spec/drp_semantics.json` 的 `phase_controllable` ——
-     实测为 **false**，因此默认行为是「相位字写进去也不生效，clk_out2 恒为静态 90°」，
-     与真实 bitstream 一致（否则端到端验证会掩盖这个限制）。
+   - ``controllable``（默认）：写相位字段即生效（上板已实测）；
+   - ``static``：复现旧 `clk_wiz_src` bitstream（相位字段不生效，输出恒为静态 90°）。
 
    片内源未使能或未锁定时两路恒低 → 测量**永远不会完成**（这正是要让上位机超时退出的路径）。
 
@@ -60,7 +56,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
 from typing import Callable
 
@@ -99,29 +95,16 @@ GATE_CNT_MASK = (1 << 28) - 1
 U32_MASK = 0xFFFFFFFF
 U16_MASK = 0xFFFF
 
-#: 本模型里 clk_wiz 的 locked 状态寄存器用的平坦偏移。
+#: 片内源 DRP 控制器（`dpm_src_drp`）在模型里的**平坦偏移基地址**。
 #:
-#: 真实硬件上它在 clk_wiz AXI 窗口内的偏移是 **0x004**（实测），但本模型把 DPM 寄存器与
-#: clk_wiz DRP 放在同一个平坦地址空间里，0x004 与 DPM 自己的 STATUS 冲突，因此模型用 0x100
-#: 表示它（模拟「另一段 AXI 基地址」）。PS 侧 C 代码用的是 DPM_DRP_BASE + 0x004，不受影响。
-DRP_STATUS_FLAT_OFF = 0x100
+#: 真实硬件上它是另一个 AXI 从口（`0x43C1_0000`），与 DPM 自己的寄存器（`0x43C0_0000`）
+#: 不冲突；本模型把两个从口放在同一个平坦地址空间里（`read/write` 传入的是偏移），
+#: 因此给 DRP 段加 0x100 的基偏移模拟「另一段 AXI 基地址」——与 C 侧
+#: `DPM_DRP_BASE = 0x43C1_0000` 的语义一致。
+DRP_FLAT_BASE = 0x100
 
-#: DRP 配置字索引 → 偏移（0x200 + 4n）。
-DRP_WORD_OFFS: dict[int, int] = {n: S.drp_word_off(n) for n in range(32)}
-
-
-@dataclass
-class MmcmConfig:
-    """MMCM 工作点（静态 S1_* 配置或 DRP 寄存器文件里的动态配置）。"""
-
-    mult: int = 20
-    divclk: int = 1
-    div: int = 40
-    phase_milli_deg: int = 90_000
-
-    @property
-    def value(self) -> str:
-        return f"MULT={self.mult} DIVCLK={self.divclk} D={self.div} 相位={self.phase_milli_deg / 1000:.3f}°"
+#: DRP 段覆盖的偏移窗口（0x00..0x28，4KB 页里只用到前 0x2C 字节）。
+DRP_FLAT_LIMIT = DRP_FLAT_BASE + 0x40
 
 
 class FakeClock:
@@ -194,25 +177,23 @@ class SimFpga:
         self._sig_ctrl_dirty = False
         self._sig_ctrl_apply_at: float | None = None
 
-        # ---- 假 MMCM ----
-        #: 相位模型：controllable（相位字可用，默认，供上位机相位通路自测）/
-        #: static（复现实测的当前 bitstream：相位字未接线，相位恒为静态 90°）/ auto（跟随 JSON）。
+        # ---- 假 MMCM（方案 A：寄存器镜像 + LOAD） ----
+        #: 相位模型：controllable（写 PHASE_MUX/DELAY_TIME 即生效，默认）/
+        #: static（复现旧 bitstream：写相位字段不生效，相位恒为静态 90°）/ auto（跟随 JSON）。
         self._phase_model = phase_model
         self._reload_guard = False
         self.static_phase_milli_deg = int(self.semantics.phase_static_milli_deg)
-        self.mmcm_static = MmcmConfig(mult=20, divclk=1, div=40, phase_milli_deg=self.static_phase_milli_deg)
-        self.mmcm_dynamic = MmcmConfig(mult=20, divclk=1, div=40, phase_milli_deg=self.static_phase_milli_deg)
-        self.mmcm_active = "static"
+        #: MMCM 寄存器镜像：偏移（`S.DRP_OFF_*`）→ 16 位值。
         self.drp: dict[int, int] = {}
         self.mmcm_locked = True
-        self.srdy = False
+        self.mmcm_reconfiguring = False
         self._locked_at: float = float("-inf")
+        self._reconfig_done_at: float = float("-inf")
         self.vco_hz = 0
         self.mult = 0
         self.divclk = S.DIVCLK_DEFAULT
         self.div = 0
         self.phase_field = 0
-        self.legacy_status_reads = 0
         #: 片内源当前输出的频率与相位（由 DRP 配置推出）。
         self.int_freq_hz = int(freq_hz)
         self.int_phase_milli_deg = int(phase_milli_deg)
@@ -254,7 +235,9 @@ class SimFpga:
             self._sig_ctrl_dirty = False
             self._sig_ctrl_apply_at = None
 
-        # 2) MMCM 锁定
+        # 2) MMCM：重配置结束（输出恢复）→ 锁定
+        if self.mmcm_reconfiguring and t >= self._reconfig_done_at:
+            self.mmcm_reconfiguring = False
         if not self.mmcm_locked and t >= self._locked_at:
             self.mmcm_locked = True
 
@@ -360,8 +343,8 @@ class SimFpga:
         """读寄存器（组合读数据，对齐 RTL 的 `rdData`）。"""
         self.poll()
         off = int(offset) & 0xFFF
-        if off >= S.DRP_OFF_BASE or off == DRP_STATUS_FLAT_OFF:
-            return self._read_drp(off)
+        if DRP_FLAT_BASE <= off < DRP_FLAT_LIMIT:
+            return self._read_drp(off - DRP_FLAT_BASE)
         if off == REG_CTRL:
             return CTRL_IRQ_ENABLE if self.irq_enable else 0
         if off == REG_STATUS:
@@ -396,8 +379,8 @@ class SimFpga:
         off = int(offset) & 0xFFF
         data = int(data) & U32_MASK
         strb = int(strb) & 0xF
-        if off >= S.DRP_OFF_BASE:
-            self._write_drp(off, data, strb)
+        if DRP_FLAT_BASE <= off < DRP_FLAT_LIMIT:
+            self._write_drp(off - DRP_FLAT_BASE, data, strb)
             return
         if off == REG_CTRL:
             if strb & 0x1:
@@ -502,52 +485,52 @@ class SimFpga:
 
     # ------------------------------------------------------------ 假 MMCM / DRP
     #
-    # 寄存器语义按实测结论（spec/drp_semantics.json）建模，与任务书最初写的
-    # 「相位字段在字 31 / STATUS 在 0x27C」不同：
+    # 方案 A：PL 侧的 `dpm_src_drp` 只是 **MMCM 的 16 位寄存器镜像 + LOAD**，
+    # 频率与相位都在上位机/PS 里编码好（见 `dpm_host.sig.mmcm_encode_clkout`）：
     #
-    #   - CLKFBOUT 字（0x200）低字节 = DIVCLK，bit[15:8] = MULT；
-    #   - CLKOUT0 字（0x208）低字节 = D，bit[15:8] 在真实 IP 里是小数分频 FRAC[7:0]（不是相位）；
-    #   - CLKOUT1 字（0x214）低字节 = D（clk_out2 的分频），bit[15:8] 未连接；
-    #   - 相位字（0x218 = 字索引 6）单位是**毫度**，但当前 IP 未接线（`phase_word_index.wired=false`）；
-    #   - LOAD（0x25C）bit0 = 触发重配置，bit1 = SADDR（1 = 用动态寄存器文件，0 = 回到静态配置 S1_*）；
-    #   - locked 状态在 IPIF 本地寄存器 **0x004**（bit0 = locked、bit1 = srdy），0x27C 恒为 0。
+    #   - 0x08/0x0C  CLKFBOUT     ClkReg1/ClkReg2（MULT）
+    #   - 0x10/0x14  CLKOUT0      ClkReg1/ClkReg2（clk_out1：D + 相位 0）
+    #   - 0x18/0x1C  CLKOUT1      ClkReg1/ClkReg2（clk_out2：D + PHASE_MUX/DELAY_TIME）
+    #   - 0x20       DIVCLK       0x1041（DIVCLK_DIVIDE = 1）
+    #   - 0x24       POWER        0xFFFF（使能相位 mux/delay）
+    #   - 0x28       LOAD         写 1 触发一次完整重配置（W1S）
+    #   - 0x00/0x04  ID / STATUS  ID = 0x44504D03，STATUS bit0 = locked、bit1/bit2 = busy
+    #
+    # 写寄存器本身不立即生效（对齐 DRP 语义），要等 LOAD。
 
     def _read_drp(self, off: int) -> int:
-        if off == DRP_STATUS_FLAT_OFF:  # 实测的 locked/srdy 状态（真实硬件 = clk_wiz 段 0x004）
+        if off == S.DRP_OFF_ID:
+            return S.DRP_ID_VALUE
+        if off == S.DRP_OFF_STATUS:
             value = S.DRP_STATUS_LOCKED if self.mmcm_locked else 0
-            if self.srdy:
-                value |= S.DRP_STATUS_SRDY
+            if self.mmcm_reconfiguring:
+                value |= S.DRP_STATUS_BUSY
             return value
-        if off == S.DRP_STATUS_LEGACY_OFF:  # 0x27C：真实 IP 里恒 0
-            self.legacy_status_reads += 1
-            return 0
-        index = (off - S.DRP_OFF_BASE) // 4
-        if 0 <= index < 32 and off == S.drp_word_off(index):
-            return self.drp.get(index, 0)
+        if off in self.drp:
+            return self.drp[off] & U16_MASK
         return 0
 
     def _write_drp(self, off: int, data: int, strb: int) -> None:
-        if off == S.DRP_LOAD_OFF:
-            self.drp[S.DRP_IDX_LOAD] = data
-            if data & S.DRP_LOAD_TRIGGER_BIT:
+        del strb  # 8 个镜像都只用低 16 位，整字写
+        if off == S.DRP_OFF_LOAD:
+            if data & S.DRP_LOAD_TRIGGER:
                 if self.busy:
                     # 协议第 6 节：重配置期间两路输出停止，必须先等 STATUS.busy = 0
                     self.drp_write_while_busy += 1
-                self._reload_mmcm(data)
+                self._reload_mmcm()
             return
-        index = (off - S.DRP_OFF_BASE) // 4
-        if not (0 <= index < 32) or off != S.drp_word_off(index):
-            return
-        self.drp[index] = data
-        # 写配置字本身不立即生效，要等 LOAD（对齐 PG065 的 DRP 语义）
+        if off in (S.DRP_OFF_CLKFBOUT, S.DRP_OFF_CLKFBOUT2, S.DRP_OFF_CLKOUT0,
+                   S.DRP_OFF_CLKOUT0_2, S.DRP_OFF_CLKOUT1, S.DRP_OFF_CLKOUT1_2,
+                   S.DRP_OFF_DIVCLK, S.DRP_OFF_POWER):
+            self.drp[off] = int(data) & U16_MASK
+        # 窗口外的写被忽略（与 RTL 的页内译码一致）
 
     @property
     def phase_model(self) -> str:
-        """相位模型：``controllable``（相位字可用）/ ``static``（复现实测的当前 bitstream）。"""
+        """相位模型：``controllable``（写相位字段即生效）/ ``static``（复现旧 bitstream）。"""
         if self._phase_model != "auto":
             return self._phase_model
-        sem = self.semantics
-        return "controllable" if (sem.phase_controllable and sem.mode != "none") else "static"
+        return "controllable" if self.semantics.phase_controllable else "static"
 
     def _phase_grid(self, div: int) -> Fraction | None:
         """精确网格：45°/D（分数，D=80 时是 562.5 毫度）。"""
@@ -558,7 +541,7 @@ class SimFpga:
     def phase_quantum_milli_deg(self, div: int | None = None) -> int | None:
         """当前模型下相位可实现的最小步长（1e-3 度）；不可控时为 ``None``。
 
-        实测：MMCM 把相位量化到 1/8 VCO 周期（125ps @ VCO=1000MHz），折算到输出即
+        硬件：MMCM 把相位量化到 1/8 VCO 周期（125ps @ VCO=1000MHz），折算到输出即
         `45° / D`（D=40 → 1.125°，D=125 → 0.36°）。
         """
         d = int(div if div is not None else self.div)
@@ -566,78 +549,71 @@ class SimFpga:
         return None if grid is None else S.round_half_up_int(grid.numerator, grid.denominator)
 
     def _quantize_phase(self, phase_milli_deg: int, div: int) -> int:
-        """把请求相位量化到硬件可实现网格（45/D 度）。"""
-        grid = self._phase_grid(div)
-        if grid is None:
+        """把请求相位量化到硬件可实现网格（45/D 度），与 C/Python 编码同一套整数规则。"""
+        if self._phase_grid(div) is None:
             return int(self.semantics.phase_static_milli_deg)
-        steps = S.round_half_up_int(int(phase_milli_deg) * int(div), 45_000)
-        return S.round_half_up_int(steps * 45_000, int(div))
+        code = S.mmcm_phase_code(int(phase_milli_deg), int(div))
+        return S.mmcm_phase_code_to_mdeg(code, int(div))
 
-    def _reload_mmcm(self, load_value: int) -> None:
-        """LOAD 后应用配置并重新锁定。
+    def _reload_mmcm(self) -> None:
+        """LOAD 后按寄存器镜像重算工作点并重新锁定（输出会短暂停止）。"""
+        clkfbout = self.drp.get(S.DRP_OFF_CLKFBOUT, 0)
+        clkout0 = self.drp.get(S.DRP_OFF_CLKOUT0, 0)
+        clkout1 = self.drp.get(S.DRP_OFF_CLKOUT1, 0)
+        clkout1_2 = self.drp.get(S.DRP_OFF_CLKOUT1_2, 0)
+        divclk_word = self.drp.get(S.DRP_OFF_DIVCLK, 0)
 
-        `SADDR = 0` → 回到静态配置（S1_*，BD 初值：MULT=20 / DIVCLK=1 / D=40 / 相位 90°）；
-        `SADDR = 1` → 用 DRP 寄存器文件里的动态配置（分频、以及接线后的相位字）。
-        """
-        use_dynamic = bool(load_value & S.DRP_LOAD_SADDR_BIT)
-        cfg = self.mmcm_dynamic if use_dynamic else self.mmcm_static
-        self.mmcm_active = "dynamic" if use_dynamic else "static"
-        self.mult = cfg.mult
-        self.divclk = cfg.divclk
-        self.div = cfg.div
-        self.vco_hz = (self.slow_hz * cfg.mult) // cfg.divclk if cfg.mult else 0
-        self.int_freq_hz = S.round_half_up_int(self.vco_hz, cfg.div) if cfg.div else 0
-        self.phase_field = S.phase_field_get(self.drp.get(S.DRP_IDX_CLKOUT1, 0))
-        self.int_phase_milli_deg = cfg.phase_milli_deg
-        # LOAD 触发重新锁定：srcLocked 先掉再起（实测重配置约 9µs，期间两路输出停止）
+        mult = S.mmcm_decode_divide(clkfbout)
+        div = S.mmcm_decode_divide(clkout0)
+        divclk = S.mmcm_decode_divclk(divclk_word)
+        if mult == 0 or div == 0 or divclk == 0:
+            return
+        self.mult = mult
+        self.divclk = divclk
+        self.div = div
+        self.vco_hz = (self.slow_hz * mult) // divclk
+        self.int_freq_hz = S.round_half_up_int(self.vco_hz, div)
+        # 相位：PHASE_MUX（ClkReg1）+ DELAY_TIME（ClkReg2）→ 毫度；static 模型下写不生效
+        if self.phase_model == "controllable":
+            self.int_phase_milli_deg = S.mmcm_decode_phase_mdeg(clkout1, clkout1_2, div)
+        else:
+            self.int_phase_milli_deg = int(self.semantics.phase_static_milli_deg)
+        self.phase_field = (clkout1_2 & 0x3F)  # MMCM 的 DELAY_TIME 字段
         self.mmcm_locked = False
-        self.srdy = False
-        self._locked_at = self.now() + self.mmcm_lock_s
+        self.mmcm_reconfiguring = True
+        # 重配置期间两路输出停止（先恢复输出，再等锁定）
+        self._reconfig_done_at = self.now() + self.config_delay_s
+        self._locked_at = self.now() + self.config_delay_s + self.mmcm_lock_s
 
     def configure_sig(self, freq_hz: int, phase_milli_deg: int, *, lock_immediately: bool = False) -> S.SigSolution:
-        """等价于一次 `SET_SIG`：求解 → 写 DRP 字（含相位字）→ LOAD。
+        """等价于一次 `SET_SIG`：求解 → 写 8 个寄存器镜像 + LOAD。
 
-        相位模型为 ``static`` 时**不改相位**（写入的相位字不生效，输出保持静态相位），
-        与实测的当前 bitstream 行为一致。
+        相位模型为 ``static`` 时**不改相位**（复现旧 bitstream：写相位字段不生效，
+        输出保持静态 90°）。
         """
         if self._reload_guard:
             raise RuntimeError("configure_sig 递归调用（内部错误）")
         sol = S.solve_sig(int(freq_hz), int(phase_milli_deg), self.slow_hz, self.semantics)
         if not sol.ok:
             return sol
-        phase_requested = int(phase_milli_deg)
-        words = S.drp_words(sol, self.semantics)
-        for off, value in words.as_pairs()[:-1]:
-            self._write_drp(off, value, 0xF)
-        # 独立相位字：0x20C = clk_out1 相位（0）、0x218 = clk_out2 相位（毫度）。
-        # 按 docs/ps-protocol.md 6.2/6.4：即使当前 bitstream 没接线也照写（无害）。
-        self._write_drp(S.drp_word_off(S.DRP_IDX_CLKOUT0_PHASE), 0, 0xF)
-        self._write_drp(S.drp_word_off(S.DRP_IDX_CLKOUT1_PHASE), phase_requested & 0xFFFFFFFF, 0xF)
+        if self.phase_model == "static":
+            # static 模型：CLKOUT1 的相位字段按 0 写，输出相位由静态配置（90°）决定
+            zero = replace(sol, phase_actual_milli_deg=0, phase_code=0, phase_field=0)
+            pairs = S.drp_words(zero, self.semantics).as_pairs()
+        else:
+            pairs = S.drp_words(sol, self.semantics).as_pairs()
         self._reload_guard = True
         try:
-            # 先把动态配置登记下来，再 LOAD（SADDR=1）让它生效
-            self._register_dynamic_config(sol, phase_requested)
-            self._write_drp(words.load_off, S.DRP_LOAD_BOTH, 0xF)
+            for off, value in pairs:
+                self._write_drp(off, value, 0xF)
         finally:
             self._reload_guard = False
         if lock_immediately:
             self.mmcm_locked = True
+            self.mmcm_reconfiguring = False
             self._locked_at = float("-inf")
+            self._reconfig_done_at = float("-inf")
         return sol
-
-    def _register_dynamic_config(self, sol: S.SigSolution, phase_requested: int) -> None:
-        """把一次 SET_SIG 的结果登记成「动态配置」（供 SADDR=1 的 LOAD 使用）。"""
-        if self.phase_model == "controllable":
-            phase_mdeg = self._quantize_phase(phase_requested, sol.div)
-        else:
-            # 复现实测行为：相位字未接线，输出固定为静态相位
-            phase_mdeg = int(self.semantics.phase_static_milli_deg)
-        self.mmcm_dynamic = MmcmConfig(
-            mult=sol.mult,
-            divclk=sol.divclk,
-            div=sol.div,
-            phase_milli_deg=phase_mdeg,
-        )
 
     # ------------------------------------------------------------ 诊断
 
@@ -673,8 +649,8 @@ class SimFpga:
 __all__ = [
     "SimFpga",
     "FakeClock",
-    "MmcmConfig",
-    "DRP_STATUS_FLAT_OFF",
+    "DRP_FLAT_BASE",
+    "DRP_FLAT_LIMIT",
     "REG_CTRL",
     "REG_STATUS",
     "REG_GATE_TARGET",

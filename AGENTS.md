@@ -33,6 +33,7 @@
 | Verilator          | 由 xmake 的目标规则调用，编译生成的 SystemVerilog                      |
 | `sim/run_xsim.sh`  | 用 Vivado xsim 跑 `sim/` 下的 SystemVerilog 激励（AXI4 接口与顶层 IP） |
 | `vivado/` 下的 tcl | 打包 IP、创建 block design、综合实现与导出 XSA                         |
+| `uv run pytest`    | PC 侧 Python 测试（`host/tests`，pytest 原生写法）与 GUI 冒烟测试入口  |
 
 - 本项目使用 clang 工具链。gcc 在编译带 C++20 模块的测试代码时会产生编译器内部错误（ICE）——该结论沿用 `verilator_utils` 系列项目的记录，未在本仓库单独复现：不要用 gcc 配置、构建或做"可移植性验证"。
 - 各入口的具体命令、选项与已知陷阱写在对应 skill 中（见下表），本文件不重复。
@@ -49,6 +50,7 @@
 | 编写、运行、调试 Verilator C++ 测试                                 | `dpm-verilator-testing`  |
 | 测量语义、理论值、容限与已知精度下界（写验证判据时）                | `dpm-measurement-model`  |
 | 打包 Vivado IP、改 PS↔PL 互联的 BD、写/跑 xsim 的 SV 激励、综合实现 | `dpm-vivado-ip`          |
+| 改上位机/PS 协议、CLI/GUI、无硬件端到端验证                         | `dpm-host-protocol`      |
 | 提交前的格式化、静态检查与全量回归                                  | `dpm-pre-delivery-check` |
 
 - **备选一：网络搜索**。skill 未覆盖，或 skill 与项目/环境的实际行为不一致时，先查官方文档与 issue；就地可用的官方帮助（如 `xmake <command> --help`）属于同一类的快速形式。

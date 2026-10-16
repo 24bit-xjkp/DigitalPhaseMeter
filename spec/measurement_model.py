@@ -54,18 +54,26 @@ F_SLOW_HZ = 50_000_000       # 低速（AXI/闸门）时钟：PS 的 FCLK_CLK0
 F_DSP_HZ = 400_000_000       # 高速（DSP/测量）时钟：PL 内 MMCM 倍频
 TARGET_GATE = 2000           # 默认闸门目标（低速周期数）→ 40µs
 
-# 冻结的验证频点（Hz），与 docs/ps-protocol.md 第 6 节的频点表一致
+# 冻结的验证频点（Hz），与 docs/ps-protocol.md 第 6 节的频点表一致。
+# 要求信号周期既是整数 ps、也是 DSP 周期（2.5ns）的整数倍（8D/MULT 为整数），
+# 此时 `phaseCnt % edgeCnt == 0` 严格成立（见 spec/gen_golden.py 的说明）。
 DEFAULT_FREQS_HZ = (
     5_000_000,
     6_250_000,
     8_000_000,
     10_000_000,
     12_500_000,
+    16_000_000,
     20_000_000,
     25_000_000,
+    40_000_000,
+    50_000_000,
 )
-# 冻结的相位点（度）：0/45/90/135 全在半个信号周期内，满足相位映射前提
-DEFAULT_PHASES_DEG = (0.0, 45.0, 90.0, 135.0)
+# 冻结的相位点（度）：0~315° 的 45° 网格点。
+# 相位计测的是「sig1 上升沿 → 下一个 sig2 上升沿」的**无符号**间隔（落在 (0, 360°]），
+# 因此 >180° 的请求同样是可测的；只有把它当成有符号偏移（|δ| < T/2）解释时才需要
+# < 180° 的前提（见 `predict()` 的说明与 dpm-measurement-model skill）。
+DEFAULT_PHASES_DEG = (0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0)
 
 # 默认输出：不覆盖别的 teammate 生成的 spec/golden/vectors.json（见 docs/verify-drp.md）
 DEFAULT_OUT = os.path.join("spec", "golden", "vectors_model.json")
@@ -169,7 +177,9 @@ def predict(
       f_slow     低速（AXI/闸门）时钟频率 [Hz]
       f_dsp      高速（DSP/测量）时钟频率 [Hz]
       f_sig      被测信号频率 [Hz]（sig1 与 sig2 同频，这也是设计前提）
-      phase_deg  sig2 上升沿相对 sig1 上升沿的相位差 [度]，要求 < 180°
+      phase_deg  sig2 上升沿相对 sig1 上升沿的相位差 [度]，要求 0 ≤ phase_deg < 360
+                 （**无符号**间隔：相位计量的是「sig1 沿 → 下一个 sig2 沿」，
+                 >180° 同样可测；只有按有符号偏移解释时才需要 < 180°）
       target_gate 闸门目标（低速周期数）
 
     返回 `Prediction`。全部为浮点/整数运算，可直接与两侧实现对照。
@@ -178,9 +188,10 @@ def predict(
         raise ValueError("f_slow / f_dsp / f_sig 必须为正")
     if target_gate <= 0:
         raise ValueError("target_gate 必须为正")
-    if not (0.0 <= phase_deg < 180.0):
-        # 偏移 ≥ 半个信号周期时相位映射不再一对一，见 dpm-measurement-model
-        raise ValueError("phase_deg 必须在 [0, 180) 内（相位映射前提）")
+    if not (0.0 <= phase_deg < 360.0):
+        # 相位计测的是无符号间隔 (0, 360°]：>180° 也能测；360° 与 0° 同义，满量程不接收。
+        # （旧版本按有符号偏移解释、要求 < 180°，见 docs/verify-plan.md 的说明。）
+        raise ValueError("phase_deg 必须在 [0, 360) 内（无符号相位差的口径）")
 
     t_slow = 1.0 / f_slow
     t_dsp = 1.0 / f_dsp
@@ -255,8 +266,8 @@ def generate_vectors(
     vectors: list[dict] = []
     for f_sig in freqs:
         for phase_deg in phases:
-            if not (0.0 <= float(phase_deg) < 180.0):
-                raise ValueError(f"相位点 {phase_deg} 不在 [0, 180) 内，不满足相位映射前提")
+            if not (0.0 <= float(phase_deg) < 360.0):
+                raise ValueError(f"相位点 {phase_deg} 不在 [0, 360) 内（无符号相位差口径）")
             pred = predict(f_slow, f_dsp, f_sig, float(phase_deg), target_gate)
             phase_mdeg = int(round(float(phase_deg) * 1000.0)) if abs(float(phase_deg)) < 1e6 else int(phase_deg)
             phase_cycles = _div_trunc(pred.phase_cnt, pred.edge_cnt)
@@ -352,13 +363,18 @@ def selftest() -> int:
     check("phase_step_mdeg(10MHz)", q.phase_step_mdeg, 9000)
     check("phase_cnt(22.5°@10MHz)", q.phase_cnt, 1003)        # round(0.0625*40*401) = round(1002.5)
 
-    # 相位映射前提：>= 180° 必须报错
+    # 无符号相位差口径：180° 与 270° 都是可测点，只有 360°（与 0° 同义）必须报错
+    for deg, want in ((180.0, 180.0), (270.0, 270.0)):
+        r = predict(F_SLOW_HZ, F_DSP_HZ, 25_000_000, deg, 2000)
+        # 25MHz/400MHz：1 个 DSP 周期 = 22.5°，180° = 8 个周期、270° = 12 个周期
+        check(f"phase_cnt({deg:g}°@25MHz)", r.phase_cnt // r.edge_cnt, int(want / 22.5))
+        check(f"phase_meas({deg:g}°@25MHz)", r.phase_milli_deg, int(want * 1000))
     try:
-        predict(F_SLOW_HZ, F_DSP_HZ, 25_000_000, 180.0, 2000)
-        print("FAIL 相位 180° 未被拒绝")
+        predict(F_SLOW_HZ, F_DSP_HZ, 25_000_000, 360.0, 2000)
+        print("FAIL 相位 360° 未被拒绝")
         failures += 1
     except ValueError:
-        print("ok   相位 180° 被拒绝（相位映射前提）")
+        print("ok   相位 360° 被拒绝（满量程，与 0° 同义）")
 
     # 向量生成：键齐全
     vecs = generate_vectors([25_000_000], [0.0, 22.5], 2000)
