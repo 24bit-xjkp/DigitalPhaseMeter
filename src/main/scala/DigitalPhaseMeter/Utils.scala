@@ -17,13 +17,8 @@ trait Main extends App {
         name: String = this.getClass.getSimpleName.stripSuffix("$").stripPrefix("Emit")
     ): Unit = {
         val outputDir = Paths.get("build", "chisel", name)
-        val chiselArgs = args.toArray.concat(
-            Array("--split-verilog", "--target-dir", outputDir.toString())
-        )
-        val firtoolOpts = Array(
-            "-disable-all-randomization",
-            "-default-layer-specialization=enable"
-        )
+        val chiselArgs = args.toArray.concat(Array("--target-dir", outputDir.toString()))
+        val firtoolOpts = Array("-disable-all-randomization", "-default-layer-specialization=enable")
         Files.createDirectories(outputDir)
         ChiselStage.emitSystemVerilogFile(genModule, chiselArgs, firtoolOpts)
     }
