@@ -514,7 +514,8 @@ TEST_SUITE("Controller")
 
         ctx.loop_until_finish(20_ms);
 
-        // 两次连续测量都要与理论值一致：周期 640ns、相位差 160ns（45° 的 400MHz 周期数 = 32）
+        // 两次连续测量都要与理论值一致：周期 640ns、相位差 160ns（= 90°，即 32 个
+        // 200MHz 测试时钟周期；测试使用的 DSP 时钟与芯片实际频率无关）
         for(const auto& measurement: measurements)
         {
             REQUIRE(measurement.observed);

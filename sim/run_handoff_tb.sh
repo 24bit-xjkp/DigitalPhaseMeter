@@ -17,12 +17,12 @@
 #   spec/golden/handoff_meas.txt            留档副本（用 .txt：仓库 .gitignore 有 *.log）
 #
 # 用法：
-#   sim/run_handoff_tb.sh                # 跑点表里的全部点（10 个频点 × 逐频点相位点 = 79 个点）
+#   sim/run_handoff_tb.sh                # 跑点表里的全部点（10 个频点 × 逐频点相位点 = 80 个点）
 #   sim/run_handoff_tb.sh --clean        # 先清 build/xsim_handoff
 #   sim/run_handoff_tb.sh --no-gen       # 不重新生成 Chisel RTL（跳过 sbtn）
 #
 # 整轮约 17s 墙钟（点表里每点 ≈ 40µs 闸门的仿真时间）。验收判据是日志里的
-# `HANDOFF_SUMMARY points=79 ... fails=0` 且 HANDOFF_MEAS 行数 = 2×points。
+# `HANDOFF_SUMMARY points=80 ... fails=0` 且 HANDOFF_MEAS 行数 = 2×points。
 #
 # 环境变量：XILINX_VIVADO 默认 /home/luo/Vivado/2025.2/Vivado
 

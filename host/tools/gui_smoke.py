@@ -16,7 +16,7 @@
 的可复现证据：它把 CLI 之外的那条 GUI 通路完整跑一遍，其中两项按硬件条件换算的行为是本次新增的：
 
 * **相位上界逐频点刷新**：25MHz（D=40）放开到 359.999° 并真的设到 225°（>180°）测出来；
-  8MHz（D=125）收窄到 184.139°；
+  6MHz（D=125）收窄到 184.139°；
 * **闸门时间按秒设置**：界面输入 40µs，状态里读回 `gateTarget=2000` 个低速周期。
 """
 
@@ -166,29 +166,29 @@ def main() -> int:
             ),
         )
         smoke.add(
-            "设置片内源 8MHz/22.5°",
+            "设置片内源 6MHz/22.5°",
             0.3,
             lambda: (
-                window.freq_edit.setText("8MHz"),
+                window.freq_edit.setText("6MHz"),
                 window.phase_spin.setValue(22.5),
                 window.after_set_sig(),
             ),
         )
-        smoke.add("单次测量（8MHz/22.5°）", 1.5, window.after_single)
+        smoke.add("单次测量（6MHz/22.5°）", 1.5, window.after_single)
         smoke.add(
             "检查 22.5° 读数",
             0.5,
             lambda: smoke.check(
-                "细调相位生效（8MHz 请求 22.5° → 显示 ≈21.6°）",
-                abs(float(window.phase_label.text().replace("°", "")) - 21.602) < 3.0,
+                "细调相位生效（6MHz 请求 22.5° → MMCM 吸附 22.68° → RNE 到 5 个 DSP 周期 → 显示 ≈23.992°）",
+                abs(float(window.phase_label.text().replace("°", "")) - 23.992) < 3.0,
                 window.phase_label.text(),
             ),
         )
         smoke.add(
-            "相位上界随频点刷新（8MHz）",
+            "相位上界随频点刷新（6MHz）",
             0.3,
             lambda: smoke.check(
-                "8MHz（D=125）相位上界收窄到 184.139°",
+                "6MHz（D=125）相位上界收窄到 184.139°",
                 abs(window.phase_spin.maximum() - 184.139) < 1e-3,
                 f"max={window.phase_spin.maximum():.3f}°；{window.phase_limit_label.text()}",
             ),
@@ -218,8 +218,8 @@ def main() -> int:
             "检查 225° 读数",
             0.5,
             lambda: smoke.check(
-                ">180° 相位可设可测（25MHz 请求 225° → 显示 ≈225°）",
-                abs(float(window.phase_label.text().replace("°", "")) - 225.0) < 3.0,
+                ">180° 相位可设可测（25MHz 请求 225° → DSP 量化 11 个周期 × 20° → 显示 ≈220°）",
+                abs(float(window.phase_label.text().replace("°", "")) - 220.0) < 3.0,
                 window.phase_label.text(),
             ),
         )
@@ -273,8 +273,8 @@ def main() -> int:
                 "扫描",
                 0.3,
                 lambda: (
-                    # 8MHz（D=125）的相位上界只有 184.139° → 225° 那个点会被界面跳过（2×3-1=5 行）
-                    window.scan_freqs_edit.setText("8,25"),
+                    # 6MHz（D=125）的相位上界只有 184.139° → 225° 那个点会被界面跳过（2×3-1=5 行）
+                    window.scan_freqs_edit.setText("6,25"),
                     window.scan_phases_edit.setText("0,90,225"),
                     window.scan_settle_spin.setValue(0.05),
                     window.after_scan(),
@@ -284,7 +284,7 @@ def main() -> int:
                 "等扫描完成",
                 8.0,
                 lambda: smoke.check(
-                    "扫描完成：6 个点里 8MHz/225° 越界被跳过，其余 5 点有结果",
+                    "扫描完成：6 个点里 6MHz/225° 越界被跳过，其余 5 点有结果",
                     len(window.last_rows) == 5,
                     f"rows={len(window.last_rows)}，表 {window.table.rowCount()} 行",
                 ),

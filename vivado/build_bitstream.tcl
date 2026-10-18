@@ -14,7 +14,7 @@
 #   dpm_system.xsa            含 bitstream 的硬件平台（可用于 Vitis 软件工程）
 #   bd_proj/dpm_bd.runs/      综合与实现报告、bit 文件
 #
-# 【为什么策略写在本脚本里】DSP 域（MMCM 倍频出的 dspClock）跑 400MHz 时，关键路径是测量 FSM
+# 【为什么策略写在本脚本里】DSP 域（MMCM 倍频出的 dspClock）跑 450MHz 时，关键路径是测量 FSM
 # 与 DSP48 控制脚的组合逻辑，默认流程留不出这个频率需要的余量。这些 run 参数只在启动 run 前有意义，
 # 所以内联在启动 run 的这一步（原来是一个必须单独运行的 apply_timing_strategy.tcl）。
 
@@ -137,16 +137,22 @@ if {[get_property target_language [current_project]] ne "Verilog"} {
 #   （本设计只需要 2 个 DSP48）；给 0 表示不设。
 # 实现选 Performance_Retiming 而不是 Performance_ExplorePostRoutePhysOpt：前者的 phys_opt 用
 #   AlternateFlowWithRetiming（官方描述：更激进的复制 + **DSP/BRAM 优化** + 开启重定时），正是本设计
-#   需要的——关键路径终点是 DSP48 的控制脚。慢域 50MHz 参考 + DSP 400MHz 下实测（同一份综合网表、
-#   逐个内置策略跑布局布线）：
-#     Performance_Retiming        WNS +0.270ns / WHS +0.095ns   ← 本仓库采用
+#   需要的——关键路径终点是 DSP48 的控制脚。
+# 【400MHz 轮次的历史实测】慢域 50MHz 参考 + DSP 400MHz 下（同一份综合网表、逐个内置策略跑
+#   布局布线）；数字是历史记录，当前设计已是 450MHz（见下面「450MHz 轮次」）：
+#     Performance_Retiming        WNS +0.270ns / WHS +0.095ns   ← 本仓库采用（策略沿用至今）
 #     Performance_RefinePlacement WNS +0.109ns / WHS +0.053ns
 #     Performance_ExplorePostRoutePhysOpt（本仓库早期采用） WNS +0.077ns
 #     Performance_Auto_1/2/3      WNS +0.061ns
 #     Performance_ExtraTimingOpt / Performance_ExploreWithRemap（跑到 write_bitstream 失败，未采用）
+# 【450MHz 轮次（当前设计）】沿用同一套策略，2026-10-18 的完整综合/实现（Design State: Routed，
+#   本轮未重跑 impl_multi.tcl）：
+#   全设计 WNS +0.291ns / WHS +0.032ns / WPWS +0.067ns，TNS = THS = 0、0 个失败端点；
+#   DSP 域内（clk_out1_dpm_system_clk_wiz_0_0，周期 2.222ns）WNS +0.291ns / WHS +0.163ns、0 失败端点。
+#   来源 build/vivado/timing_summary.rpt，XSA 已生成。
 # 有意**不**覆盖 Performance_Retiming 自带的步骤 directive：该策略的关键正是 phys_opt 的
 #   AlternateFlowWithRetiming（DSP 优化 + 重定时），覆盖成 AggressiveExplore 会把它换掉，
-#   实测 WNS 从 +0.270ns 掉到 +0.077ns 一档。需要临时对比其它 directive 组合时，
+#   实测（400MHz 轮次）WNS 从 +0.270ns 掉到 +0.077ns 一档。需要临时对比其它 directive 组合时，
 #   用 query_runs.tcl 看当前取值再改。
 set strategy_targets [list \
     [list synth_1 STEPS.SYNTH_DESIGN.ARGS.GLOBAL_RETIMING [expr {$retiming ? "on" : "off"}]] \

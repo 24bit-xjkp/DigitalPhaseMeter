@@ -235,7 +235,7 @@ def test_window_gate_download_converts_to_cycles(window) -> None:
 
     class _FakeClient:
         slow_hz = SLOW_HZ
-        dsp_hz = 400_000_000
+        dsp_hz = 450_000_000
 
         def __init__(self) -> None:
             self.gates: list[int] = []

@@ -12,7 +12,7 @@
 
 **协议字段单位（冻结）**：`GET_MEAS`/`STREAM_DATA` 的 `freqMilliHz` 字段承载的是
 **整数 Hz**（名字是历史遗留：真正的毫赫兹在 25MHz 时是 2.5e10，会溢出 u32），
-25MHz/90° 时字段值 = `25000000`、`phaseMilliDeg` = `90000`。
+25MHz 时字段值 = `25000000`；`phaseMilliDeg` 的单位是毫度（如 DSP 量化后的 80.0° → `80000`）。
 
 **必须用等价的安全形式**（避免 64 位溢出，`docs/ps-protocol.md` 第 5 节）：
 
@@ -46,7 +46,7 @@ from fractions import Fraction
 #: 默认低速（AXI/闸门）时钟频率（Hz）。
 SLOW_HZ_DEFAULT = 50_000_000
 #: 默认高速（DSP/测量）时钟频率（Hz）。
-DSP_HZ_DEFAULT = 400_000_000
+DSP_HZ_DEFAULT = 450_000_000
 #: 相位差满量程（1e-3 度）。
 FULL_SCALE_MILLI_DEG = 360_000
 #: `GET_MEAS.freqMilliHz` 字段承载的单位除数：字段值 = 频率 [Hz] / 该除数。
@@ -108,7 +108,7 @@ def phase_milli_deg(
         phaseMilliDeg = (v * (f_slow // 1000)) // (f_dsp // 1000)
 
     公式里 `edgeCnt` 被约掉，但它是否为 0 决定「源有没有边沿」，因此仍作为输入给出。
-    要求 `f_slow` 与 `f_dsp` 都能被 1000 整除（默认 50MHz / 400MHz 满足）。
+    要求 `f_slow` 与 `f_dsp` 都能被 1000 整除（默认 50MHz / 450MHz 满足）。
     """
     if gate_cnt <= 0 or edge_cnt <= 0:
         return 0
@@ -126,8 +126,8 @@ def phase_milli_deg(
 def round_half_even(num: int, den: int) -> int:
     """整数 RNE（round-half-to-even，半数取偶），全程整数运算。
 
-    用于「相位先被 DSP 采样网格量化」这一类**恰好半格**的场合：例如 8MHz/90° = 12.5 个
-    DSP 周期、20MHz/45° = 2.5 个，用浮点会因二进制表示误差给出不可判定的结果。
+    用于「相位先被 DSP 采样网格量化」这一类**恰好半格**的场合：例如 450MHz 下 25MHz/90° =
+    4.5 个 DSP 周期、50MHz/180° = 4.5 个，用浮点会因二进制表示误差给出不可判定的结果。
     与 `spec/gen_golden.py` 的 `round_half_even` 逐位一致。
     """
     num, den = int(num), int(den)
@@ -151,7 +151,7 @@ def round_half_even_frac(value: Fraction) -> int:
 def phase_quant_milli_deg(freq_hz_value: int, dsp_hz: int = DSP_HZ_DEFAULT) -> int:
     """相位量化步长（1 个 DSP 周期）对应的度数，单位 1e-3 度（整数 RNE）。
 
-    `360 * f_sig / f_dsp`：25MHz / 400MHz → 22.5°；10MHz → 9°。`freq_hz_value` 单位是 Hz。
+    `360 * f_sig / f_dsp`：25MHz / 450MHz → 20°；10MHz → 8°。`freq_hz_value` 单位是 Hz。
     """
     if freq_hz_value <= 0 or dsp_hz <= 0:
         return 0

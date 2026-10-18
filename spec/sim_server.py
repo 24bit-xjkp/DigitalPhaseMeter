@@ -51,7 +51,7 @@ CMD = {
 ERR_PARAM, ERR_BUSY = 0xFE, 0xFF
 
 F_SLOW = 50_000_000
-F_DSP = 400_000_000
+F_DSP = 450_000_000
 
 
 def crc16(data: bytes) -> int:
@@ -234,22 +234,19 @@ class SimBackend:
     def measure_model(self) -> tuple[int, int, int]:
         """按 docs/verify-plan.md 的模型算 (gate, edge, phase)。
 
-        片内源：相位先被 DSP 采样网格量化成整数个高速周期（整数 ps + RNE）再乘参考沿数。
+        片内源：相位先被 DSP 采样网格量化成整数个高速周期再乘参考沿数。450MHz 的 DSP 周期
+        不是整数 ps，因此用 `相位 × f_dsp /(360000 × f_sig)` 的有理数形式做 RNE
+        （与 `spec/gen_golden.py`、`ps/sim/fpga_model.c` 的整数公式逐位一致）。
         `PHASE_CONTROLLABLE = False` 时改用固定的 90°（模拟旧 bitstream 的真实行为）。
         """
-        f_sig = self.vco_hz / self.div
-        t_sig_ps_num, t_sig_ps_den = self.div * 10**12, self.vco_hz
-        if t_sig_ps_num % t_sig_ps_den == 0:
-            t_sig_ps = t_sig_ps_num // t_sig_ps_den
-        else:
-            t_sig_ps = round(t_sig_ps_num / t_sig_ps_den)
-        gate = self.gate_target + -(-t_sig_ps // (10**12 // self.f_slow))  # ceil
-        edge = (gate * int(round(f_sig))) // self.f_slow
+        # gate = target_gate + ceil(T_sig/T_slow)，T_sig/T_slow = D·f_slow/VCO
+        gate = self.gate_target + -(-(self.div * self.f_slow) // self.vco_hz)
+        edge = (gate * self.vco_hz) // (self.div * self.f_slow)
         if edge == 0:
             return gate, 0, 0
-        t_dsp_ps = 10**12 // self.f_dsp
         phase_mdeg = self.phase_mdeg if self.phase_controllable else self.FIXED_PHASE_MDEG
-        cycles = round_half_even(phase_mdeg * t_sig_ps, 360_000 * t_dsp_ps)
+        # phase/T_dsp = phase_mdeg × f_dsp / (360000 × f_sig)，f_sig = VCO/D
+        cycles = round_half_even(phase_mdeg * self.div * self.f_dsp, 360_000 * self.vco_hz)
         return gate, edge, cycles * edge
 
     def start(self) -> None:

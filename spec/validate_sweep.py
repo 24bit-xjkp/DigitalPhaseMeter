@@ -63,7 +63,7 @@ STATUS_LOST = 1 << 2
 STATUS_IRQ_PENDING = 1 << 3
 
 F_SLOW_HZ = 50_000_000
-F_DSP_HZ = 400_000_000
+F_DSP_HZ = 450_000_000
 
 SIGST_ENABLE = 1 << 0
 SIGST_SELECT = 1 << 1
@@ -417,11 +417,10 @@ def run_point(link: SerialLink, vec: dict, gate: int, repeat: int, timeout: floa
         phase_mode = "controllable"
     else:
         # 固定相位也必须先量化到 DSP 采样网格：报告出来的相位是「实际延迟 / 信号周期」，
-        # 实际延迟只能是整数个 DSP 周期，因此 8MHz/90° 会报 ~86.4°（12 个周期）
+        # 实际延迟只能是整数个 DSP 周期，因此例如 5MHz/90° 会报 88°（22 个周期）
         # 而不是 90°——这是测量网格的量化下界，不是相位计误差。
-        t_sig_ps = (vec["div"] * 10**12) // vec["vco_hz"]
-        t_dsp_ps = 10**12 // F_DSP_HZ
-        cycles = round_half_even(fixed_phase_mdeg * t_sig_ps, 360_000 * t_dsp_ps)
+        # 450MHz 的 DSP 周期不是整数 ps，用有理数形式（相位×D×f_dsp/(360000×VCO)）做 RNE。
+        cycles = round_half_even(fixed_phase_mdeg * vec["div"] * F_DSP_HZ, 360_000 * vec["vco_hz"])
         if vec["gate_cnt"] and vec["edge_cnt"]:
             v_model = (360_000 * (cycles * vec["edge_cnt"])) // vec["gate_cnt"]
             p_exp = (v_model * (F_SLOW_HZ // 1000)) // (F_DSP_HZ // 1000)

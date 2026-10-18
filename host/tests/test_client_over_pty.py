@@ -115,10 +115,14 @@ STATIC_PHASE = pytest.mark.parametrize("server", [pytest.param(("--phase-model",
 
 
 def expectation(freq_hz: int, phase_mdeg: int) -> tuple[int, int, int]:
-    """按冻结模型算期望的 (gateCnt, edgeCnt, phaseCnt)。"""
+    """按冻结模型算期望的 (gateCnt, edgeCnt, phaseCnt)。
+
+    DSP 网格量化：`dspCycles = RNE(phase / 360 × f_dsp / f_sig)`，整数运算走
+    `mathx.round_half_even`（半数取偶），与 `spec/gen_golden.py` 同一口径。
+    """
     gate = 2000 + -(-50_000_000 // freq_hz)
     edge = (gate * freq_hz) // 50_000_000
-    dsp_cycles = M.round_half_even(phase_mdeg * (10**12 // freq_hz), 360_000 * 2500)
+    dsp_cycles = M.round_half_even(phase_mdeg * M.DSP_HZ_DEFAULT, 360_000 * freq_hz)
     return gate, edge, dsp_cycles * edge
 
 
@@ -131,7 +135,7 @@ def test_ping_and_identify(client: DpmClient) -> None:
     assert info.version_reg == 0x44504D02
     assert info.caps == 0x00030104
     assert info.slow_clk_hz == 50_000_000
-    assert info.dsp_clk_hz == 400_000_000
+    assert info.dsp_clk_hz == 450_000_000
     assert info.has_signal_source and info.supports_continuous and info.supports_stream
 
 
@@ -155,16 +159,20 @@ def test_source_switch(client: DpmClient) -> None:
 
 @CONTROLLABLE
 @pytest.mark.parametrize(
-    "freq_hz, phase_mdeg",
-    [(10_000_000, 45_000), (25_000_000, 90_000), (6_250_000, 22_500)],
-    ids=["10MHz-45mdeg", "25MHz-90mdeg", "6.25MHz-22.5mdeg"],
+    "freq_hz, phase_mdeg, phase_expected_mdeg",
+    [
+        (10_000_000, 45_000, 48_000),  # 5.625 → RNE → 6 个 DSP 周期（8° × 6 = 48°）
+        (25_000_000, 90_000, 80_000),  # 4.5 → RNE（半数取偶）→ 4 个（20° × 4 = 80°）
+        (5_000_000, 22_500, 24_000),  # 5.625 → RNE → 6 个（4° × 6 = 24°）
+    ],
+    ids=["10MHz-45mdeg", "25MHz-90mdeg", "5MHz-22.5mdeg"],
 )
-def test_set_sig_and_measure(client: DpmClient, freq_hz: int, phase_mdeg: int) -> None:
+def test_set_sig_and_measure(client: DpmClient, freq_hz: int, phase_mdeg: int, phase_expected_mdeg: int) -> None:
     """写片内源参数 → 起测 → 结果与冻结模型逐项一致（原用例的 3 个子用例各占一个参数）。"""
     client.wait_idle(timeout=2.0)
     info = client.set_sig(freq_hz, phase_mdeg)
     assert info.freq_hz == freq_hz
-    assert info.phase_milli_deg == phase_mdeg
+    assert info.phase_milli_deg == phase_mdeg  # 请求相位精确落在 MMCM 的 45°/D 网格上
     client.wait_source_ready(timeout=2.0)
     client.start()
     meas = client.wait_meas(timeout=2.0)
@@ -174,7 +182,8 @@ def test_set_sig_and_measure(client: DpmClient, freq_hz: int, phase_mdeg: int) -
     assert meas.edge_cnt == edge
     assert meas.phase_cnt == phase_cnt
     assert calc.freq_hz == freq_hz
-    assert calc.phase_milli_deg == phase_mdeg
+    # 测量端再按 1 个 DSP 周期量化一次（期望值见参数表，不是请求值）
+    assert calc.phase_milli_deg == phase_expected_mdeg
     # 线的字段与本地换算一致（协议字段单位 = Hz / 毫度）
     assert meas.freq_milli_hz == calc.freq_hz
     assert meas.phase_milli_deg == calc.phase_milli_deg
@@ -185,8 +194,8 @@ def test_set_sig_and_measure(client: DpmClient, freq_hz: int, phase_mdeg: int) -
 @CONTROLLABLE
 @pytest.mark.parametrize(
     "freq_hz, phase_mdeg, div",
-    [(25_000_000, 315_000, 40), (8_000_000, 183_960, 125), (5_000_000, 191_625, 120), (12_500_000, 270_000, 80)],
-    ids=["25MHz-315", "8MHz-183.96", "5MHz-191.625", "12.5MHz-270"],
+    [(25_000_000, 315_000, 40), (6_000_000, 183_960, 125), (5_000_000, 191_625, 120), (30_000_000, 315_000, 35)],
+    ids=["25MHz-315", "6MHz-183.96", "5MHz-191.625", "30MHz-315"],
 )
 def test_over_180_deg_is_accepted(client: DpmClient, freq_hz: int, phase_mdeg: int, div: int) -> None:
     """>180° 的请求在 9 位相位码范围内是**合法**的（旧固件一律拒 ≥180°，比硬件保守）。
@@ -205,16 +214,16 @@ def test_over_180_deg_is_accepted(client: DpmClient, freq_hz: int, phase_mdeg: i
     calc = client.calc_meas(meas)
     gate, edge, phase_cnt = expectation(freq_hz, phase_mdeg)
     assert (meas.gate_cnt, meas.edge_cnt, meas.phase_cnt) == (gate, edge, phase_cnt)
-    # 测量端还有一重量化：1 个 DSP 周期 = 360·f_sig/400MHz，实测值落在半格 + 1 毫度内
-    dsp_quantum_mdeg = 360_000.0 * freq_hz / 400_000_000.0
+    # 测量端还有一重量化：1 个 DSP 周期 = 360·f_sig/450MHz，实测值落在半格 + 1 毫度内
+    dsp_quantum_mdeg = 360_000.0 * freq_hz / 450_000_000.0
     assert abs(calc.phase_milli_deg - phase_mdeg) <= dsp_quantum_mdeg / 2 + 1000
 
 
 @CONTROLLABLE
 @pytest.mark.parametrize(
     "freq_hz, phase_mdeg",
-    [(8_000_000, 200_000), (8_000_000, 184_140), (5_000_000, 200_000), (25_000_000, 360_000)],
-    ids=["8MHz-200", "8MHz-上界+1", "5MHz-200", "25MHz-360(满量程)"],
+    [(6_000_000, 200_000), (6_000_000, 184_140), (5_000_000, 200_000), (25_000_000, 360_000)],
+    ids=["6MHz-200", "6MHz-上界+1", "5MHz-200", "25MHz-360(满量程)"],
 )
 def test_phase_code_overflow_is_rejected(client: DpmClient, freq_hz: int, phase_mdeg: int) -> None:
     """相位码越界（`m > 511`）或满量程必须回 ERR_PARAM，不能静默改相位。
@@ -235,38 +244,38 @@ def test_phase_code_overflow_is_rejected(client: DpmClient, freq_hz: int, phase_
 def test_scan_skips_unrepresentable_points(client: DpmClient) -> None:
     """扫描遇到越界相位点时**跳过该点继续**，而不是中断整轮扫描。
 
-    相位上界逐频点不同（8MHz/D=125 只到 184.139°），因此一份固定的相位列表里必然有
+    相位上界逐频点不同（6MHz/D=125 只到 184.139°），因此一份固定的相位列表里必然有
     越界组合；扫描必须能跑完并给出可实现的那些行。
     """
     logs: list[str] = []
     rows = client.scan(
-        [8_000_000, 25_000_000],
+        [6_000_000, 25_000_000],
         [0.0, 90.0, 225.0],
         gate_target=2000,
         timeout=2.0,
         result_timeout=2.0,
         log=logs.append,
     )
-    # 越界点：8MHz/225°（D=125 → 需要相位码 625）；其余 5 点可实现
+    # 越界点：6MHz/225°（D=125 → 需要相位码 625）；其余 5 点可实现
     assert len(rows) == 5
     assert [(r["freq_nominal"], r["phase_nominal"]) for r in rows] == [
-        (8_000_000, 0.0),
-        (8_000_000, 90.0),
+        (6_000_000, 0.0),
+        (6_000_000, 90.0),
         (25_000_000, 0.0),
         (25_000_000, 90.0),
         (25_000_000, 225.0),
     ]
-    assert any("跳过 8MHz/225" in line for line in logs)
+    assert any("跳过 6MHz/225" in line for line in logs)
 
 
 @CONTROLLABLE
 def test_monitor_samples(client: DpmClient) -> None:
-    client.set_sig(12_500_000, 90_000)
+    client.set_sig(25_000_000, 180_000)  # 180° 同时落在 MMCM 网格（D=40 → 1.125°）与 DSP 网格（20°）上
     samples = client.monitor(count=3, timeout=2.0)
     assert len(samples) == 3
     for meas, calc in samples:
-        assert calc.freq_hz == 12_500_000
-        assert calc.phase_milli_deg == 90_000
+        assert calc.freq_hz == 25_000_000
+        assert calc.phase_milli_deg == 180_000
     assert client.get_status().sig_select is True
 
 
@@ -349,7 +358,8 @@ def test_phase_is_fixed_at_90deg(client: DpmClient) -> None:
     assert info.phase_milli_deg == 90_000  # 相位字写不进去
     client.start()
     meas = client.wait_meas(timeout=2.0)
-    assert client.calc_meas(meas).phase_milli_deg == 90_000
+    # 静态 90° @10MHz 再被 DSP 网格量化：2.5 个周期 → RNE（半数取偶）→ 2 个 = 88°
+    assert client.calc_meas(meas).phase_milli_deg == 88_000
 
 
 # ------------------------------------------------------------------ 源不可用时测量永不完成：客户端必须超时

@@ -3,8 +3,8 @@
 # 用法：
 #   vivado -mode batch -source vivado/create_bd.tcl [dsp_clk_mhz] [ps_fclk1_mhz] [-uart <uart0|uart1|none>] [-baud <波特率>]
 #
-#   dsp_clk_mhz  —— DSP 域时钟频率（MHz），默认 400（MMCM 倍频；本仓库实测在 xc7z010clg400-1
-#                   上综合/实现收敛，域内 WNS ≥ +0.236ns，见 vivado/README.md）
+#   dsp_clk_mhz  —— DSP 域时钟频率（MHz），默认 450（MMCM 小数倍频；本仓库实测在 xc7z010clg400-1
+#                   上综合/实现收敛，全设计 WNS +0.291ns、DSP 域内 WNS +0.291ns，见 vivado/README.md）
 #   ps_fclk1_mhz —— 给定时改用 PS 的 FCLK_CLK1 直供 DSP 域（不建 MMCM、不用 dsp_clk_mhz），
 #                   用于对比「PS 直供」与「MMCM 倍频」两条路。FCLK_CLK1 上限 250MHz，
 #                   因此这条路只能覆盖 250MHz 及以下。
@@ -16,7 +16,7 @@
 #   -baud        —— 串口波特率，默认 115200
 #
 #   例：`create_bd.tcl 300` = 300MHz；`create_bd.tcl 0 150` = PS 直供 150MHz；
-#       `create_bd.tcl -uart uart0` = 默认 400MHz + MIO14/15 串口。
+#       `create_bd.tcl -uart uart0` = 默认 450MHz + MIO14/15 串口。
 #
 # 前置条件：先运行 vivado/package_ip.tcl 与 vivado/package_src_ip.tcl 生成两个 IP
 #   （build/vivado/ip/dpm_top、build/vivado/ip/dpm_src_drp）
@@ -41,7 +41,7 @@
 #   - 两路输出同频（初始 25MHz）、相位差 90°，**频率与相位差都由 PS 写成 MMCM 的
 #     16 位寄存器值**，再由 dpm_src_drp_0 逐条写进 MMCM 的 DRP 口；
 #   - 两路输出送给 dpm_top_0，由 IP 当成异步被测信号采样成边沿（已不在 IP 内做数字分频，
-#     见 vivado/README.md 的「不要在 IP 里对 MMCM 输出再做数字分频」）；
+#     见 vivado/README.md「Block design 结构」的「片内信号源」要点）；
 #   - 地址段 0x43C1_0000，寄存器映射见 vivado/package_src_ip.tcl 的说明与
 #     build/analysis/golden/mmcm_encode.py（编码参考实现）。
 #
@@ -78,8 +78,8 @@ set ip_repo [file join $build_dir ip]
 set part "xc7z010clg400-1"
 
 # ---- 参数：前两个位置参数保持原义，串口用 -uart / -baud 具名给出 ----
-# DSP 域目标时钟频率（MHz），默认 400；默认走 PL 内的 MMCM（PS 的 FCLK 分频点够不到 300MHz 以上）。
-set dsp_clk_mhz 400.0
+# DSP 域目标时钟频率（MHz），默认 450；默认走 PL 内的 MMCM（PS 的 FCLK 分频点够不到 300MHz 以上）。
+set dsp_clk_mhz 450.0
 set ps_fclk1_mhz ""
 set uart_sel "uart1"
 set uart_baud 115200
@@ -146,9 +146,10 @@ current_bd_design $bd_name
 
 # ---- PS7：使能 M_AXI_GP0、FCLK、PL 中断与调试串口 ----
 # FCLK_CLK0 取 50MHz：既作 AXI/低速控制域时钟（闸门计数、FSM 都跑在这个域），
-# 又作 MMCM 的参考时钟。50MHz 参考下 400MHz 输出的实际参数是 M=20、O=2.5、
-# DIVCLK=1（VCO 1000MHz，在 7 系列 -1 的 600~1200MHz 范围内，见生成的 clk_wiz
-# 例化）；AXI4-Lite 寄存器访问不需要更快的时钟。
+# 又作 MMCM 的参考时钟。50MHz 参考下 450MHz 输出的实际参数是 M=20.25、O=2.25、
+# DIVCLK=1（VCO 1012.5MHz，在 7 系列 -1 的 600~1200MHz 范围内，见生成的 clk_wiz
+# 例化与 .xci）。450 = 50 × 9，不是整数倍频，因此 Wizard 选的是小数倍频/分频
+# （M=20.25、O=2.25）；AXI4-Lite 寄存器访问不需要更快的时钟。
 #
 # 串口（上板调试用，由 -uart 选择）：默认 UART1 走 MIO48(tx)/49(rx)，115200 8N1。
 #   - MIO48/49 属于 MIO Bank1，本板该 bank 供电 1.8V（LVCMOS 1.8V）；

@@ -6,7 +6,7 @@
  *     两侧必须给出相同的定点结果（见 `host/dpm_host/mathx.py` 与 `host/tests/`）。
  *   - 全部使用整数运算，不依赖 libc / libm / libgcc（PS 侧为 freestanding 环境，
  *     64 位除法由 `dpm_div64.c` 提供）。
- *   - 时钟频率在运行时给出：默认 `f_slow = 50MHz`、`f_dsp = 400MHz`。
+ *   - 时钟频率在运行时给出：默认 `f_slow = 50MHz`、`f_dsp = 450MHz`。
  */
 
 #ifndef DPM_CALC_H
@@ -25,7 +25,7 @@ typedef struct {
 /** 换算所需的时钟频率。 */
 typedef struct {
     uint32_t slow_hz; /**< 低速（AXI/闸门）时钟频率，默认 50_000_000 */
-    uint32_t dsp_hz;  /**< 高速（DSP/测量）时钟频率，默认 400_000_000 */
+    uint32_t dsp_hz;  /**< 高速（DSP/测量）时钟频率，默认 450_000_000 */
 } dpm_clocks_t;
 
 /** 换算结果（定点整数，避免浮点与格式化依赖）。 */
@@ -52,7 +52,7 @@ typedef struct {
  *   c = phase_cnt / gate_cnt; d = phase_cnt % gate_cnt
  *   v = 360000 * c + (360000 * d) / gate_cnt
  *   phase_milli_deg = v * (f_slow / 1000) / (f_dsp / 1000)
- * 要求 f_slow 与 f_dsp 都能被 1000 整除（默认 50MHz/400MHz 满足）。
+ * 要求 f_slow 与 f_dsp 都能被 1000 整除（默认 50MHz/450MHz 满足）。
  *
  * `gate_cnt == 0` 或 `edge_cnt == 0` 时两个输出均为 0（不产生除零）。
  */
@@ -98,8 +98,10 @@ typedef struct {
  *   2. 误差相同（含多个精确解）时，取 `cost = |VCO - 1000MHz| / 1MHz + |div - 40|` 最小者，
  *      即尽量贴近 BD 的初始工作点 `(VCO = 1000MHz, D = 40)`。
  *
- * 该规则的输出就是冻结频点表：8/10/12.5/20/25MHz → `MULT=20`、`div=125/100/80/50/40`；
- * 5MHz → `600/12/120`；6.25MHz → `750/15/120`。**不要硬编码频点表**，按规则算。
+ * 该规则的输出就是冻结频点表：10MHz → `1000/20/100`；25MHz → `1000/20/40`；
+ * 50MHz → `1000/20/20`；5MHz → `600/12/120`；6MHz → `750/15/125`；
+ * 9/18/45MHz → `900/18/100`、`900/18/50`、`900/18/20`；
+ * 15/30MHz → `1050/21/70`、`1050/21/35`。**不要硬编码频点表**，按规则算。
  *
  * 相位：`out->phase_milli_deg` 是**可实现**的相位（吸附到 MMCM 的 1/8 VCO 周期网格，
  * 即 `45°/div`；见 `dpm_regs.h` 的 `dpm_mmcm_phase_code`），不是请求值本身。

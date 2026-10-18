@@ -85,7 +85,8 @@ def test_formula_shape() -> None:
     gate, edge, phase = fpga.measurement_model(2000, 10_000_000, 90_000)
     assert gate == 2000 + 5  # ceil(50MHz / 10MHz)
     assert edge == (2005 * 10_000_000) // 50_000_000
-    assert phase == 10 * edge  # 90° @10MHz = 10 个 DSP 周期
+    # 90° @10MHz = 25ns = 11.25 个 DSP 周期（450MHz）→ RNE → 11 个
+    assert phase == 11 * edge
 
 
 def test_zero_frequency() -> None:
@@ -117,7 +118,7 @@ def test_status_bits_after_start_and_completion() -> None:
     assert fpga.read(F.REG_RESULT_SEQ) == 0
     assert fpga.read(F.REG_RESULT_GATE) == 2005
     assert fpga.read(F.REG_RESULT_EDGE) == 401
-    assert fpga.read(F.REG_RESULT_PHASE) == 4010
+    assert fpga.read(F.REG_RESULT_PHASE) == 4411  # 11 个 DSP 周期 × 401 个沿
 
 
 def test_start_ignored_while_busy() -> None:
@@ -364,7 +365,8 @@ def test_measurement_uses_active_source_phase() -> None:
     fpga.poll()
     calc = M.meas_calc(fpga.result_gate, fpga.result_edge, fpga.result_phase, fpga.slow_hz, fpga.dsp_hz)
     assert calc.freq_hz == 10_000_000
-    assert calc.phase_milli_deg == 45_000
+    # 45° @10MHz 先被 DSP 网格量化：5.625 → RNE → 6 个 DSP 周期 = 48.0°
+    assert calc.phase_milli_deg == 48_000
 
 
 # --------------------------------------------------------------- PS 固件逻辑
@@ -403,7 +405,7 @@ def test_ping_and_identify(env: PsEnv) -> None:
     info = P.decode_identify(env.request(P.Cmd.IDENTIFY).payload)
     assert info.version_reg == 0x44504D02
     assert info.caps == 0x00030104
-    assert info.dsp_clk_hz == 400_000_000
+    assert info.dsp_clk_hz == 450_000_000
     assert info.slow_clk_hz == 50_000_000
     assert info.has_signal_source and info.supports_stream
 
@@ -426,7 +428,8 @@ def test_measurement_flow(env: PsEnv) -> None:
     env.fpga.poll()
     meas = P.decode_meas(env.request(P.Cmd.GET_MEAS).payload)
     assert meas.freq_milli_hz == 25_000_000  # 字段 = 整数 Hz
-    assert meas.phase_milli_deg == 90_000
+    # 90° @25MHz = 4.5 个 DSP 周期（450MHz）→ RNE（半数取偶）→ 4 个 = 80.0°
+    assert meas.phase_milli_deg == 80_000
     # 结果读走后 resultValid 被清（协议第 4 节：W1C 的 resultValid 位）
     assert not env.fpga.result_valid
     # 再测一次，改用 GET_RESULT 读原始计数

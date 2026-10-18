@@ -66,7 +66,7 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
         }
     }
 
-    // 计数器控制脚全部寄存器化（400MHz 的关键路径）：
+    // 计数器控制脚全部寄存器化（450MHz 的关键路径）：
     // clearCnt / pulseSig1Valid / phaseCntEnable 都是寄存器，DSP48 的 RSTP/CEP 因此由寄存器直接驱动。
     // 两个使能同时延迟一拍 → 它们之间的相对时序不变，使能窗口长度也不变。
     private val clearCnt = RegNext(stateReg === idle)

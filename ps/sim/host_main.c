@@ -7,7 +7,7 @@
  * 用法（与 Lead 的验证脚本约定一致）：
  *
  *     ps/build/host_main --device /dev/pts/N [--freq-hz 25000000] [--phase-mdeg 90000]
- *                        [--gate 2000] [--dsp-hz 400000000] [--slow-hz 50000000]
+ *                        [--gate 2000] [--dsp-hz 450000000] [--slow-hz 50000000]
  *                        [--seed N] [--verbose]
  *     ps/build/host_main --pty          # 自己建 pty 并把从端路径打印到 stdout
  *     ps/build/host_main --stdio        # 协议字节走 stdin/stdout
@@ -136,7 +136,7 @@ static void usage(const char *argv0)
             "  --freq-hz N       片内源初始频率（默认 25000000）\n"
             "  --phase-mdeg N    片内源初始相位差，毫度（默认 90000）\n"
             "  --gate N          初始闸门目标（默认 2000）\n"
-            "  --dsp-hz N        高速时钟（默认 400000000）\n"
+            "  --dsp-hz N        高速时钟（默认 450000000）\n"
             "  --slow-hz N       低速时钟（默认 50000000）\n"
             "  --seed N          随机种子（模型确定性，仅为 CLI 兼容保留）\n"
             "  --speed N         每轮主循环额外推进的慢周期数（默认 4096，0 = 纯事务推进）\n"
@@ -175,7 +175,7 @@ int main(int argc, char **argv)
     dpm_rx_t rx;
     const dpm_io_t *io = dpm_model_io();
     uint32_t slow_hz = 50000000u;
-    uint32_t dsp_hz = 400000000u;
+    uint32_t dsp_hz = 450000000u;
     uint32_t freq_hz = DPM_HOST_DEFAULT_FREQ_HZ;
     uint32_t phase_mdeg = DPM_HOST_DEFAULT_PHASE_MDEG;
     uint32_t gate = DPM_HOST_DEFAULT_GATE;

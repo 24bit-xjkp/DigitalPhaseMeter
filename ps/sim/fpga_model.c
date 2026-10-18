@@ -201,7 +201,7 @@ void dpm_model_active_signal(const dpm_model_t *m, uint32_t *freq_hz, uint32_t *
             f = vco / d;
             /* 上板实测（docs/onboard-ax7010.md）：bitstream 打开 CONFIG.PHASE_DUTY_CONFIG
              * 之后，clk_out2 相对 clk_out1 的相位差由 DRP 相位字（毫度）决定，
-             * 再按 1 个 DSP 周期（2.5ns）量化到 phaseCnt。这里如实建模：
+             * 再按 1 个 DSP 周期（450MHz → 2.222ns）量化到 phaseCnt。这里如实建模：
              * 写多少相位就出多少相位（旧 bitstream 的"恒 90°"行为已不是默认语义）。 */
             p = phw;
             ok = 1;
@@ -498,7 +498,7 @@ void dpm_model_init(dpm_model_t *m, uint32_t slow_hz, uint32_t dsp_hz)
         p[i] = 0u;
     }
     m->slow_hz = (slow_hz != 0u) ? slow_hz : 50000000u;
-    m->dsp_hz = (dsp_hz != 0u) ? dsp_hz : 400000000u;
+    m->dsp_hz = (dsp_hz != 0u) ? dsp_hz : 450000000u;
     m->ext_freq_hz = 10000000u; /* --ext-present 时用的外部信号（golden 有 10MHz 点） */
     m->ext_phase_mdeg = 0u;
     m->ext_absent = 1u;         /* 默认外部引脚无信号：测量不会完成（与真实 PL 一致） */

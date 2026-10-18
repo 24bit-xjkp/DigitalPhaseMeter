@@ -28,14 +28,14 @@ GOLDEN_PATH = os.path.join(REPO_ROOT, "spec", "golden", "vectors.json")
 #: 冻结表（`docs/ps-protocol.md` 第 6.4 节 / `spec/golden/vectors.json`）
 FROZEN_TRIPLES = {
     5_000_000: (600_000_000, 12, 120),
-    6_250_000: (750_000_000, 15, 120),
-    8_000_000: (1_000_000_000, 20, 125),
+    6_000_000: (750_000_000, 15, 125),
+    9_000_000: (900_000_000, 18, 100),
     10_000_000: (1_000_000_000, 20, 100),
-    12_500_000: (1_000_000_000, 20, 80),
-    16_000_000: (800_000_000, 16, 50),
-    20_000_000: (1_000_000_000, 20, 50),
+    15_000_000: (1_050_000_000, 21, 70),
+    18_000_000: (900_000_000, 18, 50),
     25_000_000: (1_000_000_000, 20, 40),
-    40_000_000: (1_000_000_000, 20, 25),
+    30_000_000: (1_050_000_000, 21, 35),
+    45_000_000: (900_000_000, 18, 20),
     50_000_000: (1_000_000_000, 20, 20),
 }
 _FROZEN_IDS = [f"{freq_hz / 1e6:g}MHz" for freq_hz in FROZEN_TRIPLES]
@@ -539,9 +539,9 @@ def test_grid_is_45_over_d() -> None:
 
 
 #: 冻结相位点 × 偶 D（22.5° 是 45°/D 的整数倍要求 D 为偶数），再按 9 位相位码上界裁剪：
-#: D=120（5MHz）在 202.5° 以上越界、D=100（10MHz）在 270° 越界、D=80（12.5MHz）在 315° 越界。
+#: D=120（5MHz）在 180° 以上越界（相位码上界 191.625°）、D=100（9/10MHz）在 225° 以上越界。
 _FROZEN_GRID_CASES = [
-    (div, phase) for div in (40, 50, 80, 100, 120) for phase in S.FROZEN_PHASES_MILLI_DEG if S.phase_code_fits(phase, div)
+    (div, phase) for div in (40, 50, 70, 100, 120) for phase in S.FROZEN_PHASES_MILLI_DEG if S.phase_code_fits(phase, div)
 ]
 _FROZEN_GRID_IDS = [f"D{div}-{phase / 1000:g}deg" for div, phase in _FROZEN_GRID_CASES]
 

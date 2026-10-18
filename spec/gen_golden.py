@@ -37,37 +37,37 @@ import argparse
 import json
 import math
 import os
+from fractions import Fraction
 
 # ---------------------------------------------------------------- 冻结参数
 
 F_SLOW_HZ = 50_000_000  # 低速（AXI/闸门）时钟
-F_DSP_HZ = 400_000_000  # 高速（DSP/测量）时钟
+F_DSP_HZ = 450_000_000  # 高速（DSP/测量）时钟
 TARGET_GATE = 2000  # 默认闸门目标（低速周期数）→ 40µs
 
 # 冻结的验证频点：目标频率 → (VCO, MULT, DIVCLK=1, D)
 # 该表必须与 `solve_sig()` 的规则输出一致（build_vectors 会断言）。
 # 约束：600 ≤ VCO ≤ 1200 MHz、分频字段 = D ≤ 126
 #
-# 10 个频点覆盖 4 个 VCO（600/750/800/1000MHz）、MULT 12/15/16/20 与
-# D = 20/25/40/50/80/100/120/125。选取规则（三条都要满足，见下方说明）：
-#   1. 只取**求解规则输出**的精确工作点（频率误差 0）；
-#   2. 信号周期是整数 ps（`t_sig = D×10^12/VCO`），金标准生成器因此全程整数运算
-#      ——7.5/15/30MHz 这类含因子 3 的频率周期不是整数 ps，不入表；
-#   3. 信号周期是 **DSP 周期（2.5ns）的整数倍**，即 `8D / MULT` 为整数：此时每个信号
-#      周期的相位计数窗口都是同一个整数，`phaseCnt % edgeCnt == 0` 严格成立。
-#      非整数时窗口在 k 与 k+1 之间交替（xsim 联调实测：6.4MHz/VCO=800/D=125 →
-#      `phaseCnt % edgeCnt = 129`），金标准的 `phaseCnt = round(相位/T_dsp)×edge_cnt`
-#      就只是近似值；因此这类频率（6.4/15.625/31.25MHz 等）一律不入冻结表。
+# 450MHz 轮次的选点规则：**DSP 时钟 450MHz = 9 × 50MHz，只有能整除 450MHz 的整数 MHz 频点
+# 才让 `f_dsp / f_sig` 为整数**，此时每个信号周期的相位计数窗口都是同一个整数，
+# `phaseCnt = round(相位/T_dsp) × edgeCnt` 严格成立（`phaseCnt % edgeCnt == 0`）。
+# 于是取 5~50MHz 内 450MHz 的整数 MHz 约数：5/6/9/10/15/18/25/30/45/50MHz；它们也都
+# 正好是冻结求解规则的精确解。10 个频点覆盖 VCO 600/750/900/1000/1050MHz、
+# MULT 12/15/18/20/21 与 D = 20/35/40/50/70/100/120/125。
+#
+# 注意 450MHz 下多数信号周期不再是整数 ps（例如 6MHz 的周期是 166666.67ps），金标准
+# 因此改用 `fractions.Fraction` 全程有理数精确运算，不再要求「信号周期是整数 ps」。
 FREQ_POINTS_HZ = {
     5_000_000: (600_000_000, 12, 120),
-    6_250_000: (750_000_000, 15, 120),
-    8_000_000: (1_000_000_000, 20, 125),
+    6_000_000: (750_000_000, 15, 125),
+    9_000_000: (900_000_000, 18, 100),
     10_000_000: (1_000_000_000, 20, 100),
-    12_500_000: (1_000_000_000, 20, 80),
-    16_000_000: (800_000_000, 16, 50),
-    20_000_000: (1_000_000_000, 20, 50),
+    15_000_000: (1_050_000_000, 21, 70),
+    18_000_000: (900_000_000, 18, 50),
     25_000_000: (1_000_000_000, 20, 40),
-    40_000_000: (1_000_000_000, 20, 25),
+    30_000_000: (1_050_000_000, 21, 35),
+    45_000_000: (900_000_000, 18, 20),
     50_000_000: (1_000_000_000, 20, 20),
 }
 
@@ -91,9 +91,9 @@ def solve_sig(target_freq_hz: int, f_in_hz: int = F_SLOW_HZ) -> tuple[int, int, 
          即尽量贴近 BD 的初始工作点 `(VCO=1000MHz, D=40)`。
 
     该规则的输出就是冻结频点表（`FREQ_POINTS_HZ` 与之一致，由 `build_vectors()` 断言）：
-    8/10/12.5/20/25MHz 落在 `MULT=20, D=125/100/80/50/40`；5MHz 在 1000MHz 下需要 D=200
-    （超硬上限 126），取 `600/12/120`；6.25MHz 的候选精确解里 `750/15/120` 的 cost 最小
-    （cost = 250+80 = 330 < `600/12/96` 的 456）。
+    5MHz 在 1000MHz 下需要 D=200（超硬上限 126），取 `600/12/120`；6MHz 的候选精确解里
+    `750/15/125` 的 cost 最小（250+85）；9/18/45MHz 落在 900MHz 的 `MULT=18`；
+    15/30MHz 落在 1050MHz 的 `MULT=21`；10/25/50MHz 落在 1000MHz 的 `MULT=20`。
 
     返回 `(vco_hz, mult, div)`；无解抛异常。
     """
@@ -236,15 +236,26 @@ def gate_count(f_sig_hz: float) -> int:
     return TARGET_GATE + math.ceil(F_SLOW_HZ / f_sig_hz)
 
 
-def round_half_even(num: int, den: int) -> int:
-    """整数 RNE（round-half-to-even），用于把相位量化到 DSP 采样网格。
+def round_half_even(num: int | Fraction, den: int | Fraction) -> int:
+    """有理数 RNE（round-half-to-even），用于把相位量化到 DSP 采样网格。
 
-    全程整数运算，避免浮点在恰好半格（例如 8MHz/90° = 12.5 个 DSP 周期、
-    20MHz/45° = 2.5 个 DSP 周期）上因二进制表示误差给出不可判定结果。
+    参数可以是 int 或 `Fraction`：450MHz 的 DSP 周期不是整数 ps（20/9 ns），因此这里改用
+    有理数精确运算，避免浮点在恰好半格（例如 25MHz/90° = 4.5 个 DSP 周期、
+    5MHz/90° = 22.5 个 DSP 周期）上因二进制表示误差给出不可判定结果。
     """
-    q, r = divmod(num, den)
+    ratio = Fraction(num) / Fraction(den)
+    q = ratio.numerator // ratio.denominator
+    r = ratio.numerator - q * ratio.denominator  # 0 <= r < ratio.denominator
     twice = 2 * r
-    if twice > den or (twice == den and (q & 1)):
+    if twice > ratio.denominator or (twice == ratio.denominator and (q & 1)):
+        q += 1
+    return q
+
+
+def round_half_up(value: Fraction) -> int:
+    """非负有理数四舍五入（half-up），用于把精确的 ps 相位换算成毫度。"""
+    q, r = divmod(value.numerator, value.denominator)
+    if 2 * r >= value.denominator:
         q += 1
     return q
 
@@ -260,15 +271,14 @@ def build_vector(freq_hz: int, vco_hz: int, mult: int, div: int, phase_mdeg: int
         f"{freq_hz}Hz/{phase_mdeg}mdeg 的相位码 {mmcm_phase_code(phase_mdeg, div)} 超出 9 位" f"（上界 {phase_max_mdeg(div)} mdeg）"
     )
 
-    t_dsp_ps = 10**12 // F_DSP_HZ  # DSP 周期，ps（400MHz → 2500ps，整除）
-    t_sig_ps_num = div * 10**12  # 信号周期 ps 的分子（vco_hz 整除情形）
-    assert t_sig_ps_num % vco_hz == 0, "信号周期必须是整数 ps（频点表保证）"
-    t_sig_ps = t_sig_ps_num // vco_hz
-    # 信号周期必须是 DSP 周期的整数倍：此时每个信号周期的相位计数窗口都是同一个整数，
-    # `phaseCnt = round(相位/T_dsp) × edgeCnt` 才是**严格**等式（`phaseCnt % edgeCnt == 0`）。
-    assert t_sig_ps % t_dsp_ps == 0, (
-        f"{freq_hz}Hz 的周期 {t_sig_ps}ps 不是 DSP 周期 {t_dsp_ps}ps 的整数倍"
-        "（相位计数窗口会在 k 与 k+1 之间交替，金标准的 phase_cnt 只是近似）"
+    t_dsp_ps = Fraction(10**12, F_DSP_HZ)  # DSP 周期，ps（450MHz → 20000/9 ps）
+    t_sig_ps = Fraction(div * 10**12, vco_hz)  # 信号周期，ps（可能不是整数）
+    # 信号周期必须是 DSP 周期的整数倍（等价于 f_dsp / f_sig 为整数）：此时每个信号周期的
+    # 相位计数窗口都是同一个整数，`phaseCnt = round(相位/T_dsp) × edgeCnt` 才是**严格**等式
+    # （`phaseCnt % edgeCnt == 0`）。非整数时窗口在 k 与 k+1 之间交替，金标准只是近似值。
+    assert (t_sig_ps / t_dsp_ps).denominator == 1, (
+        f"{freq_hz}Hz 的周期 {float(t_sig_ps):.3f}ps 不是 DSP 周期 {float(t_dsp_ps):.3f}ps 的整数倍"
+        f"（f_dsp/f_sig = {F_DSP_HZ / freq_hz:g}，冻结频点必须整除 450MHz）"
     )
 
     # 相位先被 MMCM 的 1/8 VCO 周期网格量化（方案 A：PS 直接编码 DELAY_TIME/PHASE_MUX），
@@ -283,9 +293,9 @@ def build_vector(freq_hz: int, vco_hz: int, mult: int, div: int, phase_mdeg: int
     # 参考沿数：窗口长度 / 参考周期 = gate_cnt * T_slow / T_sig = gate_cnt * f_sig / f_slow
     edge_cnt = (gate_cnt * freq_hz) // F_SLOW_HZ
 
-    # 真实相位差（ps）→ 量化到 DSP 采样网格（整数个 DSP 周期）
-    phase_ps_num = mmcm_mdeg * t_sig_ps  # 分子（单位 1e-3 度 · ps）
-    dsp_cycles = round_half_even(phase_ps_num, 360_000 * t_dsp_ps) if edge_cnt else 0
+    # 真实相位差（ps，有理数精确值）→ 量化到 DSP 采样网格（整数个 DSP 周期）
+    phase_ps = Fraction(mmcm_mdeg, 360_000) * t_sig_ps
+    dsp_cycles = round_half_even(phase_ps, t_dsp_ps) if edge_cnt else 0
     phase_ps_actual = dsp_cycles * t_dsp_ps
     phase_cnt = dsp_cycles * edge_cnt
 
@@ -293,9 +303,9 @@ def build_vector(freq_hz: int, vco_hz: int, mult: int, div: int, phase_mdeg: int
     # 见 docs/ps-protocol.md 第 5 节）
     freq_milli_hz, phase_milli_deg = fixed_point(gate_cnt, edge_cnt, phase_cnt)
 
-    phase_step_mdeg = round(360_000.0 * f_actual / F_DSP_HZ)  # 1 个 DSP 周期对应度数
+    phase_step_mdeg = round_half_up(Fraction(360_000 * vco_hz, div * F_DSP_HZ))  # 1 个 DSP 周期对应度数
     # 量化偏差：量化后实际相位与请求相位之差（度数，四舍五入到毫度）
-    phase_actual_mdeg = (phase_ps_actual * 360_000 + t_sig_ps // 2) // t_sig_ps
+    phase_actual_mdeg = round_half_up(phase_ps_actual * 360_000 / t_sig_ps)
     phase_quant_err_mdeg = abs(phase_actual_mdeg - phase_mdeg)
 
     return {

@@ -5,6 +5,8 @@
 > 已不在 BD 里，寄存器映射也换成 MMCM 的原始 16 位寄存器（`0x08..0x24` + `0x28` LOAD）。
 > 本文保留作历史对照；当前方案请以 `vivado/package_src_ip.tcl`、`vivado/README.md`
 > 与 `build/analysis/golden/mmcm_encode.py` 为准。
+> 另外，本文实验完成时 **DSP 域时钟是 400MHz**，当时冻结频点也与现在（450MHz、新冻结表）不同；
+> 本文数字为历史记录，当前设计状态以 [`ps-protocol.md`](ps-protocol.md) 为准。
 
 本文记录**用厂商 IP 自己的仿真模型实测**得到的结论：`build/vivado/bd_proj/.../dpm_system_clk_wiz_src_0`
 （clk_wiz v6.0，MMCM + 动态重配置，参考 50MHz）的 DRP 寄存器文件到底怎么解释，

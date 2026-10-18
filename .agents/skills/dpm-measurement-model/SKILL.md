@@ -52,7 +52,7 @@ argument-hint: '要验证的测量结果或要写的判据'
 
 - `edgeCnt` 的理论值就是"窗口长度 ÷ 参考周期"，窗口长度约等于 `gateCnt × T_clock`。
 - `phaseCnt / edgeCnt` 是相位偏移对应的高速时钟周期数，乘以 `T_dsp` 即绝对相位差，除以 `T_sig` 即相位差占比（× 360° 得到度数）。**判据优先写在 `phaseCnt / edgeCnt` 这个比值上**，它与闸门时间无关，便于比较不同闸门时间下的结果。
-- 相位分辨率是 1 个高速时钟周期：200MHz 下对 400ns 周期约 4.5°，对 1µs 周期约 1.8°。式中的 `±1 cycle / 参考沿` 是这个分辨率的量化下界，不是设计余量。
+- 相位分辨率是 1 个高速时钟周期：450MHz（2.222ns）下对 400ns 周期（2.5MHz）约 2.0°，对 1µs 周期（1MHz）约 0.8°。式中的 `±1 cycle / 参考沿` 是这个分辨率的量化下界，不是设计余量。
 
 ## 相位映射成立的条件
 
@@ -67,18 +67,19 @@ argument-hint: '要验证的测量结果或要写的判据'
   `180°~359.999°` 是合法请求（上界另受 MMCM 的 9 位相位码限制，见 `dpm-vivado-ip`）。
 
 `phaseCnt % edgeCnt == 0` 只在**信号周期是高速时钟周期整数倍**时严格成立：此时每个信号周期的
-测量窗口都是同一个整数；否则窗口在 `k` 与 `k+1` 之间交替，余数非零（xsim 联调实测：6.4MHz、
-VCO=800MHz、D=125 时 `phaseCnt % edgeCnt = 129`）。冻结验证频点因此都要求
-`8D / MULT` 为整数（见 `docs/ps-protocol.md` §6.4）。
+测量窗口都是同一个整数；否则窗口在 `k` 与 `k+1` 之间交替，余数非零（400MHz 轮次 xsim 联调历史
+实测：6.4MHz、VCO=800MHz、D=125 时 `phaseCnt % edgeCnt = 129`）。当前 450MHz 设计的冻结验证频点
+`f_dsp / f_sig` 全为整数（信号周期是 DSP 周期的整数倍），因此该条件严格成立；
+验收判据里可以保留「`phaseCnt % edgeCnt == 0`」这条硬断言（见 `docs/ps-protocol.md` §6.4）。
 
 ## 位宽决定参数上限
 
-`Controller(gateCntWidth = 28, edgeCntWidth = 32, phaseCntWidth = 32)`，低速时钟 50MHz、高速时钟 200MHz 时：
+`Controller(gateCntWidth = 28, edgeCntWidth = 32, phaseCntWidth = 32)`，低速时钟 50MHz、高速时钟 450MHz 时：
 
 | 量 | 上限 |
 | --- | --- |
 | 闸门计数 | `2^28 - 1` 个低速周期 ≈ 5.37 s |
-| 相位计数 | `2^32` 个高速周期 ≈ 21.5 s 的连续累加 |
+| 相位计数 | `2^32` 个高速周期 ≈ 9.54 s 的连续累加（450MHz） |
 | 边沿计数 | `2^32` 个参考沿 |
 
 `targetGate` 与闸门计数器同为 28 位（`UInt(gateCntWidth.W)`），所以 5.37 s 是**可达上限**而不是饱和点：想要更长的闸门时间必须同时加宽 `gateCntWidth` 与 `targetGate` 的位宽。`in.bits.targetGate` 在测量期间必须保持不变。`DspCounter` 另有一条 `width <= 48` 的约束，加宽时两处都要改。

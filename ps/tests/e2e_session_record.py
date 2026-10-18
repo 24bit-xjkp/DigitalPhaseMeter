@@ -119,7 +119,7 @@ def main() -> int:
         u32(25_000_000) + u32(90_000),
         lambda pl: (
             f"freq={rd_u32(pl, 0)} phase={rd_u32(pl, 4)} vco={rd_u32(pl, 8)} div={rd_u16(pl, 12)} "
-            f"phaseField={pl[14]}（相位不可在线改 → 回 0）"
+            f"phaseField={pl[14]}（MMCM DELAY_TIME = 相位码 >> 3）"
         ),
     )
     show_fields(

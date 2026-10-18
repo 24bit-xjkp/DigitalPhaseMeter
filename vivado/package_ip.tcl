@@ -13,7 +13,7 @@
 # IP 对外接口（只有一个 AXI 从口）：
 #   s_axi_lite    AXI4-Lite 从口，控制/状态寄存器 + 测量结果寄存器（4KB 寄存器区）
 #   clock         主时钟（低速/AXI 域，PS FCLK_CLK0，50MHz），关联 s_axi_lite
-#   dspClock      高速测量时钟（DSP 域，由 BD 内 MMCM 从 FCLK_CLK0 倍频，默认 400MHz）
+#   dspClock      高速测量时钟（DSP 域，由 BD 内 MMCM 从 FCLK_CLK0 倍频，默认 450MHz）
 #   resetn        异步复位输入，低有效，与主时钟同步后供 PL 内部使用
 #   interrupt     测量完成中断，高有效电平
 #   sig1 / sig2   被测信号（sig1 为参考信号）
@@ -108,11 +108,11 @@ set_property value "s_axi_lite" $param
 set param [ipx::add_bus_parameter -quiet "ASSOCIATED_RESET" $clock_bif]
 set_property value "resetn" $param
 
-# dspClock 的实际频率由 BD 里的 MMCM 决定（create_bd.tcl 的 dsp_clk_mhz，默认 400MHz）。
+# dspClock 的实际频率由 BD 里的 MMCM 决定（create_bd.tcl 的 dsp_clk_mhz，默认 450MHz）。
 # 这里声明的 FREQ_HZ 只是 IP 侧的默认/声明值，与 create_bd.tcl 的默认频率保持一致；
 # 改了 create_bd.tcl 的目标频率时，此处可同步改（不影响 BD 里的 MMCM 输出）。
 set param [ipx::add_bus_parameter -quiet "FREQ_HZ" $dsp_clock_bif]
-set_property value 400000000 $param
+set_property value 450000000 $param
 set_property value_resolve_type user $param
 # 高速时钟域不需要外部复位：它的复位由 IP 内部从主复位同步得到。
 # 若保留打包器自动加上的 ASSOCIATED_RESET，BD 会认为同一个 resetn 同时服务于

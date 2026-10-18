@@ -162,7 +162,7 @@ def test_byte_by_byte() -> None:
             assert frames == []
     assert len(frames) == 1
     assert frames[0].cmd == 0x82  # IDENTIFY 的响应码（0x02 | 0x80）
-    assert P.decode_identify(frames[0].payload).dsp_clk_hz == 400_000_000
+    assert P.decode_identify(frames[0].payload).dsp_clk_hz == 450_000_000
     assert parser.pending == b""
 
 
@@ -356,7 +356,7 @@ def _identify() -> P.Identify:
         caps=0x00030104,
         version_reg=0x44504D02,
         caps_reg=0x00030104,
-        dsp_clk_hz=400_000_000,
+        dsp_clk_hz=450_000_000,
         slow_clk_hz=50_000_000,
         flags=0x000F,
     )

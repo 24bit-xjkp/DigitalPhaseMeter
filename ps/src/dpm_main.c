@@ -8,7 +8,7 @@
  *   3. `dpm_cmd_tick()`：连续模式续跑、流上报、MMCL 失锁/恢复事件；
  *   4. 回到 1。
  *
- * 时钟参数默认 `f_slow = 50MHz`（AXI/闸门域）、`f_dsp = 400MHz`（测量域），
+ * 时钟参数默认 `f_slow = 50MHz`（AXI/闸门域）、`f_dsp = 450MHz`（测量域），
  * 可用 `-DDPM_SLOW_HZ=...` / `-DDPM_DSP_HZ=...` 覆盖（必须与 PL 的 MMCM 配置一致）。
  */
 
@@ -20,7 +20,7 @@
 #define DPM_SLOW_HZ 50000000u
 #endif
 #ifndef DPM_DSP_HZ
-#define DPM_DSP_HZ 400000000u
+#define DPM_DSP_HZ 450000000u
 #endif
 #ifndef DPM_UART_BAUD
 #define DPM_UART_BAUD 115200u

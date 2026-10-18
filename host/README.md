@@ -149,7 +149,7 @@ python3 -m dpm_host --port /dev/pts/2 gui --port /dev/pts/2
 - **输入源单选**：外部引脚 / 片内信号源；
 - **片内源**：频率与相位差输入 + 「设置」；扫描频点/相位列表 + 「扫描」；相位不可控时相位输入**置灰**并提示；
   **相位上界逐频点刷新**（>180° 的相位差是合法请求，上界 = `min(23017499/D, 359999)` 毫度：
-  25MHz/D=40 → 359.999°，10MHz/D=100 → 230.174°，8MHz/D=125 → 184.139°），越界的请求会被界面先拦下
+  25MHz/D=40 → 359.999°，10MHz/D=100 → 230.174°，6MHz/D=125 → 184.139°），越界的请求会被界面先拦下
   并说明上界（否则 MMCM 的字段会截断回绕）；
 - **结果表**（最近 200 条：序号/频率/相位差/gate/edge/phaseCnt/DSP 周期）+ **导出 CSV** + 清空表；
 - **日志区**（带时间戳，含求解出的 VCO/MULT/D、量化提示、错误信息）。
@@ -167,8 +167,9 @@ uv run python host/tools/gui_smoke.py --scan     # 再跑一次 2×3 扫描（�
 # 无显示环境（CI）加 QT_QPA_PLATFORM=offscreen 也能跑，截图用 QWidget.grab() 不依赖窗口系统
 ```
 
-该脚本把「界面真的能用」变成可复现证据：连接、单次测量、22.5° 细调相位、**>180° 相位（25MHz/225°）**、
-相位上界逐频点刷新（25MHz → 359.999°、8MHz → 184.139°）、**闸门按秒下发（40µs → 2000 个低速周期）**、
+该脚本把「界面真的能用」变成可复现证据：连接、单次测量、6MHz/22.5° 细调相位（MMCM 吸附 22.68° →
+DSP 网格量化为 5 个周期 → 显示 23.992°）、**>180° 相位（25MHz/225° → DSP 量化后 220°）**、
+相位上界逐频点刷新（25MHz → 359.999°、6MHz → 184.139°）、**闸门按秒下发（40µs → 2000 个低速周期）**、
 输入源切换、扫描（越界点被跳过）与 CSV 导出逐项断言，最后用 `QWidget.grab()` 直接抓窗口
 （不依赖 `import`/`spectacle` 等截图工具）。界面换算的单元测试在 `host/tests/test_gui.py`。
 
@@ -187,7 +188,7 @@ uv run python host/tools/gui_smoke.py --scan     # 再跑一次 2×3 扫描（�
    ```text
    gateCnt   = targetGate + ceil(T_sig / T_slow)
    edgeCnt   = (gateCnt * f_sig) // f_slow
-   dspCycles = RNE(T_phase / T_dsp)          # 相位先被 DSP 采样网格量化（整数 ps + 半数取偶）
+   dspCycles = RNE(T_phase / T_dsp)          # 相位先被 DSP 采样网格量化（有理数精确运算 + 半数取偶）
    phaseCnt  = dspCycles * edgeCnt
    ```
 
@@ -244,6 +245,11 @@ uv run python host/tools/gui_smoke.py --scan     # 再跑一次 2×3 扫描（�
 
 ## 8. 验收证据（实际运行的原始输出）
 
+> **口径（DSP 400MHz → 450MHz）**：当前设计已是 DSP=450MHz，8.1 / 8.2 / 8.4（非同频段）/
+> 8.5 已在 450MHz 轮次重跑（2026-10-19）；8.3 与 8.4 里的 STREAM 段是 **400MHz 轮次**的历史输出，
+> 数字保留原样。旧 400MHz 冻结频点表（5/6.25/8/10/12.5/16/20/25/40/50MHz）已作废，
+> 新冻结表与逐频点相位点见 8.2 与 `docs/ps-protocol.md` §6.4。
+
 > 环境：Python 3.14.8、pyserial 3.5、tkinter、`DISPLAY=:0`、Linux；Python 依赖由 `uv` 管理（`.venv`）。
 > 测试是 **pytest 原生**写法（模块级 `def test_*` + `assert` + `pytest.raises`/`parametrize`/fixture），
 > 配置在仓库根 `pyproject.toml` 的 `[tool.pytest.ini_options]`，不再需要 `unittest`。
@@ -252,23 +258,23 @@ uv run python host/tools/gui_smoke.py --scan     # 再跑一次 2×3 扫描（�
 
 ```console
 $ cd /home/luo/DigitalPhaseMeter && uv run pytest -q
-[test_mathx] 金标准向量来源：/home/luo/DigitalPhaseMeter/spec/golden/vectors.json（79 组）
-    720 passed in 11.88s
+[test_mathx] 金标准向量来源：/home/luo/DigitalPhaseMeter/spec/golden/vectors.json（80 组）
+726 passed in 15.57s
 
 $ cd /home/luo/DigitalPhaseMeter/host && uv run pytest -q
-[test_mathx] 金标准向量来源：/home/luo/DigitalPhaseMeter/spec/golden/vectors.json（79 组）
-720 passed in 11.97s
+[test_mathx] 金标准向量来源：/home/luo/DigitalPhaseMeter/spec/golden/vectors.json（80 组）
+726 passed in 14.09s
 ```
 
-（720 项 = 协议 58 + mathx 248 + sig 221 + sim 111 + pty 端到端 38 + GUI 30 + 长闸门超时 14；
+（726 项 = 协议 58 + mathx 251 + sig 223 + sim 112 + pty 端到端 38 + GUI 30 + 长闸门超时 14；
 两种调用目录都在仓库根 `pyproject.toml` 下收集到同一批用例（`rootdir: /home/luo/DigitalPhaseMeter`，
 `configfile: pyproject.toml`）。七个测试文件都是 pytest 原生写法，`unittest` 的 `subTest` 已全部换成
 `parametrize` 展开的独立用例。
-金标准向量从 28 条扩到 **79 条**（10 频点 × 逐频点相位点，含 31 个 ≥180° 的点），
+金标准向量从 28 条扩到 **80 条**（10 频点 × 逐频点相位点，含 32 个 ≥180° 的点），
 `test_mathx` / `test_sim` 因此大幅增加——这是扩表的直接结果，见 `docs/verify-report.md` §11。
 D=127 的 `xfail` 已随 `DIV_MAX` 收到 126 变成普通断言，不再有预期失败项。）
 
-`test_mathx.py` 与 `spec/golden/vectors.json` **79/79 逐位一致**
+`test_mathx.py` 与 `spec/golden/vectors.json` **80/80 逐位一致**
 （`freqMilliHz` 与 `phaseMilliDeg` 都比对），另有 500 组随机用例验证「安全形式 == 朴素公式」逐位相同。
 
 Lead 的独立自检同样通过：
@@ -279,10 +285,11 @@ $ python3 spec/selftest_spec.py
 [2] 金标准向量自洽
 [2b] 溢出安全形式 == 朴素公式（随机抽样，逐位一致）
 [3] C 头文件：寄存器与 DRP 编码
+[3b] 分频上限三处一致（D ≤ 126：HIGH_TIME + LOW_TIME 各 6 位）
 [4] C 头文件命令码 vs 协议文档
 [5] 协议文档冻结频点 vs gen_golden.py
 
-共 686 项检查，失败 0 项
+共 1294 项检查，失败 0 项
 EXIT=0
 ```
 
@@ -290,65 +297,72 @@ EXIT=0
 
 ```console
 $ python3 -m dpm_host.sim_server --pty --freq 25e6 --phase 90e3 --gate 2000
-启动仿真服务端：slow=50MHz dsp=400MHz gate=2000 f=25MHz phase=90000°
-PTY_SLAVE=/dev/pts/1
-PTY 从设备路径: /dev/pts/1
+启动仿真服务端：slow=50MHz dsp=450MHz gate=2000 f=25MHz phase=90000°
+PTY_SLAVE=/dev/pts/5
+PTY 从设备路径: /dev/pts/5
 
-$ python3 -m dpm_host --port /dev/pts/1 scan --freqs 5e6,6.25e6,8e6,10e6,12.5e6,20e6,25e6 \
+$ python3 -m dpm_host --port /dev/pts/5 scan --freqs 5e6,6e6,9e6,10e6,15e6,18e6,25e6,30e6,45e6,50e6 \
       --phases 0,22.5,45,90,135,180,225,270,315 --out /tmp/scan.csv
-扫描计划：7 个频点 × 9 个相位点 = 63 行
+扫描计划：10 个频点 × 9 个相位点 = 90 行
 相位可控性：是，来源 /home/luo/DigitalPhaseMeter/spec/drp_semantics.json
      5.0000 MHz → VCO=600.0MHz MULT=12 DIVCLK=1 D=120 → f_out=5.000000MHz，相位码 0（DELAY_TIME=0、PHASE_MUX=0，实际 0.000°）
-     6.2500 MHz → VCO=750.0MHz MULT=15 DIVCLK=1 D=120 → f_out=6.250000MHz，相位码 0（DELAY_TIME=0、PHASE_MUX=0，实际 0.000°）
-     8.0000 MHz → VCO=1000.0MHz MULT=20 DIVCLK=1 D=125 → f_out=8.000000MHz，相位码 0（DELAY_TIME=0、PHASE_MUX=0，实际 0.000°）
+     6.0000 MHz → VCO=750.0MHz MULT=15 DIVCLK=1 D=125 → f_out=6.000000MHz，相位码 0（DELAY_TIME=0、PHASE_MUX=0，实际 0.000°）
+     9.0000 MHz → VCO=900.0MHz MULT=18 DIVCLK=1 D=100 → f_out=9.000000MHz，相位码 0（DELAY_TIME=0、PHASE_MUX=0，实际 0.000°）
     10.0000 MHz → VCO=1000.0MHz MULT=20 DIVCLK=1 D=100 → f_out=10.000000MHz，相位码 0（DELAY_TIME=0、PHASE_MUX=0，实际 0.000°）
-    12.5000 MHz → VCO=1000.0MHz MULT=20 DIVCLK=1 D=80 → f_out=12.500000MHz，相位码 0（DELAY_TIME=0、PHASE_MUX=0，实际 0.000°）
-    20.0000 MHz → VCO=1000.0MHz MULT=20 DIVCLK=1 D=50 → f_out=20.000000MHz，相位码 0（DELAY_TIME=0、PHASE_MUX=0，实际 0.000°）
+    15.0000 MHz → VCO=1050.0MHz MULT=21 DIVCLK=1 D=70 → f_out=15.000000MHz，相位码 0（DELAY_TIME=0、PHASE_MUX=0，实际 0.000°）
+    18.0000 MHz → VCO=900.0MHz MULT=18 DIVCLK=1 D=50 → f_out=18.000000MHz，相位码 0（DELAY_TIME=0、PHASE_MUX=0，实际 0.000°）
     25.0000 MHz → VCO=1000.0MHz MULT=20 DIVCLK=1 D=40 → f_out=25.000000MHz，相位码 0（DELAY_TIME=0、PHASE_MUX=0，实际 0.000°）
-  其中 12 个 (频点, 相位) 超出相位码上界（`m ≤ 511`），会被跳过：5MHz/225°、5MHz/270°、5MHz/315°、6.25MHz/225°、6.25MHz/270°、6.25MHz/315°…
-  实际可扫 51 行
+    30.0000 MHz → VCO=1050.0MHz MULT=21 DIVCLK=1 D=35 → f_out=30.000000MHz，相位码 0（DELAY_TIME=0、PHASE_MUX=0，实际 0.000°）
+    45.0000 MHz → VCO=900.0MHz MULT=18 DIVCLK=1 D=20 → f_out=45.000000MHz，相位码 0（DELAY_TIME=0、PHASE_MUX=0，实际 0.000°）
+    50.0000 MHz → VCO=1000.0MHz MULT=20 DIVCLK=1 D=20 → f_out=50.000000MHz，相位码 0（DELAY_TIME=0、PHASE_MUX=0，实际 0.000°）
+  其中 10 个 (频点, 相位) 超出相位码上界（`m ≤ 511`），会被跳过：5MHz/225°、5MHz/270°、5MHz/315°、6MHz/225°、6MHz/270°、6MHz/315°…
+  实际可扫 80 行
 [  1]    5.0000MHz     0.0° → f=   5.000000 MHz phase=    0.000° err=+0.0000° gate=2010 edge=201 phaseCnt=0 cycles=0.0000
-[  6]    5.0000MHz   180.0° → f=   5.000000 MHz phase=  180.000° err=+0.0000° gate=2010 edge=201 phaseCnt=8040 cycles=40.0000
+[  2]    5.0000MHz    22.5° → f=   5.000000 MHz phase=   24.000° err=+1.5000° gate=2010 edge=201 phaseCnt=1206 cycles=6.0000
+[  6]    5.0000MHz   180.0° → f=   5.000000 MHz phase=  180.000° err=+0.0000° gate=2010 edge=201 phaseCnt=9045 cycles=45.0000
 [scan] 跳过 5MHz/225°：SET_SIG 回 ERR_PARAM（相位超出该频点的 9 位相位码上界）
 ...
-[ 49]   25.0000MHz   225.0° → f=  25.000000 MHz phase=  225.000° err=+0.0000° gate=2002 edge=1001 phaseCnt=10010 cycles=10.0000
-[ 51]   25.0000MHz   315.0° → f=  25.000000 MHz phase=  315.000° err=+0.0000° gate=2002 edge=1001 phaseCnt=14014 cycles=14.0000
+[ 48]   25.0000MHz    90.0° → f=  25.000000 MHz phase=   80.000° err=-10.0000° gate=2002 edge=1001 phaseCnt=4004 cycles=4.0000
+[ 53]   25.0000MHz   315.0° → f=  25.000000 MHz phase=  320.000° err=+5.0000° gate=2002 edge=1001 phaseCnt=16016 cycles=16.0000
+[ 80]   50.0000MHz   315.0° → f=  50.000000 MHz phase=  320.000° err=+5.0000° gate=2001 edge=2001 phaseCnt=16008 cycles=8.0000
 
 CSV 前几行（freq_nominal,phase_nominal,f_meas_mHz,phase_meas_mdeg,gateCnt,edgeCnt,phaseCnt,phaseCycles,err_deg,phase_controllable）：
   5000000,0.0,5000000,0,2010,201,0,0.0,0.0,True
-  5000000,22.5,5000000,22500,2010,201,1005,5.0,0.0,True
-  5000000,45.0,5000000,45000,2010,201,2010,10.0,0.0,True
-  5000000,90.0,5000000,90000,2010,201,4020,20.0,0.0,True
-  5000000,135.0,5000000,135000,2010,201,6030,30.0,0.0,True
-  5000000,180.0,5000000,180000,2010,201,8040,40.0,0.0,True
-  6250000,0.0,6250000,0,2008,251,0,0.0,0.0,True
-  6250000,22.5,6250000,22500,2008,251,1004,4.0,0.0,True
-  ...（共 51 行）
-  25000000,270.0,25000000,270000,2002,1001,12012,12.000000,0.0000,True
-  25000000,315.0,25000000,315000,2002,1001,14014,14.000000,0.0000,True
+  5000000,22.5,5000000,24000,2010,201,1206,6.0,1.5,True
+  5000000,45.0,5000000,44000,2010,201,2211,11.0,-1.0,True
+  5000000,90.0,5000000,88000,2010,201,4422,22.0,-2.0,True
+  5000000,135.0,5000000,136000,2010,201,6834,34.0,1.0,True
+  5000000,180.0,5000000,180000,2010,201,9045,45.0,0.0,True
+  6000000,0.0,5998008,0,2009,241,0,0.0,0.0,True
+  6000000,22.5,5998008,23992,2009,241,1205,5.0,1.4919999999999902,True
+  ...（共 80 行）
+  50000000,270.0,50000000,280000,2001,2001,14007,7.000000,10.0000,True
+  50000000,315.0,50000000,320000,2001,2001,16008,8.000000,5.0000,True
 
-扫描完成：51 行，|err_deg| 最大 9.0540° 平均 1.0444°
+扫描完成：80 行，|err_deg| 最大 20.0000° 平均 4.6386°
 CSV 已写入 /tmp/scan.csv
 ```
 
-> 这是**方案 A（裸 MMCM + 极简 DRP 控制器）之后**的输出（旧 `clk_wiz_src` 时代相位不可控，
-> 每行都是 `⚠相位未生效`，那批原始输出保留在 `docs/verify-report.md` §3/§6 与 git 历史里）。
-> 扫描现在按 `45°/D` 网格与 DSP 采样网格两重量化判误差，`err_deg` 最大 9.0540°（20MHz 下
-> 1 个 DSP 周期就是 18°）。
+> 这是**方案 A（裸 MMCM + 极简 DRP 控制器）+ DSP=450MHz** 的 2026-10-19 重跑输出
+> （旧 `clk_wiz_src` 时代相位不可控，每行都是 `⚠相位未生效`，那批原始输出保留在
+> `docs/verify-report.md` §3/§6 与 git 历史里；400MHz 轮的旧扫描输出见 git 历史）。
+> 扫描按 `45°/D` 网格与 DSP 采样网格两重量化判误差：|err| 最大 20.0000°（25MHz 的 1 个
+> DSP 周期就是 20°），平均 4.6386°。
 
 说明（很重要）：
 
-- **频率与计数符合冻结模型**：例如 5MHz/180° → `gate=2010 edge=201 phaseCnt=8040`、25MHz/315° →
-  `gate=2002 edge=1001 phaseCnt=14014`，与 `spec/golden/vectors.json` 的期望值逐位相同。
+- **频率与计数符合冻结模型**：例如 5MHz/180° → `gate=2010 edge=201 phaseCnt=9045`、25MHz/315° →
+  `gate=2002 edge=1001 phaseCnt=16016`，与 `spec/golden/vectors.json` 的期望值逐位相同。
 - **相位列反映两重量化**：先吸附到 MMCM 的 `45°/D` 网格，再被测量端的 DSP 采样网格
-  （1 个周期 = `360·f_sig/400MHz`）量化，所以 `err_deg` 在高频点自然变大（20MHz 下 1 个
-  DSP 周期就是 18°）；`cycles` 列即 `phaseCnt / edgeCnt`（整数个 DSP 周期）。
+  （1 个周期 = `360·f_sig/450MHz`，即 25MHz → 20°、10MHz → 8°、50MHz → 40°）量化，
+  所以 `err_deg` 在高频点自然变大（50MHz 下 1 个 DSP 周期就是 40°，实测该频点最大偏差 20°=
+  半格）；`cycles` 列即 `phaseCnt / edgeCnt`（整数个 DSP 周期）。
   CSV 前 9 列是验收要求的列（`f_meas_mHz` 的单位按 `docs/ps-protocol.md` 第 5 节字段单位表
   = **Hz**），第 10 列 `phase_controllable` 由协议 `IDENTIFY.flags.b4` 决定。
-- **越界组合会被跳过并记录**：相位上界是 9 位相位码 `m ≤ 511`（按 D 逐点，D=125 只到
-  184.139°），越界请求服务端回 `ERR_PARAM`，`scan()` 记一条 `[scan] 跳过 …` 后继续扫。
-  仿真后端（`dpm_host/sim_server.py`）与固件（`ps/src/dpm_cmd.c`）用同一判据，
-  因此仿真里不会出现"真机会拒绝但仿真接受"的点——这条一致性由
+- **越界组合会被跳过并记录**：相位上界是 9 位相位码 `m ≤ 511`（按 D 逐点，6MHz/D=125 只到
+  184.139°、5MHz/D=120 只到 191.812°），越界请求服务端回 `ERR_PARAM`，`scan()` 记一条
+  `[scan] 跳过 …` 后继续扫。仿真后端（`dpm_host/sim_server.py`）与固件（`ps/src/dpm_cmd.c`）
+  用同一判据，因此仿真里不会出现"真机会拒绝但仿真接受"的点——这条一致性由
   `host/tests/test_client_over_pty.py` 的 `test_phase_code_overflow_is_rejected` /
   `test_scan_skips_unrepresentable_points` 钉住。
 
@@ -380,43 +394,46 @@ SET_GATE / SET_SOURCE / SET_MODE / SET_SIG / START / GET_MEAS / monitor（连续
 `gateCnt/edgeCnt/phaseCnt` 也与 `spec/golden/vectors.json` 的期望值逐位相同：
 
 ```console
-$ ./ps/build/host_main --pty          →   /dev/pts/5
+$ ./ps/build/host_main --pty          →   /dev/pts/6
 $ python3 host/tools/interop_host_main.py --spawn ./ps/build/host_main   # 可复跑脚本
-=== 验收 4：host 侧 Python 客户端 ↔ C 侧服务端 ps/build/host_main（单连接）===
-
-# PING / IDENTIFY
-PING ok；IDENTIFY: ver=0x00010000 versionReg=0x44504D02 caps=0x00000037 capsReg=0x00030104 dsp=400MHz slow=50MHz flags=0x0007
-
-# SET_GATE / SET_SOURCE / SET_MODE
+服务端 pty: /dev/pts/6
+=== host 侧 Python 客户端 ↔ C 侧服务端互通 ===
+PING ok；IDENTIFY: ver=0x00010000 versionReg=0x44504D02 caps=0x00000007 capsReg=0x00030104 dsp=450MHz slow=50MHz flags=0x0017
 SET_GATE(2000) → 2000
 SET_SOURCE(int) → sigStatus=0x0000000F
 SET_MODE(single) → 0
 
-# SET_SIG 25MHz/90° → START → GET_MEAS
-  SET_SIG 回显: f=25MHz phase=90° VCO=1000MHz D=40 phaseField=2
-  GET_MEAS(0.000s): seq=0 gate=2002 edge=1001 phaseCnt=4004 wire(freqHz=25000000, phase_mdeg=90000)
-  本地换算: f=25.000000 MHz phase=90.000° phaseCnt/edgeCnt=4.0000 DSP周期 量化步长=22.500°
+SET_SIG 25MHz/90° 回显: f=25MHz phase=90° VCO=1000MHz D=40 phaseField=10
+GET_MEAS: seq=0 gate=2002 edge=1001 phaseCnt=4004 wire(freqHz=25000000, phase_mdeg=80000)
+  本地换算: f=25.000000 MHz phase=80.000° phaseCnt/edgeCnt=4.0000 DSP周期
 
-# SET_SIG 10MHz/90° → START → GET_MEAS
-  SET_SIG 回显: f=10MHz phase=90° VCO=1000MHz D=100 phaseField=2
-  GET_MEAS(0.000s): seq=1 gate=2005 edge=401 phaseCnt=4010 wire(freqHz=10000000, phase_mdeg=90000)
-  本地换算: f=10.000000 MHz phase=90.000° phaseCnt/edgeCnt=10.0000 DSP周期 量化步长=9.000°
+SET_SIG 10MHz/90° 回显: f=10MHz phase=90° VCO=1000MHz D=100 phaseField=25
+GET_MEAS: seq=0 gate=2005 edge=401 phaseCnt=4411 wire(freqHz=10000000, phase_mdeg=88000)
+  本地换算: f=10.000000 MHz phase=88.000° phaseCnt/edgeCnt=11.0000 DSP周期
 
-# SET_SIG 6.25MHz/90° → START → GET_MEAS
-  SET_SIG 回显: f=6.25MHz phase=90° VCO=750MHz D=120 phaseField=2
-  GET_MEAS(0.000s): seq=2 gate=2008 edge=251 phaseCnt=4016 wire(freqHz=6250000, phase_mdeg=90000)
-  本地换算: f=6.250000 MHz phase=90.000° phaseCnt/edgeCnt=16.0000 DSP周期 量化步长=5.625°
+SET_SIG 6MHz/90° 回显: f=6MHz phase=90° VCO=750MHz D=125 phaseField=31
+GET_MEAS: seq=0 gate=2009 edge=241 phaseCnt=4579 wire(freqHz=5998008, phase_mdeg=91169)
+  本地换算: f=5.998008 MHz phase=91.169° phaseCnt/edgeCnt=19.0000 DSP周期
 
-# monitor 连续测量 3 次
-  seq=3 f=6.250000 MHz phase=90.000° gate=2008 edge=251 phaseCnt=4016
-  seq=4 f=6.250000 MHz phase=90.000° gate=2008 edge=251 phaseCnt=4016
-  seq=5 f=6.250000 MHz phase=90.000° gate=2008 edge=251 phaseCnt=4016
+monitor 连续测量 3 次:
+  seq=3 f=5.998008 MHz phase=91.169° gate=2009 edge=241 phaseCnt=4579
+  seq=5 f=5.998008 MHz phase=91.169° gate=2009 edge=241 phaseCnt=4579
+  seq=7 f=5.998008 MHz phase=91.169° gate=2009 edge=241 phaseCnt=4579
 
-# 错误路径：SET_MODE(7) → ERR_PARAM
-  ✓ PS 返回错误响应 0xFE（ERR_PARAM），请求 0x08（SET_MODE）
+错误路径：SET_MODE(7) → PS 返回错误响应 0xFE（ERR_PARAM），请求 0x08（SET_MODE）
 
-统计: {'tx': 38, 'rx': 38, 'parseErrors': 0, 'timeouts': 0, 'retries': 0, 'unexpected': 0, 'notifications': 0}
+=== 外部输入源（无信号容错路径）===
+SET_SOURCE(ext) → sigStatus=0x0000000C sourceReady=1
+START → status=0x0000000B（busy=1 resultValid=1）
+[OK] 等不到结果 → 超时（不是设备错误）：…（输入源诊断信息略）
+[OK] GET_RESULT → valid=0（等不到结果时必须用 valid=0，不是 ERR_BUSY）
+统计: {'tx': 1051, 'rx': 1051, 'parseErrors': 0, 'timeouts': 0, 'retries': 0, 'unexpected': 0, 'notifications': 0}
 ```
+
+> 这是 **DSP=450MHz 轮次（2026-10-19）** 的重跑输出。注意 `GET_MEAS` 的相位字段已是 DSP 网格
+> 量化后的值：25MHz/90° → 80.000°（4 个 20° 周期）、10MHz/90° → 88.000°（11 个 8° 周期）、
+> 6MHz/90° → 91.169°（19 个 4.8° 周期）。`phaseField` 现在承载 `DELAY_TIME`（相位码 >> 3）。
+> 400MHz 轮次的历史输出（`phase_mdeg=90000`、`dsp=400MHz`、caps/flags 旧值）已由本次重跑替换。
 
 **STREAM 通知**：C 侧服务端的模型时间是「每次 AXI 事务推进 64 个慢周期」，因此
 `intervalMs` 的 1ms **模型时间**需要约 780 次事务才会到点——空等不会收到通知。
@@ -474,10 +491,11 @@ STREAM 通知 0 条
 2. **`START` 可能回 `ERR_BUSY`**：`docs/ps-protocol.md` 第 3 节说 CTRL.start 在 busy 期间
    被 PL 忽略，而 C 侧固件直接回 `ERR_BUSY`（源不可用/已在测量时）。上位机把 `ERR_BUSY`
    当「已经在测量中」处理（等价语义），并在日志里说明。
-3. **`IDENTIFY` 字段**：C 侧 `caps=0x00000037`、`flags=0x0007`（无 b3 中断驱动），
-   与 `ps/include/dpm_regs.h` 的 `0x00030104` / 四位全 1 不一致；`SET_SIG` 的
-   `phaseField` 回 2（历史字段的 45° 步数），本实现固定 0（实测已否定该字段是相位字段）。
-   这些字段上位机只做展示，不影响交互，但建议两侧统一（已上报）。
+3. **`IDENTIFY` 字段（历史记录）**：400MHz 轮次的 C 侧二进制曾回 `caps=0x00000037`、
+   `flags=0x0007`，与 `ps/include/dpm_regs.h` 的 `0x00030104` / 能力位不一致；`SET_SIG` 的
+   `phaseField` 当时回 2（历史字段的 45° 步数）。450MHz 轮次重跑（见验收 4）已对齐为
+   `caps=0x00000007`、`flags=0x0017`，`phaseField` = `DELAY_TIME`（相位码 >> 3）。
+   这些字段上位机只做展示，不影响交互。
 4. **`GET_RESULT` 等不到结果时曾回 `ERR_BUSY`（已修复，两侧）**：切到**没接信号**的外部输入源
    （或选中的片内源没有边沿）时 PL 一直停在等边沿（`STATUS.busy = 1`、结果永不锁存），
    早期 C 侧固件把「等不到结果」表达成 `ERR_BUSY`，上位机把它当致命错误，于是整段测量程序中止：
@@ -495,21 +513,28 @@ STREAM 通知 0 条
 
 ```console
 $ python3 -m dpm_host sigtable
-相位不可控（mode=none）：当前 bitstream 的相位字未接线，clk_out2 相位固定 90.000°；来源：teammate drp-verify（共享任务 task-3）
+相位可控：写 MMCM 的 PHASE_MUX/DELAY_TIME，网格 45°/D（1/8 VCO 周期）；来源：teammate drp-verify（共享任务 task-3）
 结论文件：/home/luo/DigitalPhaseMeter/spec/drp_semantics.json
 
         目标频率   VCO/MHz  MULT     D      分频字段      相位步长/ps              求解器
          5MHz       600    12   120       120       208.33               一致
-      6.25MHz       750    15   120       120       166.67               一致
-         8MHz      1000    20   125       125       125.00               一致
+         6MHz       750    15   125       125       166.67               一致
+         9MHz       900    18   100       100       138.89               一致
         10MHz      1000    20   100       100       125.00               一致
-      12.5MHz      1000    20    80        80       125.00               一致
-        20MHz      1000    20    50        50       125.00               一致
+        15MHz      1050    21    70        70       119.05               一致
+        18MHz       900    18    50        50       138.89               一致
         25MHz      1000    20    40        40       125.00               一致
+        30MHz      1050    21    35        35       119.05               一致
+        45MHz       900    18    20        20       138.89               一致
+        50MHz      1000    20    20        20       125.00               一致
 
 冻结频点表自校验：全部通过（求解器输出与表逐位一致）
 EXIT=0
 ```
+
+（`相位步长/ps` 是 MMCM 的移相网格 1/8 VCO 周期，与 DSP 频率无关；450MHz 下 1 个 DSP 周期的
+相位量化步长是 `360·f_sig/450MHz`：5MHz → 4°、6MHz → 4.8°、9MHz → 7.2°、10MHz → 8°、
+15MHz → 12°、18MHz → 14.4°、25MHz → 20°、30MHz → 24°、45MHz → 36°、50MHz → 40°。）
 
 ## 9. 协议问题记录（发现即上报，未擅自改文档）
 
@@ -522,9 +547,9 @@ EXIT=0
 2. **`SET_SOURCE` 同时负责使能（已写入协议 §3.0）**：`source=1 ⇒ SIG_CTRL=enable|srcSelect`、
    `source=0 ⇒ SIG_CTRL=0`，不额外加 enable 命令。`sim_server.py` / `sim_fpga.py` 按此实现。
 3. **相位字段的历史包袱**：早期文档的「分频字 bit[15:8] 是相位字段」与候选 A/B 的 8 位字段
-   都已被 xsim 实测否定（见 `spec/drp_semantics.json`）。现在相位是**独立的 32 位毫度字**
-   （`0x20C`/`0x218`），本实现的 `phaseField(u8)` 是历史字段、固定写 0，
-   相位以相位字为准；网格是 `45/D` 度。
+   都已被 xsim 实测否定（见 `spec/drp_semantics.json`）。现在相位是**独立的 32 位毫度字**，
+   并在方案 A 下编码进 MMCM 的 `DELAY_TIME`（`phaseField` = 相位码 >> 3）+ `PHASE_MUX`；
+   网格是 `45/D` 度。
 4. **`STATUS.resultValid` 不作为唯一判据（已写入协议 §3.0）**：结果就绪的权威探针是
    `GET_RESULT.valid`；`START` 在不能启动时回 `ERR_BUSY`（上位机当「已在测量中」处理）；
    `IDENTIFY` 的 `capsReg/versionReg` 是从 PL 读回的原始值、`caps` 是固件能力字、

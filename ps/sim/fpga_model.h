@@ -99,7 +99,7 @@ typedef struct {
 
     /* ---- 输入源 ---- */
     uint32_t slow_hz; /**< 低速时钟频率（默认 50MHz） */
-    uint32_t dsp_hz;  /**< 高速时钟频率（默认 400MHz） */
+    uint32_t dsp_hz;  /**< 高速时钟频率（默认 450MHz） */
     uint32_t ext_freq_hz;    /**< 外部源频率（默认 10MHz，仅 --ext-present 时使用） */
     uint32_t ext_phase_mdeg; /**< 外部源相位差（默认 0） */
     uint8_t ext_absent;      /**< 1 = 外部引脚无信号（默认 1：两路恒低，测量停在等参考沿） */

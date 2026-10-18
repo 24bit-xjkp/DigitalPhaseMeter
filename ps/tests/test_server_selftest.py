@@ -5,7 +5,7 @@
   - 帧层的正向/负向：CRC 错、LEN 越界、噪声字节、未知命令、响应方向帧；
   - 全部命令码 0x01..0x0E + 通知帧 0x81/0x82；
   - 错误路径：非法 mode/source/freq/相位/PAYLOAD 长度 → 0xFE；未锁定选片内源、忙时命令 → 0xFF；
-  - 11 个冻结频点 × 逐频点相位点（含 >180° 的用例）与 `spec/golden/vectors.json` 逐位对齐
+  - 10 个冻结频点 × 逐频点相位点（含 >180° 的用例）与 `spec/golden/vectors.json` 逐位对齐
     （gate/edge/phase 与定点输出）；
   - 单次/连续模式、流上报、结果覆盖丢失（lostCount/EVENT）。
 
@@ -311,7 +311,7 @@ def test_identify_status(sv: Server) -> None:
     )
     check("IDENTIFY versionReg = 0x44504D02", vreg == DPM_VERSION_VALUE, hex(vreg))
     check("IDENTIFY capsReg = 从 PL 读回的 0x00030104", creg == 0x00030104, hex(creg))
-    check("IDENTIFY 时钟频率", dsp == 400_000_000 and slow == 50_000_000, f"{dsp}/{slow}")
+    check("IDENTIFY 时钟频率", dsp == 450_000_000 and slow == 50_000_000, f"{dsp}/{slow}")
     check("IDENTIFY 版本号非 0", ver != 0, hex(ver))
     check("IDENTIFY caps 含片内源/连续/流（0x07）", (caps & 0x07) == 0x07, f"caps={caps:#x}")
     check(
@@ -368,15 +368,15 @@ def test_gate_mode_source(sv: Server) -> None:
 
 
 def test_sig_and_golden(sv: Server, golden: dict, verbose: bool) -> None:
-    """11 个冻结频点 × 逐频点相位点（含 >180°）：求解结果与 golden 一致，测量值也一致。
+    """10 个冻结频点 × 逐频点相位点（含 >180°）：求解结果与 golden 一致，测量值也一致。
 
     相位说明（方案 A）：相位由 PS 直接编码进 MMCM 的 PHASE_MUX（1/8 VCO 周期）+
     DELAY_TIME（整数 VCO 周期），网格 = `45°/D`。冻结相位点全部落在网格上，因此
     `phaseMilliDeg` 精确回显请求值；测量相位应等于**同频点同请求相位**那一行。
 
     相位点**逐频点不同**（`golden["freq_points"][*]["phases_mdeg"]`）：上界是 9 位相位码
-    `m = round(相位×D/45000) ≤ 511`，D=125（8MHz/6.4MHz）只能到 183.960°、
-    D=120（5MHz/6.25MHz）到 191.625°、D=32（31.25MHz）能到 315°。
+    `m = round(相位×D/45000) ≤ 511`，D=125（6MHz）只能到 183.960°、
+    D=120（5MHz）到 191.625°、D=100（9/10MHz）到 230.174°、D=35（30MHz）能到 315°。
     """
     vectors = golden["vectors"]
     grid = golden["phase_grid_mdeg_num"]
@@ -469,10 +469,10 @@ def test_sig_and_golden(sv: Server, golden: dict, verbose: bool) -> None:
     # 错误路径：非法频率 / 相位 / PAYLOAD 长度
     sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(3_000_000) + u32(0))  # 低于可达下限
     sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(2_000_000_000) + u32(0))  # 高于 VCO 上限（2GHz 无解）
-    # 相位上界 = 9 位相位码（按 D 逐点）：8MHz（D=125）的 200° 需要相位码 556 > 511，
+    # 相位上界 = 9 位相位码（按 D 逐点）：6MHz（D=125）的 200° 需要相位码 556 > 511，
     # MMCM 的字段会截断、相位回绕，必须拒绝；D=40（25MHz）则能表示整个 0~360°。
-    sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(8_000_000) + u32(200_000))
-    sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(6_400_000) + u32(184_500))  # D=125，上界 184.139°
+    sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(6_000_000) + u32(200_000))
+    sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(6_000_000) + u32(184_500))  # D=125，上界 184.139°
     sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(25_000_000) + u32(360_000))  # 满量程（= 0°）
     sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(25_000_000) + u32(0)[:3])
     sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(0) + u32(0))
@@ -480,16 +480,16 @@ def test_sig_and_golden(sv: Server, golden: dict, verbose: bool) -> None:
     # 吸附的缺陷已修，见 docs/onboard-ax7010.md §5）
     pl = sv.expect_ok(CMD_SET_SIG, u32(25_000_000) + u32(22_500))
     check("SET_SIG(22.5°) 精确落在 45°/D 网格上并回显 22500", rd_u32(pl, 4) == 22_500 and pl[14] == 2, pl.hex())
-    # D=125（8MHz）的网格是 0.36°：22.5° 吸附到最近的格点 22.680°
-    pl = sv.expect_ok(CMD_SET_SIG, u32(8_000_000) + u32(22_500))
-    check("SET_SIG(22.5°@8MHz) 吸附到网格点 22680 并回显", rd_u32(pl, 4) == 22_680, pl.hex())
+    # D=125（6MHz）的网格是 0.36°：22.5° 吸附到最近的格点 22.680°
+    pl = sv.expect_ok(CMD_SET_SIG, u32(6_000_000) + u32(22_500))
+    check("SET_SIG(22.5°@6MHz) 吸附到网格点 22680 并回显", rd_u32(pl, 4) == 22_680, pl.hex())
     # >180° 的合法用例（旧固件一律拒 ≥180°，属过度保守）：
     #   25MHz（D=40）270° = 相位码 240 → DELAY_TIME 30、PHASE_MUX 0；
-    #   8MHz（D=125）183.96° = 相位码上界 511 → DELAY_TIME 63、PHASE_MUX 7。
+    #   6MHz（D=125）183.96° = 相位码上界 511 → DELAY_TIME 63、PHASE_MUX 7。
     pl = sv.expect_ok(CMD_SET_SIG, u32(25_000_000) + u32(270_000))
     check("SET_SIG(270°@25MHz) 合法：回显 270000、phaseField=30", rd_u32(pl, 4) == 270_000 and pl[14] == 30, pl.hex())
-    pl = sv.expect_ok(CMD_SET_SIG, u32(8_000_000) + u32(183_960))
-    check("SET_SIG(183.96°@8MHz) 合法：回显 183960、phaseField=63（相位码 511）", rd_u32(pl, 4) == 183_960 and pl[14] == 63, pl.hex())
+    pl = sv.expect_ok(CMD_SET_SIG, u32(6_000_000) + u32(183_960))
+    check("SET_SIG(183.96°@6MHz) 合法：回显 183960、phaseField=63（相位码 511）", rd_u32(pl, 4) == 183_960 and pl[14] == 63, pl.hex())
 
 
 def test_result_clear(sv: Server) -> None:
@@ -512,7 +512,11 @@ def test_result_clear(sv: Server) -> None:
     pl = sv.expect_ok(CMD_GET_MEAS)
     check("GET_MEAS 与 GET_RESULT 一致", rd_u32(pl, 4) == gate and rd_u32(pl, 8) == edge, pl.hex())
     check("GET_MEAS 定点频率单位是 Hz（10MHz → 10000000）", rd_u32(pl, 16) == 10_000_000, str(rd_u32(pl, 16)))
-    check("GET_MEAS 定点相位 ≈ 90°", approx(rd_u32(pl, 20), 90_000, 9_000), str(rd_u32(pl, 20)))
+    check(
+        "GET_MEAS 定点相位 ≈ 88°（90° 先被 450MHz 的 DSP 网格量化为 11 个周期）",
+        approx(rd_u32(pl, 20), 88_000, 100),
+        str(rd_u32(pl, 20)),
+    )
 
     sv.expect_ok(CMD_CLEAR)
     pl = sv.expect_ok(CMD_GET_RESULT)
@@ -588,7 +592,7 @@ def test_lost_and_events(sv: Server) -> None:
 def test_continuous(sv: Server, golden: dict) -> None:
     """连续模式：结果读走后立即重启，seq 递增且不丢。"""
     sv.expect_ok(CMD_CLEAR)
-    sv.expect_ok(CMD_SET_SIG, u32(12_500_000) + u32(45_000), timeout=10.0)
+    sv.expect_ok(CMD_SET_SIG, u32(15_000_000) + u32(45_000), timeout=10.0)
     sv.expect_ok(CMD_STREAM, bytes([1]) + u16(1))
     sv.expect_ok(CMD_SET_MODE, bytes([1]))
 
@@ -604,11 +608,11 @@ def test_continuous(sv: Server, golden: dict) -> None:
     check("连续模式至少上报 3 次 STREAM_DATA", len(seqs) >= 3, f"收到 {len(seqs)} 次")
     if len(seqs) >= 2:
         check("连续模式 seq 严格递增", all(seqs[i][0] < seqs[i + 1][0] for i in range(len(seqs) - 1)), str([s[0] for s in seqs]))
-    v = next(x for x in golden["vectors"] if x["freq_hz"] == 12_500_000 and x["phase_requested_mdeg"] == 45_000)
+    v = next(x for x in golden["vectors"] if x["freq_hz"] == 15_000_000 and x["phase_requested_mdeg"] == 45_000)
     if seqs:
         s = seqs[-1]
         check(
-            "连续模式测量值与 golden 一致（12.5MHz、相位 45°，跟随写入值）",
+            "连续模式测量值与 golden 一致（15MHz、相位 45°，跟随写入值）",
             (s[1], s[2], s[3], s[4], s[5]) == (v["gate_cnt"], v["edge_cnt"], v["phase_cnt"], v["freq_milli_hz"], v["phase_milli_deg"]),
             f"{s} vs {(v['gate_cnt'], v['edge_cnt'], v['phase_cnt'])}",
         )

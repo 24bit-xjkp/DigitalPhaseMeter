@@ -21,7 +21,7 @@
 **相位上界逐频点不同**：>180° 的相位差是合法请求（相位计测的是无符号间隔），但 MMCM 的相位码
 只有 9 位（`DELAY_TIME` 6 位 + `PHASE_MUX` 3 位），可请求上界是 `min(23017499/D, 359999)` 毫度
 （见 `docs/ps-protocol.md` §6.2 与 :func:`sig.phase_max_milli_deg`）：25MHz（D=40）能到
-359.999°，10MHz（D=100）到 230.174°，8MHz（D=125）只到 184.139°。因此频率输入框每次变化都会
+359.999°，10MHz（D=100）到 230.174°，6MHz（D=125）只到 184.139°。因此频率输入框每次变化都会
 用 :func:`freq_phase_limit_milli_deg` 重算相位输入的上界（而不是写死 180°）。
 """
 
@@ -178,7 +178,7 @@ def freq_phase_limit_milli_deg(
     上界由 9 位相位码决定（`sig.phase_max_milli_deg`），而 `D` 由频率的冻结求解规则给出
     （`sig.solve_sig`，与 PS 固件/金标准同一套），因此**上界逐频点不同**：
     25MHz（D=40）→ 359999（整个 0~360°）、10MHz（D=100）→ 230174、
-    8MHz（D=125）→ 184139（只能略超 180°）。相位不影响 `D`，所以这里按请求相位 0° 求解。
+    6MHz（D=125）→ 184139（只能略超 180°）。相位不影响 `D`，所以这里按请求相位 0° 求解。
     """
     sol = S.solve_sig(int(freq_hz), 0, int(slow_hz), semantics)
     if not sol.ok or sol.div <= 0:
@@ -549,7 +549,7 @@ class DpmGuiApp(QMainWindow):
 
         scan_box = QGroupBox("多频点 × 多相位扫描")
         sform = QFormLayout(scan_box)
-        self.scan_freqs_edit = QLineEdit("5,6.25,8,10,12.5,20,25")
+        self.scan_freqs_edit = QLineEdit("5,6,9,10,15,18,25,30,45,50")
         self.scan_phases_edit = QLineEdit("0,45,90,135")
         self.scan_settle_spin = QDoubleSpinBox()
         self.scan_settle_spin.setRange(0.0, 5.0)
@@ -715,7 +715,8 @@ class DpmGuiApp(QMainWindow):
         resolution_hz = slow / cycles
         budget = gate_wait_budget_seconds(cycles, slow)
         self.gate_hint.setText(
-            f"= {cycles} 低速周期 @ {slow / 1e6:g}MHz（频率分辨率 ≈ {resolution_hz / 1000:.4g} kHz"
+            f"= {cycles} 低速周期 @ {slow / 1e6:g}MHz（频率分辨率 ≈ {resolution_hz / 1000:.4g} kHz；"
+            f"等待预算 ≈ {format_seconds(budget)}）"
         )
 
     # ------------------------------------------------------------ 连接

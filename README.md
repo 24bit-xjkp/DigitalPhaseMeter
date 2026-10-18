@@ -1,6 +1,6 @@
 # DigitalPhaseMeter
 
-基于 **Chisel** 的数字相位计：测量两路同频信号的相位差。测量通路运行在高速时钟域（**当前 400MHz**，由 PL 内 MMCM 从 50MHz 倍频得到），控制、闸门计数与对外接口运行在低速时钟域（50MHz）。
+基于 **Chisel** 的数字相位计：测量两路同频信号的相位差。测量通路运行在高速时钟域（**当前 450MHz**，由 PL 内 MMCM 从 50MHz 倍频得到），控制、闸门计数与对外接口运行在低速时钟域（50MHz）。
 
 仓库目前处于 **信号输入实现阶段**：测量与控制 RTL、PS↔PL 互联（AXI4-Lite 控制/状态与结果寄存器 +
 测量完成中断）、Vivado IP 打包与 block design 均已完成，并分别用 Verilator（测量通路）与 Vivado xsim
@@ -11,7 +11,9 @@ MMCM 的 DRP 口），PC 侧是 Python 上位机（CLI + PySide6 GUI，相位差
 片内源频率与相位、输入源切换、多频点多相位扫描）。协议见 [`docs/ps-protocol.md`](docs/ps-protocol.md)，
 验证结果见 [`docs/verify-report.md`](docs/verify-report.md)（第 10 节是 2026-10-16 的复验：
 **相位在线设定已上板验证**，`onboard_accept.py` 44/44、扫描 32/32，端到端 28/28；
-22.5° 这类需要 `PHASE_MUX` 细调的点也成立）。
+22.5° 这类需要 `PHASE_MUX` 细调的点也成立。**以上是 DSP=400MHz 轮次的历史数据**，
+当前设计已改为 450MHz、冻结验证频点也已更换，见下文「DSP 域时钟」与
+[`docs/verify-plan.md`](docs/verify-plan.md)，本轮尚未重新上板验证）。
 
 ## 测量原理
 
@@ -94,11 +96,12 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
    - **不走 clk_wiz 的语义寄存器文件**：原来的 `clk_wiz_src`（`USE_DYN_RECONFIG + PHASE_DUTY_CONFIG`）
      会把「毫度/百分比/MHz → MMCM 计数器位域」的定点换算综合成硬件（实测 13,287 个 LUT site + 38 个
      DSP48E1）；方案 A 把换算搬到 PS 软件，PL 侧只留 DRP 搬运状态机（114 LUT / 182 FF / 0 DSP），
-     整设计 Slice LUTs 14,048（79.8%）→ 948（5.4%）、DSP 40 → 2。
+     整设计 Slice LUTs 14,048（79.8%）→ 948（5.4%）、DSP 40 → 2
+     （以上资源数据是 400MHz 轮次的实现结果）。
      **相位字生效与否未上板验证**：xsim 的 unisim MMCM 不支持 DRP 写，控制器只用 DRP 从端模型验证过
      （旧的 `PHASE_DUTY_CONFIG` 补丁脚本随之作废，已删除）。
 2. **两路输出与外部输入共用同一条异步采样链**：切换不改变测量通路的延迟，相位差只被量化到
-   1 个测量时钟周期（即相位计本身的分辨率，400MHz 下 2.5ns）。使能无效（`SIG_CTRL.enable = 0`）
+   1 个测量时钟周期（即相位计本身的分辨率，450MHz 下 2.222ns）。使能无效（`SIG_CTRL.enable = 0`）
    时片内源两路输出被门成恒低。
 
 ### 切换与配置（PS 视角）
@@ -129,20 +132,22 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
         └──────────────┘  └─►│ clk_wiz (MMCM)         ├──┐ ▼（4KB 寄存器区）
                         ▲    │ + Safe Clock Startup   │   │  dpm_top（本仓库打包的 IP）
                         │    └────────────────────────┘   │
-                        │       400MHz DSP 域时钟 ────────┘
+                        │       450MHz DSP 域时钟 ────────┘
                         │
                     interrupt
 ```
 
-**DSP 域时钟 400MHz**：Zynq-7000 的 PS `FCLK` 上限 250MHz（在 BD 里请求更高会被静默降到 250MHz），
+**DSP 域时钟 450MHz**：Zynq-7000 的 PS `FCLK` 上限 250MHz（在 BD 里请求更高会被静默降到 250MHz），
 因此测量核心的高速时钟改由 **PL 内的 MMCM** 从 `FCLK_CLK0`(50MHz) 倍频得到。「MMCM 锁定前不来时钟」
 由 **clk_wiz 自带的 Safe Clock Startup** 保证：它把 MMCM 输出经内部的 `BUFGCE` 放行，CE 由 8 bit
 移位寄存器连续采到 8 拍 `locked` 后才拉高（无毛刺，不需要外部门控模块）。实测在
-`xc7z010clg400-1`（−1 速度等级）上 400MHz 时序收敛：**WNS = +0.192ns、WHS = +0.050ns，0 个失败端点**
-（复位极性修复后的最新一轮，官方策略 `Performance_Retiming`，3 次独立实现数值全同；同一设计的早期
-版本实测过 +0.358ns / +0.062ns 一档，余量随 RTL 与实现策略的修订变化），详见
+`xc7z010clg400-1`（−1 速度等级）上 450MHz 时序收敛：**WNS = +0.291ns、WHS = +0.032ns、
+TNS = THS = 0、0 个失败端点**（DSP 域内 WNS = +0.291ns / WHS = +0.163ns；官方实现策略
+`Performance_Retiming`，2026-10-18 一轮实现），详见
 [`vivado/README.md`](vivado/README.md#复位极性修复后的一轮复跑与两种实现策略对比)。
-相位分辨率因此从 200MHz 下的 5ns 提升到 2.5ns。
+同一设计的早期版本在 **400MHz 轮次**实测过 WNS +0.358ns / WHS +0.062ns 一档（历史数据，
+余量随 RTL 与实现策略的修订变化）。
+相位分辨率因此从 200MHz 下的 5ns 提升到 2.222ns（450MHz）。
 
 - **所有数据都走 AXI4-Lite 寄存器（GPIO 式）**：一次测量的结果只有 4 个字，PL 侧直接把最新结果锁存在只读寄存器里，PS 收到中断后连续读 4 个寄存器即可拿到一条完整结果。因此 IP 内部没有任何片内存储，对外也只有一个 AXI 从口——数据量小的时候，寄存器比 BRAM + 突发口简单得多。
 - **中断**：结果锁存完成（或上一次结果被覆盖而丢失）后拉起 `interrupt`（高电平），经 `IRQ_F2P[0]` 通知 PS；软件写 `IRQ_STATUS` 清中断。
@@ -263,7 +268,7 @@ vivado -mode batch -source vivado/build_bitstream.tcl  # 综合 / 实现 / bitst
    片内源频率与相位设定、流模式上报；协议见 [`docs/ps-protocol.md`](docs/ps-protocol.md)。
    验证结果见 [`docs/verify-report.md`](docs/verify-report.md)（测量点全部通过，
    但**相位扫描未真正生效**，见下）。
-5. ~~**PL 侧：让在线相位扫描真正可用**~~ —— **已完成并上板验证（2026-10-16）**：片内源换成
+5. ~~**PL 侧：让在线相位扫描真正可用**~~ —— **已完成并上板验证（2026-10-16，400MHz 轮次历史数据）**：片内源换成
    **裸 MMCM + 极简 DRP 控制器**（方案 A）后，相位由 PS 直接编码进 MMCM 的
    `PHASE_MUX`/`DELAY_TIME`（网格 `45°/D`）。上板过程中修掉 3 个只有硬件才暴露的缺陷
    （DRP 地址窗口误判完整地址、DRP 写期间未拉高 MMCM 的 `RST`、`DWE` 常置 1），
@@ -272,7 +277,8 @@ vivado -mode batch -source vivado/build_bitstream.tcl  # 综合 / 实现 / bitst
    （与金标准逐位一致）；`onboard_accept.py` 44/44、扫描 32/32；
    xsim 联调（真实 MMCM 行为模型 + DRP 控制器 + 测量通路）4/4 点通过。
    详见 [`docs/verify-report.md`](docs/verify-report.md) 第 10 节。
-6. ~~**扩大相移覆盖：更多频点 + >180° 相移**~~ —— **已完成并上板验证（2026-10-16 第二轮）**：
+6. ~~**扩大相移覆盖：更多频点 + >180° 相移**~~ —— **已完成并上板验证（2026-10-16 第二轮，
+   400MHz 轮次历史数据，下面的数字保留原样）**：
    相位请求的上界从写死的 `< 180°` 改为**硬件依据**——9 位相位码
    `m = round(相位 × D / 45000) <= 511`，即可请求上界 `min(23017499/D, 359999)` 毫度
    （D=20/25/40/50 覆盖整个 `0~360°`，D=120 到 191.812°、D=125 到 184.139°）；越界请求
@@ -283,6 +289,9 @@ vivado -mode batch -source vivado/build_bitstream.tcl  # 综合 / 实现 / bitst
    共 **79 个点、其中 31 个 ≥180°**。证据：xsim 联调 79/79（`HANDOFF_SUMMARY ... fails=0`）、
    上板验收扫描 79/79、C/Python/spec 三侧单测与金标准 79 条向量全部通过。
    详见 [`docs/verify-report.md`](docs/verify-report.md) 第 11 节。
+   **当前 450MHz 轮次的冻结表已改为新频点**（450MHz 的整数 MHz 约数：
+   5/6/9/10/15/18/25/30/45/50MHz，共 80 个测量点、32 个 ≥180°，见
+   [`docs/verify-plan.md`](docs/verify-plan.md) §3），验证数据待重跑，尚未重新上板验证。
 7. **PS UART 与上板** —— PS7 的调试串口现在是 `create_bd.tcl` 的流水线参数
    （`-uart uart1`，默认；`uart0` / `none` 可选），重建 BD 即带上 UART1（MIO48/49、115200），
    不再需要单独的补丁脚本；上板步骤见 [`docs/bringup.md`](docs/bringup.md)。

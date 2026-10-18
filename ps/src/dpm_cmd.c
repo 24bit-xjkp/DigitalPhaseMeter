@@ -89,7 +89,7 @@ void dpm_cmd_init(dpm_cmd_ctx_t *c, const dpm_io_t *io, void *io_ctx, const dpm_
         c->clk = *clk;
     } else {
         c->clk.slow_hz = 50000000u;
-        c->clk.dsp_hz = 400000000u;
+        c->clk.dsp_hz = 450000000u;
     }
     c->gate_target = DPM_DEFAULT_GATE_TARGET;
     c->mode = DPM_DEFAULT_MODE;
@@ -486,8 +486,9 @@ static uint32_t handle_identify(dpm_cmd_ctx_t *c, uint8_t *out, uint32_t cap)
     v.slow_clk_hz = c->clk.slow_hz;
     v.flags = (uint16_t)DPM_FLAGS_VALUE;
 #if !DPM_DRP_PHASE_WRITABLE
-    /* b4 = phaseControllable：当前 bitstream 下 clk_out2 相位被静态 generic 固定为 90°，
-     * 写相位字 0x218 不生效（实测结论见 spec/drp_semantics.json），故本位保持 0。 */
+    /* b4 = phaseControllable：只会在旧 bitstream（DPM_DRP_PHASE_WRITABLE=0）下走到这里——
+     * clk_out2 相位被静态 generic 固定为 90°，写相位字不生效（实测结论见
+     * spec/drp_semantics.json），故本位保持 0。当前方案 A 下该宏为 1，走下面的 else 分支。 */
     v.flags &= (uint16_t)~DPM_FLAG_PHASE_CTRL;
 #else
     v.flags |= (uint16_t)DPM_FLAG_PHASE_CTRL;

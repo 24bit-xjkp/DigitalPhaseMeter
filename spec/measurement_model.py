@@ -51,22 +51,23 @@ from typing import Iterable, Sequence
 # ------------------------------------------------------------------ 冻结默认值
 
 F_SLOW_HZ = 50_000_000  # 低速（AXI/闸门）时钟：PS 的 FCLK_CLK0
-F_DSP_HZ = 400_000_000  # 高速（DSP/测量）时钟：PL 内 MMCM 倍频
+F_DSP_HZ = 450_000_000  # 高速（DSP/测量）时钟：PL 内 MMCM 倍频
 TARGET_GATE = 2000  # 默认闸门目标（低速周期数）→ 40µs
 
 # 冻结的验证频点（Hz），与 docs/ps-protocol.md 第 6 节的频点表一致。
-# 要求信号周期既是整数 ps、也是 DSP 周期（2.5ns）的整数倍（8D/MULT 为整数），
-# 此时 `phaseCnt % edgeCnt == 0` 严格成立（见 spec/gen_golden.py 的说明）。
+# 450MHz 轮次取 450MHz 的整数 MHz 约数（5/6/9/10/15/18/25/30/45/50MHz）：`f_dsp/f_sig`
+# 为整数，每个信号周期的相位计数窗口都是同一个整数，`phaseCnt % edgeCnt == 0` 严格成立
+# （见 spec/gen_golden.py 的说明）。
 DEFAULT_FREQS_HZ = (
     5_000_000,
-    6_250_000,
-    8_000_000,
+    6_000_000,
+    9_000_000,
     10_000_000,
-    12_500_000,
-    16_000_000,
-    20_000_000,
+    15_000_000,
+    18_000_000,
     25_000_000,
-    40_000_000,
+    30_000_000,
+    45_000_000,
     50_000_000,
 )
 # 冻结的相位点（度）：0~315° 的 45° 网格点。
@@ -346,29 +347,33 @@ def selftest() -> int:
         else:
             print(f"ok   {name} = {actual}")
 
-    # 25MHz、40µs 闸门、90°、50MHz/400MHz
+    # 25MHz、40µs 闸门、90°、50MHz/450MHz
     p = predict(F_SLOW_HZ, F_DSP_HZ, 25_000_000, 90.0, 2000)
     check("gate_cnt(25MHz,gate=2000)", p.gate_cnt, 2002)  # 2000 + ceil(40ns/20ns)
     check("edge_cnt(25MHz)", p.edge_cnt, 1001)  # round(2002*20/40)
-    check("phase_cnt(90°@25MHz)", p.phase_cnt, 4004)  # round(0.25*16*1001)
-    check("phase_step_mdeg(25MHz)", p.phase_step_mdeg, 22500)  # 360*25/400 = 22.5°
+    check("phase_cnt(90°@25MHz)", p.phase_cnt, 4505)  # round(0.25*18*1001) = round(4504.5)
+    check("phase_step_mdeg(25MHz)", p.phase_step_mdeg, 20000)  # 360*25/450 = 20°
     check("freq_milli_hz(25MHz)", p.freq_milli_hz, 25_000_000_000)
-    check("phase_milli_deg(90°@25MHz)", p.phase_milli_deg, 90_000)
+    check("phase_milli_deg(90°@25MHz)", p.phase_milli_deg, 90_009)  # 4.5005 个 DSP 周期
     check("phase_cycles(90°@25MHz)", _div_trunc(p.phase_cnt, p.edge_cnt), 4)
 
-    # 10MHz、22.5°：量化步长 9°，22.5/9 = 2.5 个 DSP 周期（半格，落在量化下界内）
+    # 10MHz、22.5°：量化步长 8°，22.5/8 = 2.8125 个 DSP 周期
     q = predict(F_SLOW_HZ, F_DSP_HZ, 10_000_000, 22.5, 2000)
     check("gate_cnt(10MHz)", q.gate_cnt, 2005)  # 2000 + ceil(100ns/20ns)
     check("edge_cnt(10MHz)", q.edge_cnt, 401)  # round(2005*20/100)
-    check("phase_step_mdeg(10MHz)", q.phase_step_mdeg, 9000)
-    check("phase_cnt(22.5°@10MHz)", q.phase_cnt, 1003)  # round(0.0625*40*401) = round(1002.5)
+    check("phase_step_mdeg(10MHz)", q.phase_step_mdeg, 8000)
+    check("phase_cnt(22.5°@10MHz)", q.phase_cnt, 1128)  # round(0.0625*45*401) = round(1127.8125)
 
     # 无符号相位差口径：180° 与 270° 都是可测点，只有 360°（与 0° 同义）必须报错
     for deg, want in ((180.0, 180.0), (270.0, 270.0)):
         r = predict(F_SLOW_HZ, F_DSP_HZ, 25_000_000, deg, 2000)
-        # 25MHz/400MHz：1 个 DSP 周期 = 22.5°，180° = 8 个周期、270° = 12 个周期
-        check(f"phase_cnt({deg:g}°@25MHz)", r.phase_cnt // r.edge_cnt, int(want / 22.5))
-        check(f"phase_meas({deg:g}°@25MHz)", r.phase_milli_deg, int(want * 1000))
+        # 25MHz/450MHz：1 个 DSP 周期 = 20°，180° = 9 个周期、270° = 13.5 个周期（量化到 13）
+        check(f"phase_cnt({deg:g}°@25MHz)", r.phase_cnt // r.edge_cnt, int(want / 20.0))
+        check(
+            f"phase_meas({deg:g}°@25MHz) 落在半格内",
+            abs(r.phase_milli_deg - int(want * 1000)) <= r.phase_step_mdeg // 2 + 1,
+            True,
+        )
     try:
         predict(F_SLOW_HZ, F_DSP_HZ, 25_000_000, 360.0, 2000)
         print("FAIL 相位 360° 未被拒绝")

@@ -18,8 +18,9 @@
 //   - 测量通路的相位差与直接测得值之差 ≤ 1 个 DSP 周期 + 1 毫度（采样量化下界）。
 //
 // 点表覆盖（与 `spec/gen_golden.py::FREQ_POINTS_HZ` / `phase_points_for` 一致）：
-// 10 个频点 × 逐频点相位点 = 79 个点，其中 ≥180° 的 31 个；>180° 的上界由 9 位相位码
-// 决定（D=125 只能到 183.96°、D=20 能到 315°），每个频点都保证至少一个 >180° 的用例。
+// 10 个频点 × 逐频点相位点 = 80 个点，其中 ≥180° 的 32 个；>180° 的上界由 9 位相位码
+// 决定（D=125 只能到 183.96°、D=120 只能到 191.625°、D≤73 能到 315°），每个频点都
+// 保证至少一个 >180° 的用例。
 // 每点判 4 条：直接测得相位 = MMCM 网格值、测量 = 直接测得、测量 = 网格值、计数模型。
 //
 // 编译/运行见 `sim/run_handoff_tb.sh`。
@@ -31,11 +32,13 @@ module tb_src_handoff;
 
     // ------------------------------------------------------------ 时钟与复位
     localparam time T_MAIN = 20000;  // 50MHz（主时钟 / DRP DCLK / MMCM 参考）
-    localparam time T_DSP  = 2500;   // 400MHz（DSP 域，理想时钟：本激励只验证数字通路）
+    // 450MHz 的周期是 2222.22ps，1ps 时基下取 2222ps（等效 450.045MHz，误差 0.01%）。
+    // 本激励只验证数字通路，测量模型（T_DSP_PS）与这个仿真时钟严格自洽。
+    localparam time T_DSP  = 2222;   // 450MHz（DSP 域，理想时钟）
     localparam real F_SLOW_HZ = 50_000_000.0;
     localparam int unsigned F_SLOW_HZ_INT = 50_000_000;  // 计数模型的整数形式
-    localparam real F_DSP_HZ = 400_000_000.0;
-    localparam real T_DSP_PS = 2500.0;
+    localparam real F_DSP_HZ = 450_000_000.0;
+    localparam real T_DSP_PS = 2222.0;
 
     logic clock = 1'b0;
     logic dsp_clock = 1'b0;
@@ -419,20 +422,20 @@ module tb_src_handoff;
 
     // ------------------------------------------------------------ 测试点表
     // 频点表：与 `spec/gen_golden.py::FREQ_POINTS_HZ`、`docs/ps-protocol.md` §6.4 一致，
-    // 10 个频点全是冻结求解规则的**精确解**（误差 0），覆盖 VCO 600/750/800/1000MHz、
-    // MULT 12/15/16/20 与 D = 20/25/40/50/80/100/120/125。
-    // 选取要求信号周期既是整数 ps，也是 DSP 周期（2.5ns）的整数倍（`8D/MULT` 为整数）：
-    // 否则每个周期的相位计数窗口在 k 与 k+1 之间交替，`phaseCnt % edgeCnt == 0` 不再成立
-    // （本激励早期点表里的 6.4MHz/VCO=800/D=125 就把这条打出来过：余数 129）。
+    // 10 个频点全是冻结求解规则的**精确解**（误差 0），覆盖 VCO 600/750/900/1000/1050MHz、
+    // MULT 12/15/18/20/21 与 D = 20/35/40/50/70/100/120/125。
+    // 450MHz 轮次的选点要求：频点整除 450MHz（`f_dsp / f_sig` 为整数，等价于信号周期是
+    // DSP 周期的整数倍），否则每个周期的相位计数窗口在 k 与 k+1 之间交替、
+    // `phaseCnt % edgeCnt == 0` 不成立（400MHz 轮次的 6.4MHz 点实测余数 129，作历史记录）。
     localparam int unsigned N_FREQS = 10;
     localparam int unsigned MAX_PHASES = 12;             // 单频点最多 5+1+3 = 9 个点
     localparam int unsigned MAX_POINTS = N_FREQS * MAX_PHASES;
 
-    int unsigned freq_hz[0:N_FREQS-1] = '{5_000_000, 6_250_000, 8_000_000, 10_000_000, 12_500_000,
-                                         16_000_000, 20_000_000, 25_000_000, 40_000_000,
+    int unsigned freq_hz[0:N_FREQS-1] = '{5_000_000, 6_000_000, 9_000_000, 10_000_000, 15_000_000,
+                                         18_000_000, 25_000_000, 30_000_000, 45_000_000,
                                          50_000_000};
-    int unsigned freq_mult[0:N_FREQS-1] = '{12, 15, 20, 20, 20, 16, 20, 20, 20, 20};
-    int unsigned freq_div[0:N_FREQS-1] = '{120, 120, 125, 100, 80, 50, 50, 40, 25, 20};
+    int unsigned freq_mult[0:N_FREQS-1] = '{12, 15, 18, 20, 21, 18, 20, 21, 18, 20};
+    int unsigned freq_div[0:N_FREQS-1] = '{120, 125, 100, 100, 70, 50, 40, 35, 20, 20};
 
     int unsigned point_freq[0:MAX_POINTS-1];
     int unsigned point_mult[0:MAX_POINTS-1];
@@ -684,7 +687,7 @@ module tb_src_handoff;
         end
     end
 
-    // 总时长保护：整轮 86 个点的仿真时间约 4ms（每点 ≈ 40µs 闸门 + 重锁），
+    // 总时长保护：整轮 80 个点的仿真时间约 4ms（每点 ≈ 40µs 闸门 + 重锁），
     // 200ms 是 50 倍余量。注意 xsim 的 `#` 延时是 32 位有符号（ps 时基下上限 ≈2.1ms），
     // 长延时必须用循环拼出来。
     initial begin

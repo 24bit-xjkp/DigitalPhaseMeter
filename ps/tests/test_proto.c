@@ -177,13 +177,13 @@ static void test_payload_codecs(void)
         id.ver = 0x00010000u;
         id.version_reg = DPM_VERSION_VALUE;
         id.caps_reg = 0x00030104u;
-        id.dsp_clk_hz = 400000000u;
+        id.dsp_clk_hz = 450000000u;
         id.slow_clk_hz = 50000000u;
         id.flags = 0x07u;
         CHECK(dpm_enc_identify(out, sizeof(out), &id) == 30u, "IDENTIFY 长度应为 30");
         CHECK(dpm_rd_u32(&out[12]) == DPM_VERSION_VALUE, "versionReg 位置不对");
         CHECK(dpm_rd_u32(&out[16]) == 0x00030104u, "capsReg 位置不对");
-        CHECK(dpm_rd_u32(&out[20]) == 400000000u && dpm_rd_u32(&out[24]) == 50000000u,
+        CHECK(dpm_rd_u32(&out[20]) == 450000000u && dpm_rd_u32(&out[24]) == 50000000u,
               "时钟字段位置不对");
         CHECK(dpm_rd_u16(&out[28]) == 0x07u, "flags 位置不对");
         CHECK(dpm_enc_identify(out, 29u, &id) == 0u, "容量不足应返回 0");

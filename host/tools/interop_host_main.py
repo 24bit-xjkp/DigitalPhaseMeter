@@ -42,7 +42,7 @@ from dpm_host import mathx as M  # noqa: E402
 from dpm_host import protocol as P  # noqa: E402
 from dpm_host.client import DpmClient  # noqa: E402
 
-FROZEN = ((25_000_000, 90_000), (10_000_000, 90_000), (6_250_000, 90_000))
+FROZEN = ((25_000_000, 90_000), (10_000_000, 90_000), (6_000_000, 90_000))
 
 
 def check_external_source_without_signal(client: DpmClient) -> bool:

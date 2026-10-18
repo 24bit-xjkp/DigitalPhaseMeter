@@ -11,7 +11,7 @@
 - :mod:`dpm_host.cli`       `python3 -m dpm_host <子命令>` 命令行界面；
 - :mod:`dpm_host.gui`       PySide6 图形界面。
 
-所有文档与代码注释使用中文。默认时钟为低速 50MHz、高速（DSP）400MHz。
+所有文档与代码注释使用中文。默认时钟为低速 50MHz、高速（DSP）450MHz。
 """
 
 from __future__ import annotations

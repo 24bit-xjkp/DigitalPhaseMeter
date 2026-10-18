@@ -47,8 +47,8 @@ static void test_golden_all(void)
               "f=%u phase_req=%u 实测 %u 期望 %u", v->freq_hz, v->phase_requested_mdeg,
               m.phase_milli_deg, v->phase_mdeg_out);
         CHECK(m.phase_cycles_rem == (v->phase_cnt_req % v->edge_cnt), "余数不一致");
-        /* 量化步长按**实测频率**算，金标准按**标称频率**算：8MHz/20MHz 点上
-         * 实测频率有 1/edge 量级的截断（7997010 vs 8000000），所以给 1% + 10 毫度容差。 */
+        /* 量化步长按**实测频率**算，金标准按**标称频率**算：6MHz/15MHz 等点上
+         * 实测频率有 1/edge 量级的截断（5998008 vs 6000000），所以给 1% + 10 毫度容差。 */
         {
             uint32_t diff = (m.phase_q_deg > v->phase_step_mdeg)
                                 ? (m.phase_q_deg - v->phase_step_mdeg)

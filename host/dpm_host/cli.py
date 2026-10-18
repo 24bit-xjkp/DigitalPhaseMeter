@@ -812,7 +812,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_reset)
 
     p = sub.add_parser("scan", help="多频点 × 多相位扫描并输出 CSV")
-    p.add_argument("--freqs", required=True, metavar="LIST", help="逗号分隔的频率，如 5e6,6.25e6,25e6")
+    p.add_argument("--freqs", required=True, metavar="LIST", help="逗号分隔的频率，如 5e6,6e6,25e6")
     p.add_argument("--phases", default="0", metavar="LIST", help="逗号分隔的相位（度），如 0,45,90")
     p.add_argument("--out", metavar="PATH", default=None, help="CSV 输出路径")
     p.add_argument("--gate", type=int, default=None, help="扫描前设置闸门目标")

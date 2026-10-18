@@ -220,7 +220,7 @@ static inline uint32_t dpm_mmcm_phase_code_to_mdeg(uint32_t code, uint32_t divid
 /** 给定输出分频 D 时可**请求**的最大相位（毫度，含），并按满量程截断。
  *
  * D=40（25MHz）→ 359999（满量程，m=320 落回 0°）；D=100（10MHz）→ 230174；
- * D=120（5MHz）→ 191812；D=125（8MHz）→ 184139（吸附后 183.960°）。
+ * D=120（5MHz）→ 191812；D=125（6MHz）→ 184139（吸附后 183.960°）。
  */
 static inline uint32_t dpm_mmcm_phase_max_mdeg(uint32_t divide)
 {

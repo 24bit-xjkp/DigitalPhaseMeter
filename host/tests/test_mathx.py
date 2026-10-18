@@ -19,7 +19,7 @@ HOST_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO_ROOT = os.path.dirname(HOST_DIR)
 GOLDEN_PATH = os.path.join(REPO_ROOT, "spec", "golden", "vectors.json")
 SLOW = 50_000_000
-DSP = 400_000_000
+DSP = 450_000_000
 
 
 def load_golden() -> tuple[list[dict], str]:
@@ -36,7 +36,18 @@ def load_golden() -> tuple[list[dict], str]:
 def _self_computed_vectors() -> list[dict]:
     """独立参考实现（用 Fraction 精确算，不与 mathx 共用代码），覆盖 8 组以上。"""
     vectors = []
-    freqs = (5_000_000, 6_250_000, 8_000_000, 10_000_000, 12_500_000, 20_000_000, 25_000_000)
+    freqs = (
+        5_000_000,
+        6_000_000,
+        9_000_000,
+        10_000_000,
+        15_000_000,
+        18_000_000,
+        25_000_000,
+        30_000_000,
+        45_000_000,
+        50_000_000,
+    )
     for freq in freqs:
         gate = 2000 + -(-SLOW // freq)  # ceil(T_sig/T_slow)
         edge = (gate * freq) // SLOW
@@ -153,9 +164,10 @@ def test_freq_milli_hz_exact() -> None:
 
 
 def test_quantization_step() -> None:
-    assert M.phase_quant_milli_deg(25_000_000, DSP) == 22_500
-    assert M.phase_quant_milli_deg(10_000_000, DSP) == 9_000
-    assert M.phase_quant_deg(25_000_000, DSP) == 22  # 22.5 → RNE → 22
+    assert M.phase_quant_milli_deg(25_000_000, DSP) == 20_000  # 20.0°
+    assert M.phase_quant_milli_deg(10_000_000, DSP) == 8_000  # 8.0°
+    assert M.phase_quant_milli_deg(6_000_000, DSP) == 4_800  # 4.8°
+    assert M.phase_quant_deg(25_000_000, DSP) == 20
     assert M.phase_quant_milli_deg(0, DSP) == 0
 
 
