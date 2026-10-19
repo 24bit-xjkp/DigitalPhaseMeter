@@ -30,7 +30,7 @@
 #          │                                        └──M01_AXI(AXI4-Lite)──► dpm_src_drp_0/s_axi_lite（DRP）
 #          │  FCLK_CLK0(50MHz) ──► proc_sys_reset_0 ─► 互联与两个从口的主时钟/复位
 #          │                    ├► clk_wiz_0(MMCM + Safe Clock Startup) ─► dpm_top_0/dspClock
-#          │                    └► dpm_mmcm_src_0(裸 MMCM) ─► dpm_top_0/srcSig1、srcSig2、srcLocked
+#          │                    └► dpm_mmcm_src_0(裸 MMCM) ─► dpm_top_0/intSig_sig1、intSig_sig2、srcLocked
 #          │                          ▲
 #          │                          └── DRP ◄── dpm_src_drp_0（极简 DRP 控制器，方案 A）
 #          └◄── IRQ_F2P ◄── xlconcat_0 ◄── dpm_top_0/interrupt（IRQ_F2P[0]）

@@ -15,7 +15,7 @@ import chisel3.reflect.DataMirror
   *                                        │              ▲        ▲
   *                                        └──────────────┘        │
   *                                          结果（4 个只读寄存器）  │
-  *                                     intSig_sig1/srcSig2（MMCM 两路输出）  extSig_sig1/sig2（外部引脚）
+  *                                     intSig_sig1/intSig_sig2（MMCM 两路输出）  extSig_sig1/sig2（外部引脚）
   * }}}
   *
   * 数据通道就是寄存器本身（GPIO 式）：一次测量的结果只有 4 个字，`ControlRegs` 直接把最新结果锁存进 只读寄存器，PS 收到中断后读走即可，因此 IP 内部没有 BRAM，也只有一个 AXI4-Lite 从口。

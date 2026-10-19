@@ -1,12 +1,12 @@
 // 片内信号源 ↔ 测量通路联调激励（方案 A：裸 MMCM + 极简 DRP 控制器）
 //
 // 与 `tb_digital_phase_meter_top.sv` 的区别：那份激励用**理想信号源**驱动 dpm_top 的
-// intSig_sig1/srcSig2（只覆盖测量通路）；本激励把 **BD 里真实用的三个单元**接起来：
+// intSig_sig1/intSig_sig2（只覆盖测量通路）；本激励把 **BD 里真实用的三个单元**接起来：
 //
 //     dpm_mmcm_src（裸 MMCME2_ADV + BUFGCE 安全启动）
 //        ▲ DRP 口
 //     MmcmDrpController（Chisel 生成产物，AXI4-Lite 从口 @0x43C1_0000）
-//        └─ clkOut1/clkOut2 ─► DigitalPhaseMeterTop（srcSig1/srcSig2）
+//        └─ clkOut1/clkOut2 ─► DigitalPhaseMeterTop（intSig_sig1/intSig_sig2）
 //
 // 它验证的是**编码 + 通路**这一整条链路：
 //   1. 软件给出的 MMCM 寄存器值（PHASE_MUX/DELAY_TIME）真的让输出相位差等于请求值；

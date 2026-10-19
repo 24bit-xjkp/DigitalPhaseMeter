@@ -29,21 +29,21 @@ block design（BD），完成综合、实现、bitstream 与 XSA 导出。工程
 
 ## 脚本与执行顺序
 
-| 脚本 | 作用 | 产物 |
-| ---- | ---- | ---- |
-| `package_ip.tcl` | 读入生成的 RTL，打包成 `xjkp.org:dpm:dpm_top:1.0`；按端口名推断 AXI4-Lite 从口，补齐时钟/复位/中断接口与 4KB 地址块 | `build/vivado/ip/dpm_top/` |
-| `package_src_ip.tcl` | 把 `MmcmDrpController` 打包成 `xjkp.org:dpm:dpm_src_drp:1.0`（AXI4-Lite + DRP 口 + `locked`/`mmcm_reset`） | `build/vivado/ip/dpm_src_drp/` |
-| `create_bd.tcl` | 建 PS7 + AXI 互联 + 两个 IP + 两个 MMCM 的 BD；连接时钟/复位/中断/信号，分配地址，配置 PS 串口，`validate_bd_design` 后生成 wrapper | `build/vivado/bd_proj/` |
-| `build_bitstream.tcl` | 先写综合/实现策略（`synth_1` 与 IP 的 OOC run 两处），再综合、实现、导出 bitstream/XSA；`-strategy-only` 只写策略不跑 run | `dpm_system.xsa`、`timing_summary.rpt`、`utilization.rpt`、`drc.rpt`、`methodology.rpt`（从实现 run 复制） |
-| `impl_stability.tcl` | **签核用**：同一网表、不换策略重复 N 次独立实现，报 WNS/WHS 的最小/平均/最大值与失败次数 | `impl_stability_results.csv`、`stability_a<N>_timing.rpt` |
-| `impl_multi.tcl` | **调优用**：换 place/route directive 扫策略（会覆盖官方策略，不作签核依据） | `impl_multi_results.csv`、`multi_a<N>_timing.rpt` |
-| `query_runs.tcl` | 只读查询 `synth_1` / `impl_1` 的策略与全部 `STEPS.*` 参数 | 终端输出 |
-| `constraints/dpm_top.xdc` | 顶层约束：被测信号、片内源时钟、跨域握手、MMCM 启动移位寄存器、板级引脚 | 源文件 |
-| `hook_filter_messages.tcl` | 综合（`SYNTH_DESIGN`）与实现（`INIT_DESIGN`）的 pre-hook：屏蔽厂商 IP 固有告警 | 源文件 |
-| `hook_methodology_waivers.tcl` | 实现 `ROUTE_DESIGN` 的 pre-hook：创建 TIMING-28/47 的 methodology waiver（每条写明理由的已知例外） | 源文件 |
-| `hook_filter_vendor_ip.tcl` | 厂商 IP 的 OOC 综合 run 的 pre-hook：屏蔽厂商生成 RTL 固有的 `Netlist 29-345`（只挂厂商 run，自研 IP 的不挂） | 源文件 |
-| `suppress_early_messages.tcl` | `open_project` **之前**加载的早期过滤（Board 49-26 / Project 1-5713 等工程/环境级告警） | 源文件 |
-| `build.sh` | 依次执行前四个脚本的一键封装（`set -e`，任一步失败即退出） | — |
+| 脚本                           | 作用                                                                                                                                | 产物                                                                                                       |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `package_ip.tcl`               | 读入生成的 RTL，打包成 `xjkp.org:dpm:dpm_top:1.0`；按端口名推断 AXI4-Lite 从口，补齐时钟/复位/中断接口与 4KB 地址块                 | `build/vivado/ip/dpm_top/`                                                                                 |
+| `package_src_ip.tcl`           | 把 `MmcmDrpController` 打包成 `xjkp.org:dpm:dpm_src_drp:1.0`（AXI4-Lite + DRP 口 + `locked`/`mmcm_reset`）                          | `build/vivado/ip/dpm_src_drp/`                                                                             |
+| `create_bd.tcl`                | 建 PS7 + AXI 互联 + 两个 IP + 两个 MMCM 的 BD；连接时钟/复位/中断/信号，分配地址，配置 PS 串口，`validate_bd_design` 后生成 wrapper | `build/vivado/bd_proj/`                                                                                    |
+| `build_bitstream.tcl`          | 先写综合/实现策略（`synth_1` 与 IP 的 OOC run 两处），再综合、实现、导出 bitstream/XSA；`-strategy-only` 只写策略不跑 run           | `dpm_system.xsa`、`timing_summary.rpt`、`utilization.rpt`、`drc.rpt`、`methodology.rpt`（从实现 run 复制） |
+| `impl_stability.tcl`           | **签核用**：同一网表、不换策略重复 N 次独立实现，报 WNS/WHS 的最小/平均/最大值与失败次数                                            | `impl_stability_results.csv`、`stability_a<N>_timing.rpt`                                                  |
+| `impl_multi.tcl`               | **调优用**：换 place/route directive 扫策略（会覆盖官方策略，不作签核依据）                                                         | `impl_multi_results.csv`、`multi_a<N>_timing.rpt`                                                          |
+| `query_runs.tcl`               | 只读查询 `synth_1` / `impl_1` 的策略与全部 `STEPS.*` 参数                                                                           | 终端输出                                                                                                   |
+| `constraints/dpm_top.xdc`      | 顶层约束：被测信号、片内源时钟、跨域握手、MMCM 启动移位寄存器、板级引脚                                                             | 源文件                                                                                                     |
+| `hook_filter_messages.tcl`     | 综合（`SYNTH_DESIGN`）与实现（`INIT_DESIGN`）的 pre-hook：屏蔽厂商 IP 固有告警                                                      | 源文件                                                                                                     |
+| `hook_methodology_waivers.tcl` | 实现 `ROUTE_DESIGN` 的 pre-hook：创建 TIMING-28/47 的 methodology waiver（每条写明理由的已知例外）                                  | 源文件                                                                                                     |
+| `hook_filter_vendor_ip.tcl`    | 厂商 IP 的 OOC 综合 run 的 pre-hook：屏蔽厂商生成 RTL 固有的 `Netlist 29-345`（只挂厂商 run，自研 IP 的不挂）                       | 源文件                                                                                                     |
+| `suppress_early_messages.tcl`  | `open_project` **之前**加载的早期过滤（Board 49-26 / Project 1-5713 等工程/环境级告警）                                             | 源文件                                                                                                     |
+| `build.sh`                     | 依次执行前四个脚本的一键封装（`set -e`，任一步失败即退出）                                                                          | —                                                                                                          |
 
 ```bash
 vivado -mode batch -source vivado/package_ip.tcl         # 顶层测量 IP
@@ -99,12 +99,12 @@ vivado -mode batch -source vivado/query_runs.tcl         # 查看当前 run 参�
 策略由 [`build_bitstream.tcl`](build_bitstream.tcl) 在启动 run **之前**写入（`-strategy-only` 可只写
 不跑）：
 
-| 侧 | 参数 | 值 | 说明 |
-| -- | ---- | -- | ---- |
-| 综合（`synth_1` **与** IP 的 OOC run 两处都写） | `SYNTH_DESIGN.ARGS.DIRECTIVE` | `PerformanceOptimized` | 以时序为目标做跨层次优化 |
-| 综合 | `SYNTH_DESIGN.ARGS.GLOBAL_RETIMING` | `off`（默认；`-retiming 1` 打开） | 计数器写成 `when(clear)/.elsewhen(enable)`，正确映射是 DSP48 的 RSTP+CEP（使能由寄存器直接进控制脚）；打开重定时可能把使能寄存器折回 CARRYIN |
-| 综合 | `SYNTH_DESIGN.ARGS.MAX_DSP` | `2` | 两个计数器各 1 个 DSP48E1，并防止其它逻辑被搬进 DSP |
-| 实现 | `impl_1` 的 `strategy` | `Performance_Retiming` | phys_opt 用 `AlternateFlowWithRetiming`（DSP 优化 + 重定时），正对「关键路径终点是 DSP 控制脚」 |
+| 侧                                              | 参数                                | 值                                | 说明                                                                                                                                         |
+| ----------------------------------------------- | ----------------------------------- | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| 综合（`synth_1` **与** IP 的 OOC run 两处都写） | `SYNTH_DESIGN.ARGS.DIRECTIVE`       | `PerformanceOptimized`            | 以时序为目标做跨层次优化                                                                                                                     |
+| 综合                                            | `SYNTH_DESIGN.ARGS.GLOBAL_RETIMING` | `off`（默认；`-retiming 1` 打开） | 计数器写成 `when(clear)/.elsewhen(enable)`，正确映射是 DSP48 的 RSTP+CEP（使能由寄存器直接进控制脚）；打开重定时可能把使能寄存器折回 CARRYIN |
+| 综合                                            | `SYNTH_DESIGN.ARGS.MAX_DSP`         | `2`                               | 两个计数器各 1 个 DSP48E1，并防止其它逻辑被搬进 DSP                                                                                          |
+| 实现                                            | `impl_1` 的 `strategy`              | `Performance_Retiming`            | phys_opt 用 `AlternateFlowWithRetiming`（DSP 优化 + 重定时），正对「关键路径终点是 DSP 控制脚」                                              |
 
 要点：
 
@@ -129,11 +129,11 @@ vivado -mode batch -source vivado/query_runs.tcl         # 查看当前 run 参�
 
 ### 签核方式与结果
 
-| 脚本 | 分工 |
-| ---- | ---- |
-| `build_bitstream.tcl` | 官方那一次：写策略 → 综合 → 实现 → bitstream/XSA；`build/vivado/timing_summary.rpt` 是签核报告 |
-| `impl_stability.tcl N` | 稳定性签核：不换策略、同网表重复 N 次独立实现；判据是 N 次全为正、0 失败端点 |
-| `impl_multi.tcl N` | 调优：换 place/route directive 找更好的组合，会覆盖官方策略，**不作签核依据** |
+| 脚本                   | 分工                                                                                           |
+| ---------------------- | ---------------------------------------------------------------------------------------------- |
+| `build_bitstream.tcl`  | 官方那一次：写策略 → 综合 → 实现 → bitstream/XSA；`build/vivado/timing_summary.rpt` 是签核报告 |
+| `impl_stability.tcl N` | 稳定性签核：不换策略、同网表重复 N 次独立实现；判据是 N 次全为正、0 失败端点                   |
+| `impl_multi.tcl N`     | 调优：换 place/route directive 找更好的组合，会覆盖官方策略，**不作签核依据**                  |
 
 place/route 有 run-to-run 差异，**单次通过不算签核**；反过来，多次实现数值完全相同说明该策略下
 收敛是确定性的。用 `set_clock_uncertainty` 过约束只能用来逼工具，签核要清掉后重新出报告（本设计
@@ -141,16 +141,16 @@ place/route 有 run-to-run 差异，**单次通过不算签核**；反过来，�
 
 2026-10-19 的签核结果（Design State: Routed，`xc7z010clg400-1`；clk_wiz 改为 `No_buffer` 后重跑）：
 
-| 项 | 结果 |
-| -- | ---- |
-| 全设计时序 | **WNS +0.271ns / WHS +0.026ns / WPWS +0.067ns**，TNS = THS = 0，**0 个失败端点** |
-| DSP 域（`clk_out1_dpm_system_clk_wiz_0_0`，2.222ns） | WNS +0.271ns / WHS +0.121ns / WPWS +0.067ns，0 个失败端点 |
-| 整体 WNS 的限制者 | 仍是 clk_wiz Safe Clock Startup 内部路径 `seq_reg1[7] → clkout1_buf/CE0`（+0.271）；**测量域自身最差 setup 路径余量 +0.541ns**（`stateReg[0] → sig_reg`），DSP 域 hold 最差 +0.121ns（`responseReady` 边沿同步链） |
-| 稳定性 | `impl_stability.tcl 6`：**6/6 PASS**，6 次数值完全相同（WNS/WHS/DSP WNS/DSP WHS = +0.271 / +0.026 / +0.271 / +0.121） |
-| 其它时钟组 | 慢域（`clk_fpga_0`）WNS +11.898ns / WHS +0.026ns；跨域（`set_max_delay 20ns`）dsp→slow +18.172ns、slow→dsp +17.367ns |
-| 资源 | Slice LUT 892（5.07%）、Slice Register 1460（4.15%）、DSP 2（2.50%）、Block RAM 0、BUFGCTRL 6（18.75%）、MMCME2_ADV 2（100%） |
-| 日志 | IP 打包 / BD / 综合/实现主 run 与 8 个 IP OOC run **全部 0 Warnings / 0 Critical Warnings / 0 Errors**；实现 methodology 报告 `Checks found: 0 / Checks waived: 13`，**无 Critical Warning** |
-| 产物 | `write_bitstream` 成功，`build/vivado/dpm_system.xsa`（含 bitstream） |
+| 项                                                   | 结果                                                                                                                                                                                                               |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 全设计时序                                           | **WNS +0.271ns / WHS +0.026ns / WPWS +0.067ns**，TNS = THS = 0，**0 个失败端点**                                                                                                                                   |
+| DSP 域（`clk_out1_dpm_system_clk_wiz_0_0`，2.222ns） | WNS +0.271ns / WHS +0.121ns / WPWS +0.067ns，0 个失败端点                                                                                                                                                          |
+| 整体 WNS 的限制者                                    | 仍是 clk_wiz Safe Clock Startup 内部路径 `seq_reg1[7] → clkout1_buf/CE0`（+0.271）；**测量域自身最差 setup 路径余量 +0.541ns**（`stateReg[0] → sig_reg`），DSP 域 hold 最差 +0.121ns（`responseReady` 边沿同步链） |
+| 稳定性                                               | `impl_stability.tcl 6`：**6/6 PASS**，6 次数值完全相同（WNS/WHS/DSP WNS/DSP WHS = +0.271 / +0.026 / +0.271 / +0.121）                                                                                              |
+| 其它时钟组                                           | 慢域（`clk_fpga_0`）WNS +11.898ns / WHS +0.026ns；跨域（`set_max_delay 20ns`）dsp→slow +18.172ns、slow→dsp +17.367ns                                                                                               |
+| 资源                                                 | Slice LUT 892（5.07%）、Slice Register 1460（4.15%）、DSP 2（2.50%）、Block RAM 0、BUFGCTRL 6（18.75%）、MMCME2_ADV 2（100%）                                                                                      |
+| 日志                                                 | IP 打包 / BD / 综合/实现主 run 与 8 个 IP OOC run **全部 0 Warnings / 0 Critical Warnings / 0 Errors**；实现 methodology 报告 `Checks found: 0 / Checks waived: 13`，**无 Critical Warning**                       |
+| 产物                                                 | `write_bitstream` 成功，`build/vivado/dpm_system.xsa`（含 bitstream）                                                                                                                                              |
 
 `xc7z010` 的 DSP48E1 全寄存器 FMAX 为 464.25MHz（DS187），450MHz 用掉约 97%；Vivado 时序分析
 覆盖 DSP 内部与 CEP/RSTP 控制脚，实现后这些路径的余量见上表。
@@ -162,7 +162,7 @@ processing_system7_0 ──M_AXI_GP0(AXI3)──► axi_interconnect_0 ──M00
         │                                      └──M01_AXI──► dpm_src_drp_0/s_axi_lite            0x43C1_0000
         │  FCLK_CLK0 50MHz ──► proc_sys_reset_0 ──► 互联与两个从口的主时钟/复位
         │                   ├──► clk_wiz_0（MMCM + Safe Clock Startup）──► dpm_top_0/dspClock（450MHz）
-        │                   └──► dpm_mmcm_src_0（裸 MMCM）──► dpm_top_0/srcSig1、srcSig2、srcLocked（2×25MHz、90°）
+        │                   └──► dpm_mmcm_src_0（裸 MMCM）──► dpm_top_0/intSig_sig1、intSig_sig2、srcLocked（2×25MHz、90°）
         │                              ▲ DRP ◄── dpm_src_drp_0（MMCM 寄存器镜像搬运）
         └◄── IRQ_F2P[0] ◄── xlconcat_0 ◄── dpm_top_0/interrupt
 
@@ -189,10 +189,10 @@ dpm_top_0 内部：外部引脚与片内源经 SignalInputMux 二选一，选择
 
 ## 地址映射
 
-| 从口 | 基地址 | 范围 | 用途 |
-| ---- | ------ | ---- | ---- |
-| `dpm_top_0/s_axi_lite` | `0x43C0_0000` | 4KB | 控制/状态 + 只读测量结果 + 片内源使能/输入选择 |
-| `dpm_src_drp_0/s_axi_lite` | `0x43C1_0000` | 4KB | MMCM 寄存器镜像（0x08..0x24 八个）+ LOAD（0x28） |
+| 从口                       | 基地址        | 范围 | 用途                                             |
+| -------------------------- | ------------- | ---- | ------------------------------------------------ |
+| `dpm_top_0/s_axi_lite`     | `0x43C0_0000` | 4KB  | 控制/状态 + 只读测量结果 + 片内源使能/输入选择   |
+| `dpm_src_drp_0/s_axi_lite` | `0x43C1_0000` | 4KB  | MMCM 寄存器镜像（0x08..0x24 八个）+ LOAD（0x28） |
 
 测量 IP 的寄存器偏移/位域以 [`../ps/include/dpm_regs.h`](../ps/include/dpm_regs.h) 为准（Vitis 里
 对应 `XPAR_DPM_TOP_0_S_AXI_LITE_BASEADDR` / `XPAR_DPM_SRC_DRP_0_S_AXI_LITE_BASEADDR`）。DRP 控制器
@@ -297,11 +297,11 @@ void dpm_irq_handler(void)
 
 ### 2) 厂商 IP 固有、改不动的 → 显式屏蔽（每条在文件里写明理由）
 
-| hook 文件 | 挂载位置 | 屏蔽内容 |
-| --- | --- | --- |
-| `hook_filter_messages.tcl` | `synth_1/SYNTH_DESIGN`、`impl_1/INIT_DESIGN` | `Synth 8-7129`×100（xlconcat 写死的 In*）、`8-7071`/`8-7023`（PS7/proc_sys_reset 未用端口）、`8-4446`、`Opt 31-32`、`Netlist 29-160`(CRITICAL)×~100（PS7 xdc 给未使能引脚设属性） |
-| `hook_filter_vendor_ip.tcl` | **厂商 IP 的 OOC 综合 run**（名称排除 dpm_top / dpm_src_drp / dpm_mmcm_src） | `Netlist 29-345`（clk_wiz 生成的 BUFGCE 未覆盖 Vivado 2025.2 的默认 `SIM_DEVICE`） |
-| `suppress_early_messages.tcl` | 各脚本 `open_project` **之前** source | `Board 49-26`×96、`Project 1-5713`、`Vivado 12-7122`、`Constraints 18-550`、`IP_Flow 19-3664`（OOC run reset 后的中间状态） |
+| hook 文件                     | 挂载位置                                                                     | 屏蔽内容                                                                                                                                                                          |
+| ----------------------------- | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hook_filter_messages.tcl`    | `synth_1/SYNTH_DESIGN`、`impl_1/INIT_DESIGN`                                 | `Synth 8-7129`×100（xlconcat 写死的 In*）、`8-7071`/`8-7023`（PS7/proc_sys_reset 未用端口）、`8-4446`、`Opt 31-32`、`Netlist 29-160`(CRITICAL)×~100（PS7 xdc 给未使能引脚设属性） |
+| `hook_filter_vendor_ip.tcl`   | **厂商 IP 的 OOC 综合 run**（名称排除 dpm_top / dpm_src_drp / dpm_mmcm_src） | `Netlist 29-345`（clk_wiz 生成的 BUFGCE 未覆盖 Vivado 2025.2 的默认 `SIM_DEVICE`）                                                                                                |
+| `suppress_early_messages.tcl` | 各脚本 `open_project` **之前** source                                        | `Board 49-26`×96、`Project 1-5713`、`Vivado 12-7122`、`Constraints 18-550`、`IP_Flow 19-3664`（OOC run reset 后的中间状态）                                                       |
 
 早期过滤**必须在 `open_project` 之前**加载才有效（Board 49-26 等在 `open_project` 内部打印，放到它之后加载就来不及）。IP 的 OOC run 是独立进程、不继承 `synth_1` 的 `TCL.PRE`，必须
 单独挂；且只有 reset 过的 run 才会在 `launch_runs` 时重新生成脚本、带上后挂的 hook（否则脚本
