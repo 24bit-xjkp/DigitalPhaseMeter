@@ -31,14 +31,27 @@
 module tb_src_handoff;
 
     // ------------------------------------------------------------ 时钟与复位
-    localparam time T_MAIN = 20000;  // 50MHz（主时钟 / DRP DCLK / MMCM 参考）
-    // 450MHz 的周期是 2222.22ps，1ps 时基下取 2222ps（等效 450.045MHz，误差 0.01%）。
-    // 本激励只验证数字通路，测量模型（T_DSP_PS）与这个仿真时钟严格自洽。
-    localparam time T_DSP  = 2222;   // 450MHz（DSP 域，理想时钟）
-    localparam real F_SLOW_HZ = 50_000_000.0;
-    localparam int unsigned F_SLOW_HZ_INT = 50_000_000;  // 计数模型的整数形式
-    localparam real F_DSP_HZ = 450_000_000.0;
-    localparam real T_DSP_PS = 2222.0;
+    // 真实设计里 DSP 域是 450MHz = 9 × 50MHz（`clk_wiz` 从 FCLK_CLK0 倍频）。450MHz 的
+    // 周期 2222.22…ps 在 1ps 时基下不是整数，直接取 2222ps 会让「信号周期 / DSP 周期」
+    // 偏离整数比，做几百个参考沿的累加后 `phaseCnt` 出现非零余数（`phaseCnt % edgeCnt`
+    // 不再为 0）——这是仿真时基的近似，不是设计缺陷。
+    //
+    // 因此把主时钟按「整数皮秒且与 MMCM 各倍频点都整除」重新选值：T_MAIN 必须是
+    // MULT ∈ {12,15,18,20,21} 的公倍数（lcm = 1260ps）与 DSP 周期的 9 倍，
+    // 取 T_MAIN = 18900ps（52.91MHz）、T_DSP = 2100ps（476.19MHz），两者严格 9:1。
+    // 这样：
+    //   * MMCM 的 VCO 周期 T_MAIN / MULT 全是整数 ps，行为模型的输出沿不会因取整
+    //     每周期抖 1ps（6MHz / 15MHz / 30MHz 频点曾因此出现 `phaseCnt % edgeCnt != 0`）；
+    //   * 信号周期 T_MAIN × D / M 全是整数 ps，且 T_sig / T_DSP = 9D / M 严格为整数
+    //     （冻结频点本来就要求 f_dsp / f_sig 为整数），测量模型与仿真时钟严格自洽。
+    // 绝对频率与标称值差约 5.8%，但本激励只验证数字通路（相位/频率的比值语义），
+    // 频点表的频率比 f_sig / f_slow = M / D 与真实设计逐位一致，判据不受影响。
+    localparam time T_MAIN = 18900;  // 52.91MHz（标称 50MHz；主时钟 / DRP DCLK / MMCM 参考）
+    localparam time T_DSP  = 2100;   // 476.19MHz（标称 450MHz；DSP 域，理想时钟）
+    localparam real F_SLOW_HZ = 50_000_000.0;  // 标称值（仿真时基按比例缩放，比值不变）
+    localparam int unsigned F_SLOW_HZ_INT = 50_000_000;  // 计数模型的整数形式（标称值）
+    localparam real F_DSP_HZ = 450_000_000.0;  // 标称值
+    localparam real T_DSP_PS = 2100.0;
 
     logic clock = 1'b0;
     logic dsp_clock = 1'b0;
@@ -56,7 +69,7 @@ module tb_src_handoff;
     logic src_clk1, src_clk2, src_locked;
 
     dpm_mmcm_src #(
-        .CLKIN_PERIOD      (20.000),
+        .CLKIN_PERIOD      (18.900),   // 与 T_MAIN 一致（52.91MHz，见上面的时基说明）
         .CLKFBOUT_MULT_F   (20.000),
         .DIVCLK_DIVIDE     (1),
         .CLKOUT0_DIVIDE_F  (40.000),
@@ -593,8 +606,10 @@ module tb_src_handoff;
             meas_delay_ps = (real'(phase_cnt) / real'(edge_cnt)) * T_DSP_PS;
             // 判据 2：测量通路与直接测得值之差 ≤ 1 个 DSP 周期 + 1 毫度。
             // 按周期取模比较：
-            //  * 0° 时两沿几乎重合，相位计「等下一个 extSig_sig2 沿」会量到**一整个周期**
-            //    （上板与模型都如此，见 docs/onboard-ax7010.md 的 0° 边界约定）；
+            //  * 0° 时两沿几乎重合：修复相位计数使能窗口之前的旧 RTL 会量到**一整个周期**
+            //    （清零被置位吞掉，见 PhaseMeter.scala 的注释）；现在两沿落在同一个 DSP
+            //    采样拍时量化为 0 个周期。0° 与一整周期在「无符号间隔、模 360°」口径下等价，
+            //    所以这里只按取模比较，不锁定具体约定；
             //  * 361° 附近的点（如 359.1°）也可能因 1 个 DSP 周期的采样同步抖动量回 ~0°；
             //  * 直接测量也有 ±1 个 DSP 周期的采样同步抖动。
             err_meas_ps = meas_delay_ps - delay_ps;

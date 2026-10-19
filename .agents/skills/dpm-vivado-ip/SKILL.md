@@ -126,6 +126,15 @@ xsim <snapshot> -runall
     `gate_target + 8` 这类常数，在外部 400ns 信号（= 20 个低速周期）上够用，换到片内信号源
     640ns（= 32 个低速周期）就会误判。`check_record` 现在按
     `$ceil(signal_period / CLOCK_PERIOD) + 8` 计算，与 `dpm-measurement-model` 的公式一致。
+  - **仿真真实 MMCM 的联调激励（`tb_src_handoff.sv`）要把时基选成整数比**：450MHz 的周期
+    `2222.22…ps` 在 1ps 时基下不是整数，直接取 `T_MAIN=20000ps` / `T_DSP=2222ps` 会让
+    「信号周期 / DSP 周期」偏离整数比，MMCM 行为模型的输出沿又按 1ps 取整，几百个参考沿累加后
+    `phaseCnt % edgeCnt` 出现非零余数（6MHz/15MHz/30MHz 等频点的第二路输出周期还会在
+    166650/166651ps 间抖）。现行激励取 `T_MAIN=18900ps` / `T_DSP=2100ps`（严格 9:1，且
+    18900 能被频点表全部 MULT 整除），`sim/README.md` 的「实测陷阱」有完整说明。
+  - **`run_handoff_tb.sh` 默认每次都用 sbtn 重新生成 RTL**（与 `run_xsim.sh` 一致），避免
+    源文件改过而 `build/chisel/` 还是旧产物；历史实现只在产物目录不存在时才生成，曾因此
+    拿旧 RTL 跑出误导结论。确认产物已最新时用 `--no-gen` 省时间。
 - **顶层 xsim 用例是寄存器堆通路的唯一守门人**：`test/` 下的 Verilator 单测直接驱动
   `Controller` / `SignalSource` 的端口，**不经过 AXI 从口与 `ControlRegs`**。本仓库实测过一次
   「寄存器堆往测量域的配置输出被 firtool 优化成常量 0」的缺陷（见 `dpm-chisel-rtl`），

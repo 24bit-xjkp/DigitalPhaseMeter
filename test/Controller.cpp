@@ -279,6 +279,14 @@ namespace
         };
         CAPTURE(theory_phase_cnt);
         CHECK_EQ(result.phase_cnt, phase_cnt_tolerance(theory_phase_cnt));
+
+        // 相位偏移恰好是整数个高速时钟周期时，每个参考周期的计数必然是同一个整数
+        // （检测沿在时间上相隔 x 个周期，`ceil(a + x) - ceil(a) == x`），因此 phaseCnt 与
+        // 理论值**逐位相等**。这条精确断言专门抓「每个周期固定少算/多算 1 个周期」这类
+        // 系统性偏差：上面的 ±1 周期容限恰好把它覆盖掉（本项目实际踩过一次——相位计数器
+        // 的清零信号少延迟一拍，所有读数系统性偏小 1 个 DSP 周期，单测全绿）。
+        const auto offset_cycle_round{static_cast<double>(::std::lround(offset_cycles))};
+        if(::std::abs(offset_cycles - offset_cycle_round) < 1e-9) { CHECK_EQ(result.phase_cnt, theory_phase_cnt); }
     }
 }  // namespace
 

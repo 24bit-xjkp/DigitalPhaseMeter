@@ -881,3 +881,60 @@ C 源码（`ps/**/*.c|h`）本轮只动了 §14.2 的两处宏/注释与测试�
 * **`wait_idle` 路径**（`SET_SIG` / `CLEAR`）用的是同一个宏，本轮只有 `GET_RESULT` 的端到端用例；
   `SET_SIG` 在长闸门 + busy 下的解卡时延没有单独用例；
 * **clang-format**：如 §14.4 所述，`ps/` 的 C 代码没有整体格式化。
+
+## 15. 2026-10-19 第六轮：450MHz 切换后 `sim/run_handoff_tb.sh` 失败的根因与修复
+
+**现象**：采样率从 400MHz 改到 450MHz 后，`sim/run_handoff_tb.sh` 的 80 个点里 159 条断言失败。
+典型输出：测量相位差比「直接量得的 MMCM 输出相位差」固定小约 1 个 DSP 周期；45/50MHz 的
+22.5° 点差到 3~4 个 DSP 周期；几乎每个点还伴随 `phaseCnt % edgeCnt != 0`。
+
+**根因（三处，前两处在 RTL，第三处在仿真时基）**
+
+1. **相位计数的清零少延迟一拍（RTL 缺陷）**：`PhaseMeter` 的置位用 `RegNext(...pulseSig1)`，
+   清零却直接用未延迟的 `pulseSig2`（`f6a4af6` 简化状态机时引入）。使能窗口因此比两个检测沿
+   的实际间隔少 1 个 DSP 周期，**全部相位读数系统性偏小 1 个量化步长**（约 2.22ns）。
+   Verilator 单测的 ±1 周期容限恰好覆盖这一格，所以 `xmake test` 全绿；联调激励把「测量 vs
+   直接量得的输出相位」分开判才暴露。修复：清零与置位用同一级延迟（恢复 `pulseSig2Valid`）。
+2. **置位/清零同拍时的优先级错误（RTL 缺陷）**：相位差小于 1 个 DSP 周期时（如 45MHz 的
+   22.5° = 0.625 个 DSP 周期），`sig1`/`sig2` 会被同一个 DSP 时钟采到，两个 valid 同拍为高。
+   原实现置位优先，清零被吞掉，使能一直保持到**下一个信号周期**的 `sig2` 沿，读数跳成整个
+   信号周期（45/50MHz 的 22.5° 点因此偏 3~4 个 DSP 周期）。修复：**清零优先**（两个边沿同拍只
+   可能来自同一参考周期内的 `sig1→sig2`，不会吞掉合法的置位）；同时给 `phaseCntEnable` 加
+   复位值，避免「清零优先」表达式在 xsim 里把 X 保持到第一次测量、污染 `DspCounter`。
+3. **仿真时基不是整数比（激励问题，不是设计缺陷）**：450MHz 的周期 `2222.22…ps` 在 1ps 时基
+   下只能取 2222ps，与 20000ps 主时钟不是严格 9:1；MMCM 行为模型的输出沿又按 1ps 取整
+   （6MHz/15MHz/30MHz 频点第二路输出的周期在 166650/166651ps 间抖），几百个参考沿累加后
+   `phaseCnt % edgeCnt` 必然非零。修复：把两个时钟按整数比缩放为 `T_MAIN=18900ps` /
+   `T_DSP=2100ps`（严格 9:1，且 18900 能被频点表全部 MULT `{12,15,18,20,21}` 整除），
+   所有 MMCM 输出周期与 `T_sig/T_DSP = 9D/M` 都严格为整数；绝对频率与标称值差约 5.8%，
+   但该激励只验证相位/频率的**比值语义**，判据不受影响。
+
+**同轮修掉的相邻问题**（都是 450MHz 重构遗留、会让回归入口失效）：
+
+- `sim/run_handoff_tb.sh` 只在 `build/chisel/<Name>/` 目录**不存在**时才生成 RTL，源文件改过
+  会拿旧产物跑出误导结论（本轮一开始就踩到）；改为与 `run_xsim.sh` 一致，默认每次重新生成。
+- `sim/tb_digital_phase_meter_top.sv` 仍用旧的顶层端口名 `sig1/sig2/srcSig1/srcSig2`，
+  `xelab` 直接报 `cannot find port`（顶层 xsim 守门人整个失效）；改为
+  `extSig_sig1/extSig_sig2/intSig_sig1/intSig_sig2`。
+- `test/Controller.cpp` 增加「整数个 DSP 周期偏移 → `phaseCnt` 逐位等于理论值」的精确断言，
+  专门钉住第 1 条这类「固定偏一格」的系统性偏差（原先的 ±1 宽容限抓不到）。
+
+**验证（本轮实测）**
+
+| 入口 | 命令 | 结果 |
+| --- | --- | --- |
+| xsim 联调（80 点） | `sim/run_handoff_tb.sh --clean` | **80/80 点通过**，`fails=0`，退出码 0，约 17s；日志留档 `spec/golden/handoff_meas.txt` |
+| Verilator 全量 | `xmake test -v` | 4 个目标 100%：EdgeDetector 13、ResetSynchronizer 17、MmcmDrpController 110、Controller **554** 条断言 |
+| xsim 顶层（AXI/寄存器） | `sim/run_xsim.sh --clean` | 出现 `==== 测试通过：DigitalPhaseMeterTop 寄存器数据通道 ====`，退出码 0 |
+| 格式化/静态检查 | `scalafmt --test`、`clang-format -i test/Controller.cpp`、`clang-tidy -p .vscode test/Controller.cpp` | 无差异、0 warning |
+
+**未验证 / 未做的部分**
+
+* **未重新上板**：RTL 改了 `PhaseMeter`，`package_ip.tcl` → `package_src_ip.tcl` → `create_bd.tcl` →
+  `build_bitstream.tcl` 的流水线与 `impl_multi.tcl` 都**没有重跑**；上板行为（尤其是 0° 的边界：
+  修复后两沿同拍量化为 0 个周期，判据按取模 360 与旧读数等价，见 `docs/onboard-ax7010.md` §5）
+  需要重烧 bitstream 后复验；
+* **时序**：相位计只改了寄存器连接（清零使能同延迟 + 优先级），没有重新综合实现，450MHz 的
+  WNS/WHS 需要重跑签核；
+* 45/50MHz 的 22.5° 这类「小于 1 个 DSP 周期」的相位，测量值只能量化到 0 或 1 个周期
+  （±1 周期容限内），本轮只证明它不再跳成整个信号周期，不证明更高精度。

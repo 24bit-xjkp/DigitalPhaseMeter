@@ -10,7 +10,7 @@ AXI4 接口与顶层 IP 的验证用 **Vivado 自带 xsim + SystemVerilog 测试
 | `tb_digital_phase_meter_top.sv`          | 顶层 IP 的测试激励：AXI4-Lite 主机 BFM、测量激励与结果寄存器校验（**理想信号源**驱动 `intSig_sig1/intSig_sig2`）                                                                 |
 | `run_xsim.sh`                            | 一键脚本：生成 RTL → `xvlog` 编译 → `xelab` 细化 → `xsim` 运行                                                                                                                   |
 | `tb_src_handoff.sv`                      | **片内源 ↔ 测量通路联调**：真实 `dpm_mmcm_src`（MMCME2_ADV）+ `MmcmDrpController` + `DigitalPhaseMeterTop`；激励按**完整地址**写 MMCM 寄存器镜像，并直接量两路输出的周期与相位差 |
-| `run_handoff_tb.sh`                      | 上面那份激励的运行脚本（默认 4 个代表点；xsim 跑 MMCM 行为模型一次锁定约 1~2ms 仿真时间）                                                                                        |
+| `run_handoff_tb.sh`                      | 上面那份激励的运行脚本（10 个频点 × 逐频点相位点 = 80 个点，约 17s；xsim 跑 MMCM 行为模型一次锁定约 1~2ms 仿真时间）                                                                                        |
 
 ## 运行
 
@@ -72,3 +72,12 @@ XILINX_VIVADO=/path/to/Vivado sim/run_xsim.sh    # 指定 Vivado 安装路径
   `Module ... doesn't have a timescale but at least one module in design has a timescale`。
 - **filelist.f 的路径**：`filelist.f` 里的文件名相对于生成目录，`xvlog -f` 按当前工作目录解析，
   脚本里先补成绝对路径再传给 `xvlog`。
+- **联调激励的仿真时基要选成与 MMCM 整数比**：`tb_src_handoff.sv` 取 `T_MAIN = 18900ps`、
+  `T_DSP = 2100ps`（严格 9:1，且 18900 能被频点表的全部 MULT `{12,15,18,20,21}` 整除）。
+  直接按标称 50MHz/450MHz 取 20000ps/2222ps 时，MMCM 行为模型的输出沿按 1ps 取整，
+  「信号周期 / DSP 周期」不是整数比，做几百个参考沿累加后 `phaseCnt % edgeCnt` 出现非零余数、
+  6MHz/15MHz 等频点的第 2 路输出周期还会在 166650/166651ps 之间抖——看起来像测量缺陷，
+  实际是仿真时基的近似。绝对频率偏离标称值不影响该激励的判据（只验证比值语义）。
+- **`run_handoff_tb.sh` 默认每次都重新生成 RTL**：与 `run_xsim.sh` 一致，避免
+  源文件改过而 `build/chisel/` 里还是旧产物（历史实现只在产物目录不存在时才生成，
+  曾用旧 RTL 跑出误导性结论）。只要现有 RTL 已是最新，可用 `--no-gen` 省时间。

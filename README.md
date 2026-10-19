@@ -28,7 +28,8 @@ MMCM 的 DRP 口），PC 侧是 Python 上位机（CLI + PySide6 GUI，相位差
 `phaseCnt` 的分辨率就是一个高速时钟周期，因此高速时钟频率越高、闸门时间越长，测量越精确。
 `phaseCnt / edgeCnt` 量的是从 `extSig_sig1` 上升到**下一个** `extSig_sig2` 上升沿的**无符号**间隔，因此
 `0°~360°` 的相位差都与读数一一对应（`>180°` 同样可测，不需要"小于半个周期"；只有按有符号
-偏移解释时才需要 `|δ| < 180°`，且 `0°` 会因"等下一个沿"读成一个整周期）。各观测量的容限与
+偏移解释时才需要 `|δ| < 180°`；`0°` 时两沿重合，读数按 1 个 DSP 周期的分辨率量化，判据按
+取模 360° 比较）。各观测量的容限与
 精度下界见 [`.agents/skills/dpm-measurement-model`](.agents/skills/dpm-measurement-model/SKILL.md)。
 
 ## 模块结构

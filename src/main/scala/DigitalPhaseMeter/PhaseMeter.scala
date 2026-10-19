@@ -67,12 +67,18 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
     }
 
     // 计数器控制脚全部寄存器化（450MHz 的关键路径）：
-    // clearCnt / pulseSig1Valid / phaseCntEnable 都是寄存器，DSP48 的 RSTP/CEP 因此由寄存器直接驱动。
-    // 两个使能同时延迟一拍 → 它们之间的相对时序不变，使能窗口长度也不变。
+    // clearCnt / pulseSig1Valid / pulseSig2Valid / phaseCntEnable 都是寄存器，DSP48 的 RSTP/CEP
+    // 因此由寄存器直接驱动。
+    //
+    // 置位与清零必须**用同一级延迟**（pulseSig1Valid / pulseSig2Valid）：相位计数的是
+    // 「sig1 检测沿 → sig2 检测沿」之间的高速时钟周期数，两个边沿脉冲经同样的边沿检测
+    // 流水线后相隔 K 拍，那么使能窗口也必须是 K 拍
     private val clearCnt = RegNext(stateReg === idle)
     private val pulseSig1Valid = RegNext(stateReg.isOneOf(waitStart, measuring) && pulseSig1)
-    private val phaseCntEnable = Reg(Bool())
-    when(pulseSig1Valid) { phaseCntEnable := true.B }.elsewhen(pulseSig2) { phaseCntEnable := false.B }
+    private val pulseSig2Valid = RegNext(pulseSig2)
+    // 无复位值在 xsim 里是 X，在第一次测量时经 `cnt + enable` 污染 DspCounter
+    private val phaseCntEnable = RegInit(false.B)
+    when(pulseSig2Valid) { phaseCntEnable := false.B }.elsewhen(pulseSig1Valid) { phaseCntEnable := true.B }
 
     io.response.bits.edgeCnt := DspCounter(edgeCntWidth, clearCnt, pulseSig1Valid, false)
     io.response.bits.phaseCnt := DspCounter(phaseCntWidth, clearCnt, phaseCntEnable, false)
