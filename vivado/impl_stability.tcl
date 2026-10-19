@@ -29,8 +29,8 @@ set script_dir [file dirname [file normalize [info script]]]
 set root_dir [file normalize [file join $script_dir ..]]
 set build_dir [file join $root_dir build vivado]
 set proj_dir [file join $build_dir bd_proj]
-set hook_bs [file normalize [file join $script_dir hook_write_bitstream.tcl]]
 set hook_filter [file normalize [file join $script_dir hook_filter_messages.tcl]]
+set hook_waivers [file normalize [file join $script_dir hook_methodology_waivers.tcl]]
 set dsp_clock_group "clk_out1_dpm_system_clk_wiz_0_0"
 
 set attempts 6
@@ -39,8 +39,18 @@ if {![string is integer -strict $attempts] || $attempts < 1} {
     error "attempts 必须是正整数（收到 '$attempts'）"
 }
 
+# 早期消息过滤必须先于 open_project 加载（Board 49-26 / Project 1-5713 在 open_project 内部打印）
+source [file join $script_dir suppress_early_messages.tcl]
+
 cd $build_dir
 open_project [file join $proj_dir dpm_bd.xpr]
+
+# 器件绑定校验（本仓库固定 xc7z010clg400-1）
+set expected_part "xc7z010clg400-1"
+if {[get_property part [current_project]] ne $expected_part} {
+    error "工程器件为 '[get_property part [current_project]]'，期望 '$expected_part'"
+}
+puts "PROJECT_PART: $expected_part"
 
 # 读工程当前策略，只打印不修改：本脚本的语义就是「按官方策略重复验证」。
 # 如果这里不是预期的那套策略，说明 build_bitstream.tcl 还没跑过或策略被别的脚本改过。
@@ -92,7 +102,7 @@ for {set i 1} {$i <= $attempts} {incr i} {
     # 每次独立实现：reset_run impl_1 会清掉步骤属性（含挂的 TCL.PRE hook），reset 后必须重挂。
     reset_run impl_1
     set_property STEPS.INIT_DESIGN.TCL.PRE $hook_filter [get_runs impl_1]
-    set_property STEPS.WRITE_BITSTREAM.TCL.PRE $hook_bs [get_runs impl_1]
+    set_property STEPS.ROUTE_DESIGN.TCL.PRE $hook_waivers [get_runs impl_1]
     launch_runs impl_1 -to_step write_bitstream -jobs 8
     wait_on_run impl_1
     if {[get_property PROGRESS [get_runs impl_1]] ne "100%"} {

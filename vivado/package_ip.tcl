@@ -60,6 +60,27 @@ file delete -force $proj_dir
 create_project -force dpm_ip_pack $proj_dir -part $part
 read_verilog -sv $sources
 
+# ---- 打包流程的提示级告警过滤（在本仓库无法/不值得修，逐条给出理由）----
+#   [IP_Flow 19-5101] 用 SystemVerilog 顶层打包「不完全支持」的提示：本 IP 就是 SV 产物，
+#                     ipx::check_integrity 通过、BD 可正常使用，属已知限制。
+#   [IP_Flow 19-11888] 组件 description 默认与 name 相同：打包器在 package_project 时就检查，
+#                     而真实描述只能在拿到 core 之后设置（下一行就设置了），这条是时序噪声。
+#   [IP_Flow 19-11770] 时钟接口还没有 FREQ_HZ：FREQ_HZ 在接口推断之后才补（见下方时钟接口段），
+#                     推断时会先报一次。
+#   [IP_Flow 19-2187] 没有 Product Guide 文件：IP 用法在本仓库 README/skill 中说明，
+#                     不额外维护 IP-XACT 的产品文档。
+#   注意：[IP_Flow 19-5661]（dspClock 没有关联总线）由 ipx::check_integrity 内部打印，而
+#   package_project 之后 ipx 会重置消息规则——挂在文件前部的同一规则不生效，必须放到
+#   check_integrity 调用之前（见文件末尾）。
+foreach id {
+    {IP_Flow 19-5101}
+    {IP_Flow 19-11888}
+    {IP_Flow 19-11770}
+    {IP_Flow 19-2187}
+} {
+    set_msg_config -id $id -suppress
+}
+
 # 只删自己这个 IP 的目录：ip_root 下还有 package_src_ip.tcl 打的 dpm_src_drp，
 # 整个 ip_root 删掉会让「先 package_ip、后 package_src_ip」的顺序变成隐式陷阱
 file delete -force [file join $ip_root $ip_name]
@@ -150,6 +171,10 @@ set_property access read-write $ab
 
 ipx::create_xgui_files $core
 ipx::update_checksums $core
+# [IP_Flow 19-5661]（dspClock 没有关联总线）由 check_integrity 内部打印；过滤必须挂在这里——
+# package_project 之后 ipx 会重置消息规则，挂在文件前部的同一规则不生效（实测）。dspClock 只
+# 驱动测量逻辑、不驱动 AXI 总线，该提示无害，check_integrity 仍会通过。
+set_msg_config -id "IP_Flow 19-5661" -suppress
 ipx::check_integrity $core
 ipx::save_core $core
 

@@ -21,8 +21,10 @@ block design（BD），完成综合、实现、bitstream 与 XSA 导出。工程
    `sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop"`、
    `sbtn -batch "runMain DigitalPhaseMeter.EmitMmcmDrpController"`。
 
-2. Vivado 在 PATH 中（本项目在 **Vivado 2025.2** 上验证）；默认器件 `xc7z010clg400-1`，写在
-   `package_ip.tcl` / `package_src_ip.tcl` / `create_bd.tcl` 顶部的 `part` 变量里，换器件时三处同步改。
+2. Vivado 在 PATH 中（本项目在 **Vivado 2025.2** 上验证）；**固定器件 `xc7z010clg400-1`**
+   （ALINX AX7010 的芯片），三个脚本顶部都写死同一个 `part`，`create_bd.tcl` 创建工程后与
+   `build_bitstream.tcl` 打开工程后都会回读校验，不一致直接报错退出。本仓库不再支持切换器件
+   （要换就三处一起改并重跑全流程）。
 3. `build/vivado/` 与 `build/chisel/` 下都是构建产物，不入库。
 
 ## 脚本与执行顺序
@@ -32,14 +34,16 @@ block design（BD），完成综合、实现、bitstream 与 XSA 导出。工程
 | `package_ip.tcl` | 读入生成的 RTL，打包成 `xjkp.org:dpm:dpm_top:1.0`；按端口名推断 AXI4-Lite 从口，补齐时钟/复位/中断接口与 4KB 地址块 | `build/vivado/ip/dpm_top/` |
 | `package_src_ip.tcl` | 把 `MmcmDrpController` 打包成 `xjkp.org:dpm:dpm_src_drp:1.0`（AXI4-Lite + DRP 口 + `locked`/`mmcm_reset`） | `build/vivado/ip/dpm_src_drp/` |
 | `create_bd.tcl` | 建 PS7 + AXI 互联 + 两个 IP + 两个 MMCM 的 BD；连接时钟/复位/中断/信号，分配地址，配置 PS 串口，`validate_bd_design` 后生成 wrapper | `build/vivado/bd_proj/` |
-| `build_bitstream.tcl` | 先写综合/实现策略（`synth_1` 与 IP 的 OOC run 两处），再综合、实现、导出 bitstream/XSA；`-strategy-only` 只写策略不跑 run | `dpm_system.xsa`、`timing_summary.rpt`、`utilization.rpt`、`drc.rpt` |
+| `build_bitstream.tcl` | 先写综合/实现策略（`synth_1` 与 IP 的 OOC run 两处），再综合、实现、导出 bitstream/XSA；`-strategy-only` 只写策略不跑 run | `dpm_system.xsa`、`timing_summary.rpt`、`utilization.rpt`、`drc.rpt`、`methodology.rpt`（从实现 run 复制） |
 | `impl_stability.tcl` | **签核用**：同一网表、不换策略重复 N 次独立实现，报 WNS/WHS 的最小/平均/最大值与失败次数 | `impl_stability_results.csv`、`stability_a<N>_timing.rpt` |
 | `impl_multi.tcl` | **调优用**：换 place/route directive 扫策略（会覆盖官方策略，不作签核依据） | `impl_multi_results.csv`、`multi_a<N>_timing.rpt` |
 | `query_runs.tcl` | 只读查询 `synth_1` / `impl_1` 的策略与全部 `STEPS.*` 参数 | 终端输出 |
-| `constraints/dpm_top.xdc` | 顶层约束：被测信号、片内源时钟、跨域握手、板级引脚 | 源文件 |
-| `hook_write_bitstream.tcl` | `write_bitstream` 的 pre-hook：把引脚未约束的两条 DRC 降级为警告（本仓库工程不绑 board part，默认保留） | 源文件 |
+| `constraints/dpm_top.xdc` | 顶层约束：被测信号、片内源时钟、跨域握手、MMCM 启动移位寄存器、板级引脚 | 源文件 |
 | `hook_filter_messages.tcl` | 综合（`SYNTH_DESIGN`）与实现（`INIT_DESIGN`）的 pre-hook：屏蔽厂商 IP 固有告警 | 源文件 |
-| `build.sh` | 依次执行前四个脚本的一键封装 | — |
+| `hook_methodology_waivers.tcl` | 实现 `ROUTE_DESIGN` 的 pre-hook：创建 TIMING-28/47 的 methodology waiver（每条写明理由的已知例外） | 源文件 |
+| `hook_filter_vendor_ip.tcl` | 厂商 IP 的 OOC 综合 run 的 pre-hook：屏蔽厂商生成 RTL 固有的 `Netlist 29-345`（只挂厂商 run，自研 IP 的不挂） | 源文件 |
+| `suppress_early_messages.tcl` | `open_project` **之前**加载的早期过滤（Board 49-26 / Project 1-5713 等工程/环境级告警） | 源文件 |
+| `build.sh` | 依次执行前四个脚本的一键封装（`set -e`，任一步失败即退出） | — |
 
 ```bash
 vivado -mode batch -source vivado/package_ip.tcl         # 顶层测量 IP
@@ -72,6 +76,13 @@ vivado -mode batch -source vivado/query_runs.tcl         # 查看当前 run 参�
   `MMCM_CLKFBOUT_MULT_F=20.250`、`MMCM_DIVCLK_DIVIDE=1`、`MMCM_CLKOUT0_DIVIDE_F=2.250`
   → VCO 1012.5MHz、输出 450MHz（450 = 50 × 9，不是整数倍频）；`clk_out1` 直接接
   `dpm_top_0/dspClock`。
+- **`PRIM_SOURCE` 必须是 `No_buffer`**：`clk_in1` 由 fabric 上的 FCLK_CLK0 驱动（不是器件引脚）。
+  用默认的 `Single_ended_clock_capable_pin` 时，Wizard 生成的 XDC 会在内部 pin
+  `clk_wiz_0/inst/clk_in1` 上再 `create_clock` 一次——而该网络已由 PS7 的 XDC 定义主时钟
+  `clk_fpga_0`，实现的方法学检查会报 `TIMING-4`/`TIMING-27` 两条 Critical Warning（主时钟在层次
+  pin 上重复定义、覆盖 insertion delay）。改成 `No_buffer` 后 Wizard 不再生成这条 `create_clock`
+  （模板中对应行被注释掉），DSP 时钟正确派生在 `clk_fpga_0` 的时钟树下。`create_bd.tcl` 对
+  `PRIM_SOURCE` 做回读校验。
 - **MMCM 锁定前不放时钟用 clk_wiz 自带的 Safe Clock Startup**（`USE_SAFE_CLOCK_STARTUP=true`）：
   Wizard 把 `CLKOUT1_DRIVES` 限定成 `BUFGCE`，`CE` 由同一 MMCM 输出经 `BUFH` 打拍的 8 bit 移位
   寄存器连续采到 8 拍 `locked` 后拉高，无毛刺放行。不要用「与门 + 组合逻辑」门控时钟（UG949 点名
@@ -105,7 +116,13 @@ vivado -mode batch -source vivado/query_runs.tcl         # 查看当前 run 参�
   统计 `STRATEGY_CHANGED`，非 0 时打印 `STRATEGY_FORCE_RERUN` 并强制重跑。
 - **`reset_run` 会清掉步骤属性（含 hook）**：顺序必须是「先决策 → 全部 `reset_run` → 再统一挂
   hook」，见 `build_bitstream.tcl` 的 `apply_run_hooks`；同时要 reset IP 的 OOC run（它不是
-  `synth_1` 的子步骤）。
+  `synth_1` 的子步骤），**厂商 IP 的 OOC run 也要 reset**——否则它的 run 脚本还停在
+  `launch_runs -scripts_only` 物化时生成的版本，后挂的 `TCL.PRE` 不会生效（实测 `clk_wiz` 的
+  厂商过滤就这样漏过一次）。
+- **hook 变化也会强制重跑**：脚本用 `count_hook_diffs` 在 reset 前统计步骤属性差异，hook 与目标
+  不一致时按「策略变化」处理。`apply_run_hooks` 之后**不要**再调 `launch_runs synth_1 -scripts_only`
+  （会把 run 置成需要 reset 的状态，紧接着的正式 launch 报 `[Common 17-69]`）；已 reset 的 run
+  在正式 `launch_runs synth_1` 时会自动重新生成脚本。
 - **不要覆盖 `Performance_Retiming` 自带的步骤 directive**：该策略的收益来自 phys_opt 那一步。
 - **同一工程不能并发开两个 Vivado**：`launch_runs` 会按当前工程重写 run 脚本，后启动的进程会覆盖
   先生效的策略；跑完用 `runme.log` 的 `Command:` 行核对实际 directive。
@@ -122,17 +139,17 @@ place/route 有 run-to-run 差异，**单次通过不算签核**；反过来，�
 收敛是确定性的。用 `set_clock_uncertainty` 过约束只能用来逼工具，签核要清掉后重新出报告（本设计
 不使用过约束）。
 
-2026-10-19 的签核结果（Design State: Routed，`xc7z010clg400-1`）：
+2026-10-19 的签核结果（Design State: Routed，`xc7z010clg400-1`；clk_wiz 改为 `No_buffer` 后重跑）：
 
 | 项 | 结果 |
 | -- | ---- |
-| 全设计时序 | **WNS +0.291ns / WHS +0.052ns / WPWS +0.067ns**，TNS = THS = 0，**0 个失败端点** |
-| DSP 域（`clk_out1_dpm_system_clk_wiz_0_0`，2.222ns） | WNS +0.291ns / WHS +0.122ns / WPWS +0.067ns，0 个失败端点 |
-| 整体 WNS 的限制者 | clk_wiz Safe Clock Startup 内部路径 `seq_reg1[7] → clkout1_buf/CE0`（数据 0.837ns，其中布线 0.418ns）；**测量域自身最差路径余量 +0.583ns**（`dspReset` → `phaseCntEnable`），其后是 DSP 累加器的 CEP/RSTP 控制路径（+0.616 / +0.669 / +0.733ns） |
-| 稳定性 | `impl_stability.tcl 6`：**6/6 PASS**，6 次数值完全相同（WNS/WHS/DSP WNS/DSP WHS = +0.291 / +0.052 / +0.291 / +0.122） |
-| 其它时钟组 | 慢域（`clk_fpga_0`）WNS +11.470ns / WHS +0.052ns；跨域（`set_max_delay 20ns`）dsp→slow +18.209ns、slow→dsp +16.992ns |
-| 资源 | Slice LUT 893（5.07%）、Slice Register 1458（4.14%）、DSP 2（2.50%）、Block RAM 0、BUFGCTRL 6（18.75%）、MMCME2_ADV 2（100%） |
-| 日志 | 综合 `0 Warnings / 0 Critical Warnings / 0 Errors`，实现同样为 0（`synth_1` / `impl_1` 的 `runme.log`；IP 的 OOC 综合 run 另有 1 条良性 `[Synth 8-3936]`——AXI 32 位地址寄存器只用到低 6 位被 trim） |
+| 全设计时序 | **WNS +0.271ns / WHS +0.026ns / WPWS +0.067ns**，TNS = THS = 0，**0 个失败端点** |
+| DSP 域（`clk_out1_dpm_system_clk_wiz_0_0`，2.222ns） | WNS +0.271ns / WHS +0.121ns / WPWS +0.067ns，0 个失败端点 |
+| 整体 WNS 的限制者 | 仍是 clk_wiz Safe Clock Startup 内部路径 `seq_reg1[7] → clkout1_buf/CE0`（+0.271）；**测量域自身最差 setup 路径余量 +0.541ns**（`stateReg[0] → sig_reg`），DSP 域 hold 最差 +0.121ns（`responseReady` 边沿同步链） |
+| 稳定性 | `impl_stability.tcl 6`：**6/6 PASS**，6 次数值完全相同（WNS/WHS/DSP WNS/DSP WHS = +0.271 / +0.026 / +0.271 / +0.121） |
+| 其它时钟组 | 慢域（`clk_fpga_0`）WNS +11.898ns / WHS +0.026ns；跨域（`set_max_delay 20ns`）dsp→slow +18.172ns、slow→dsp +17.367ns |
+| 资源 | Slice LUT 892（5.07%）、Slice Register 1460（4.15%）、DSP 2（2.50%）、Block RAM 0、BUFGCTRL 6（18.75%）、MMCME2_ADV 2（100%） |
+| 日志 | IP 打包 / BD / 综合/实现主 run 与 8 个 IP OOC run **全部 0 Warnings / 0 Critical Warnings / 0 Errors**；实现 methodology 报告 `Checks found: 0 / Checks waived: 13`，**无 Critical Warning** |
 | 产物 | `write_bitstream` 成功，`build/vivado/dpm_system.xsa`（含 bitstream） |
 
 `xc7z010` 的 DSP48E1 全寄存器 FMAX 为 464.25MHz（DS187），450MHz 用掉约 97%；Vivado 时序分析
@@ -232,20 +249,27 @@ void dpm_irq_handler(void)
 
 ## 顶层约束（XDC）要点
 
-`constraints/dpm_top.xdc` 补充下面几类约束（时钟拓扑本身由 PS7 / clk_wiz 自带 XDC 建立）：
+`constraints/dpm_top.xdc` 补充下面几类约束（时钟拓扑本身由 PS7 / clk_wiz 自带 XDC 建立；
+`clk_wiz` 用 `No_buffer` 后 DSP 时钟派生在 `clk_fpga_0` 树下）：
 
 1. **外部被测信号** `extSig_sig1/2`：异步输入，`set_false_path`（IP 内立即进 3 级 `ASYNC_REG`
    同步链，不需要建立/保持关系）。
 2. **片内源两路 MMCM 输出**：名字在网表里叫 `clkout0_raw` / `clkout1_raw`，对 DSP 域
    `set_false_path`；`locked` 是准静态电平，用 `set_max_delay -datapath_only 20ns` 进慢域。
 3. **慢↔快握手通路**：两个方向都写 `set_max_delay -datapath_only 20ns`。clk_wiz 为对齐相位把
-   CLKOUT0 设成 `-T_dsp`，工具按逐沿跨时钟只留约 2.1ns（比真实布线还紧）；真实需求是「一个慢
+   CLKOUT0 设成 `-T_dsp`；按逐沿跨时钟检查只留约 2.1ns（比真实布线还紧）。真实需求是「一个慢
    时钟周期内到达」（翻转电平 + 同步链），用有界 max_delay 表达。只写一个方向会让另一个方向
-   变成新的最差路径。
-4. **板级引脚**：`extSig_sig1 → W18`、`extSig_sig2 → W19`，LVCMOS33（bank 34 的差分对 L22 当
+   变成新的最差路径。`No_buffer` 之后 DSP 时钟与 `clk_fpga_0` 在工具眼里是同步时钟对，这四组
+   max_delay 会命中 `TIMING-47` 告警——属设计意图，由 `hook_methodology_waivers.tcl` 显式 waiver。
+4. **片内源 MMCM 的 Safe Clock Startup 移位寄存器**：`dpm_mmcm_src.v` 的 `seq_reg1/2` 时钟来自
+   MMCM 输出（经 BUFH），异步清零与 `locked` 输入都是准静态控制信号，用
+   `set_false_path -to *dpm_mmcm_src_0/inst/seq_reg*`（与 clk_wiz 自带 XDC 的同类约束一致），
+   不做逐沿检查。
+5. **板级引脚**：`extSig_sig1 → W18`、`extSig_sig2 → W19`，LVCMOS33（bank 34 的差分对 L22 当
    两路独立单端输入，VCCO 需 3.3V）。换板卡时按实际引脚与供电改这两行。
-5. **命名兼容**：取时钟一律用通配（如 `clkout*_raw`、`*clk_out1_dpm_system_clk_wiz_0_0*`），
-   换实现方式后约束能自动跟上。
+6. **命名兼容**：取时钟一律用通配（如 `clkout*_raw`、`*clk_out1_dpm_system_clk_wiz_0_0*`），
+   换实现方式后约束能自动跟上。这样写会命中 `TIMING-28`（按名字引用 auto-derived 时钟）的
+   Warning，同样是刻意的取舍，由 `hook_methodology_waivers.tcl` waiver 并在报告中保留计数。
 
 **写法要求：xdc 不是完整 tcl**，不支持 `foreach` / `if` 等流程控制（`[Designutils 20-1307]`）。
 同一个 xdc 会被评估两次：综合启动时（BD 还是黑盒、时钟都不存在）与实现读网表时。因此取对象一律
@@ -255,35 +279,69 @@ void dpm_irq_handler(void)
 
 ## 综合 / 实现告警清理
 
-目标（`synth_1` / `impl_1` 主 run）：综合与实现各步骤日志 `0 Warnings / 0 Critical Warnings / 0 Errors`。分两类处理：
+目标：整个脚本流程（IP 打包 → BD → 综合 → 实现）日志 **0 Warnings / 0 Critical Warnings / 0 Errors**。
+分三类处理：
 
-1. **根因在本仓库的改设计**：顶层 xdc 里失效的硬取时钟名 → 改成「通配 + `-quiet`」；`clk_wiz_0`
-   的 `USE_LOCKED` 改 `false`（端口无消费者）。IP 属性写错会**静默失效**，所以 `create_bd.tcl`
-   回读校验并在不生效时 `error` 退出。
-2. **厂商 IP 固有、改不动的显式屏蔽**：写进 [`hook_filter_messages.tcl`](hook_filter_messages.tcl)
-   （每条注明理由），挂在 `STEPS.SYNTH_DESIGN.TCL.PRE`（综合）与 `STEPS.INIT_DESIGN.TCL.PRE`
-   （实现读网表）：
-   - `[Synth 8-7129]` × 100：`xlconcat` 的 128 个 `In*` 端口是 IP 内部 HDL 写死的，本设计只用 `In0`；
-   - `[Synth 8-7071]` / `[Synth 8-7023]`：PS7 未使能的 DDR/MIO 端口、`proc_sys_reset` 无消费者的输出；
-   - `[Synth 8-4446]`：顶层 wrapper 无输出引脚（对外通路全在 PS 侧）；
-   - `[Opt 31-32]`：clk_wiz 的参考时钟来自 fabric，内部 IBUFG 被优化；
-   - `[Netlist 29-160]`（CRITICAL）× ~100：PS7 自带 xdc 给不存在的 MIO/DDR 引脚设属性。
+### 1) 根因在本仓库的 → 改设计
 
-屏蔽只针对厂商 IP、不屏蔽自研 IP；`validate_bd_design` 与 xsim 顶层用例仍是接口漏连的守门人。
+- `clk_wiz_0` 的 `PRIM_SOURCE` 由默认的引脚类型改成 `No_buffer`：消除 `TIMING-4`/`TIMING-27`
+  两条 **Critical Warning**（内部 pin 上重复定义主时钟），DSP 时钟树回到 `clk_fpga_0` 下。
+- `vivado/rtl/dpm_mmcm_src.v`：`BUFGCE` 显式写 `SIM_DEVICE("7SERIES")`（消 `Netlist 29-345`）；
+  `reset | drpReset` 先在 DCLK 域同步两拍再驱动 MMCM.RST 与启动移位寄存器 CLR（消 `LUTAR-1`）。
+- `Axi4LiteSlave` 内部只锁存实际使用的地址/数据位（`addrUsedWidth`/`dataUsedWidth`），高位在
+  payload 上零扩展：消掉**自研 IP** OOC 综合的 `Synth 8-3936`×4（dpm_top 的 awAddr 32→6、dpm_src_drp 的
+  awAddr 32→12 / wData 32→16 / wStrb 4→2；厂商 IP 内部仍有 3 条 INFO 级同名提示，不是告警）。
+- `clk_wiz_0` 的 `USE_LOCKED=false`（端口无消费者的既有修复）。
+- IP/run 属性写错会**静默失效**，因此 `create_bd.tcl` 对 `part` / `PRIM_SOURCE` / `USE_LOCKED`
+  回读校验，不生效直接 `error`。
 
-hook 必须 `add_files -fileset utils_1` 登记（否则报 `[Runs 36-537]`），且要在所有 `reset_run`
-之后挂（`reset_run` 会恢复步骤属性）。`write_bitstream` 的 DRC 降级挂在
-`STEPS.WRITE_BITSTREAM.TCL.PRE`（run 在独立进程中做 DRC，主进程里设 SEVERITY 不生效）。
+### 2) 厂商 IP 固有、改不动的 → 显式屏蔽（每条在文件里写明理由）
 
-仍在日志里的：`open_project` 内部的 96 条 `[Board 49-26]`（未安装 board 的扫描提示）早于脚本
-任何语句，`set_msg_config` 拦不到，只能接受（绑定 board part 的工程不会出现）；IP 打包阶段的
-`[IP_Flow 19-*]` 是提示级，不影响接口推断与地址块，`ipx::check_integrity` 通过即正常。
+| hook 文件 | 挂载位置 | 屏蔽内容 |
+| --- | --- | --- |
+| `hook_filter_messages.tcl` | `synth_1/SYNTH_DESIGN`、`impl_1/INIT_DESIGN` | `Synth 8-7129`×100（xlconcat 写死的 In*）、`8-7071`/`8-7023`（PS7/proc_sys_reset 未用端口）、`8-4446`、`Opt 31-32`、`Netlist 29-160`(CRITICAL)×~100（PS7 xdc 给未使能引脚设属性） |
+| `hook_filter_vendor_ip.tcl` | **厂商 IP 的 OOC 综合 run**（名称排除 dpm_top / dpm_src_drp / dpm_mmcm_src） | `Netlist 29-345`（clk_wiz 生成的 BUFGCE 未覆盖 Vivado 2025.2 的默认 `SIM_DEVICE`） |
+| `suppress_early_messages.tcl` | 各脚本 `open_project` **之前** source | `Board 49-26`×96、`Project 1-5713`、`Vivado 12-7122`、`Constraints 18-550`、`IP_Flow 19-3664`（OOC run reset 后的中间状态） |
+
+早期过滤**必须在 `open_project` 之前**加载才有效（Board 49-26 等在 `open_project` 内部打印，放到它之后加载就来不及）。IP 的 OOC run 是独立进程、不继承 `synth_1` 的 `TCL.PRE`，必须
+单独挂；且只有 reset 过的 run 才会在 `launch_runs` 时重新生成脚本、带上后挂的 hook（否则脚本
+停在「物化」时生成的版本，实测 `clk_wiz` 的厂商过滤就这样漏过一次）。
+
+### 3) 报告层的刻意例外 → methodology waiver
+
+实现 `route_design` 步骤末尾会自动跑 `report_methodology`。以下两类是设计上刻意保留、改约束反而
+更危险/更不语义化的告警，由 `hook_methodology_waivers.tcl`（挂 `impl_1/ROUTE_DESIGN.TCL.PRE`）
+创建 waiver；实现 run 的 `*_methodology_drc_routed.rpt`（并复制为 `build/vivado/methodology.rpt`）显示 **Checks found: 0 / Checks waived: 13**，不再出现 Critical：
+
+- `TIMING-28`×7：顶层 xdc 用「通配时钟名 + `-quiet`」引用 auto-derived 时钟。这是为了让同一份
+  XDC 同时适配「综合黑盒阶段」与「实现阶段」并兼容 IP 改名；改成 `get_pins -of_objects` 会把
+  约束绑定到更深的层次名、失效风险更大。
+- `TIMING-47`×6：片内源 MMCM 运行期由 DRP 改相位/分频，与 `clk_fpga_0` 没有固定同步沿关系；
+  慢↔DSP 握手与 `locked` 都用有界 `set_max_delay -datapath_only 20ns`（保留布线延迟检查），
+  工具按「同步时钟对」方式提示，属预期。
+
+waiver 是**报告条目**不是 message：`set_msg_config`/hook 屏蔽不了，必须在 run 进程里、
+`report_methodology` 之前创建；`reset_run` 会清掉，所以 `impl_stability.tcl` / `impl_multi.tcl`
+每轮 reset 之后都会重挂。`build_bitstream.tcl` 在实现完成后解析该 run 的 methodology 报告，
+若仍有未 waive 的 Critical Warning 会直接 `error`（签核门禁）。
+
+### 关于 `[IP_Flow 19-5661]`
+
+`package_ip.tcl` 里 `ipx::check_integrity` 会打印 `[IP_Flow 19-5661]`（`dspClock` 没有关联 bus
+interface）。该提示的过滤规则**必须挂在 `check_integrity` 调用之前**：`ipx::package_project`
+之后 ipx 会重置消息规则，挂在文件前部的同一规则不生效（实测）。`dpm_top` 的 `dspClock` 只驱动
+测量逻辑、不驱动 AXI 总线，提示本身无害，`check_integrity` 通过。
+
+> GUI 里手工打开工程仍会看到 96 条 `[Board 49-26]`（早期过滤只在脚本流程里生效）。另外同一工作
+> 目录下连续跑多个 Vivado 脚本会互相覆盖默认的 `vivado.log`，排障时用 `-log <文件>` 区分
+> （注意 `-log` / `-journal` 必须放在 `-tclargs` 之前）。
 
 ## 已知限制与注意事项
 
-- **脚本工程不绑定 board part**（引脚全部由顶层 xdc 直接给出，不依赖板级文件）：`hook_write_bitstream.tcl`
-  因此把 `NSTD-1`（IO 标准未指定）/ `UCIO-1`（引脚未约束）两条 DRC 降级为警告；换用其它板卡时按
-  实际补板级约束，并删掉该 hook 与 `build_bitstream.tcl` 里的挂载。
+- **工程只绑定器件、不绑定 board part**：固定 `xc7z010clg400-1`（AX7010），Vivado 里没有该板的
+  board 文件；board-store 的 `Board 49-26` 噪声由 `suppress_early_messages.tcl` 在脚本流程里过滤。
+  引脚全部由顶层 xdc 给出（`extSig_sig1/2 = W18/W19, LVCMOS33`），不依赖板级文件。
+  `write_bitstream` 的 DRC 实测 0 违例，不需要把 `NSTD-1`/`UCIO-1` 降级为警告。
 - `extSig_sig1/2` 的引脚在顶层 xdc 里写死为 W18/W19、LVCMOS33；换板按实际引脚与 bank 供电改。
 - 测量结果只有一份（`resultDepth = 1`）：新结果会覆盖未读走的旧结果并累加 `LOST_COUNT`；用
   `RESULT_SEQ` 跳变或 `LOST_COUNT` 判断漏读，`CTRL.clear` 是复位结果与标志的正确方式。

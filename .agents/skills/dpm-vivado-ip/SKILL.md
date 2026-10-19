@@ -186,10 +186,18 @@ PHASE_MUX  = m & 0x7       # 相位码的小数部分（1/8 VCO 周期）
 目标频率由 `create_bd.tcl` 的第一个参数给出，**默认 450MHz**（450 = 50 × 9，clk_wiz 选小数倍频：
 `MMCM_CLKFBOUT_MULT_F=20.250`、`MMCM_DIVCLK_DIVIDE=1`、`MMCM_CLKOUT0_DIVIDE_F=2.250` →
 VCO 1012.5MHz、输出 450MHz）。当前签核结果（xc7z010clg400-1、Vivado 2025.2）：
-**全设计 WNS +0.291ns / WHS +0.052ns / WPWS +0.067ns、0 失败端点**；同一份网表用
-`impl_stability.tcl` 做 6 次独立实现，结果完全一致。整体 WNS 由 **clk_wiz 的 Safe Clock Startup
-内部路径**（`seq_reg1[7] → BUFGCE CE0`）决定，测量域自身最差路径余量 ≥ **+0.583ns**。
+**全设计 WNS +0.271ns / WHS +0.026ns / WPWS +0.067ns、0 失败端点**；同一份网表用
+`impl_stability.tcl` 做 6 次独立实现，结果完全一致（6/6 PASS）。整体 WNS 仍由 **clk_wiz 的
+Safe Clock Startup 内部路径**（`seq_reg1[7] → BUFGCE CE0`）决定；测量域自身最差 setup 路径
+余量 +0.541ns，DSP 域 hold 最差 +0.121ns。
 频率参数同时是 IP 侧 `dspClock` 的 `FREQ_HZ` 声明值来源（`package_ip.tcl` 里写死为 450MHz，改频率时同步改）。
+
+**`CONFIG.PRIM_SOURCE` 必须是 `No_buffer`**（输入时钟来自 fabric 上的 FCLK_CLK0，不是器件引脚）。
+用默认的 `Single_ended_clock_capable_pin` 会让 Wizard 生成的 XDC 在内部 pin
+`dpm_system_i/clk_wiz_0/inst/clk_in1` 上再 `create_clock` 一次，而该网络已由 PS7 的 XDC 定义主时钟
+`clk_fpga_0` → 实现方法学检查报 **`TIMING-4`/`TIMING-27` 两条 Critical Warning**（主时钟在层次 pin
+上重复定义、覆盖 insertion delay），且 DSP 时钟在报告里会挂在 `clk_in1` 而不是 `clk_fpga_0` 下。
+`No_buffer` 下 Wizard 的 xdc 模板会注释掉那条 create_clock。该属性写错是静默失效的，必须回读校验。
 
 要真正收敛，需要「时钟路径 + 约束 + 运行策略 + RTL」四件事配套：
 
@@ -205,7 +213,9 @@ VCO 1012.5MHz、输出 450MHz）。当前签核结果（xc7z010clg400-1、Vivado
 3. **跨时钟域握手通路要用有界的 max_delay**：clk_wiz 的相位补偿会让「慢域 → DSP 域」的逐沿
    跨时钟检查只剩约 2.1ns，450MHz 下必然违例。真实需求是「一个慢时钟周期内到达」（翻转电平 +
    3 级 ASYNC_REG 同步链），用 `set_max_delay -datapath_only` 表达，上限取一个慢时钟周期（20ns）。
-   **两个方向都要写**：只写一个方向会让另一个方向变成新的最差路径。
+   **两个方向都要写**：只写一个方向会让另一个方向变成新的最差路径。`PRIM_SOURCE=No_buffer` 之后
+   DSP 时钟与 `clk_fpga_0` 在工具眼里是同步时钟对，这些 max_delay 会命中 `TIMING-47` 告警
+   （设计意图，用 methodology waiver 声明，见「告警清理」）。
 4. **运行策略（`build_bitstream.tcl` 内联）必须同时写到 BD 里自定义 IP 的 OOC 综合 run 上**：
    - 综合（`synth_1` 与 `dpm_system_dpm_top_0_0_synth_1` 两处都写）：
      `DIRECTIVE=PerformanceOptimized`、`GLOBAL_RETIMING=off`、`MAX_DSP=2`。
@@ -218,8 +228,13 @@ VCO 1012.5MHz、输出 450MHz）。当前签核结果（xc7z010clg400-1、Vivado
      但**给 run 换 strategy 会把步骤参数重置回该 strategy 的预设**。
    - **写 run 属性之前先比较当前值**：把属性写成「相同的值」也会让已完成的 run 变成过期状态，
      下一次 `build_bitstream.tcl` 无法复用网表。脚本因此用「值不同才写」。
-   - 综合策略变化后不仅要 reset `synth_1` / `impl_1`，**还要 reset 自定义 IP 的 OOC run**
-     （它不是 `synth_1` 的子步骤）。
+   - 综合策略变化后不仅要 reset `synth_1` / `impl_1`，**还要 reset 全部 `*_synth_1` 的 IP/模块
+     OOC run**（它们不是 `synth_1` 的子步骤）。厂商 run 不 reset 就不会重新生成 run 脚本，后挂
+     的 `TCL.PRE` 不生效（实测 clk_wiz 的 `Netlist 29-345` 过滤就这样漏过一次）。hook 变化同样
+     应触发重跑：脚本用 `count_hook_diffs` 在 reset **之前**比较步骤属性差异。
+   - **`apply_run_hooks` 之后不要再调 `launch_runs synth_1 -scripts_only`**：它会把 run 置成需要
+     reset 的状态，紧接着的正式 `launch_runs` 报 `[Common 17-69]`；已 reset 的 run 在正式 launch
+     时会自动重新生成脚本。
    - **新建 BD 工程刚 open 时，IP 的 OOC 综合 run 还不存在**：先 `launch_runs synth_1 -scripts_only`
      把 IP run 物化出来再写参数；BD 管理的 IP 不能用 `create_ip_run`
      （报 `[Vivado 12-3424]`）。
@@ -241,7 +256,9 @@ VCO 1012.5MHz、输出 450MHz）。当前签核结果（xc7z010clg400-1、Vivado
 
 `build_bitstream.tcl` 一次（写策略 → 综合/实现/bitstream/XSA）+ `impl_stability.tcl 6` 同策略 6 次
 独立实现；`impl_multi.tcl` 只用于换 directive 调优，不用于签核（它会覆盖官方策略）。
-报告里写清 N、最小/最大余量与失败端点数。
+报告里写清 N、最小/最大余量与失败端点数。`build_bitstream.tcl` 在实现完成后会解析 run 的
+methodology 报告：有未 waive 的 Critical Warning 直接 `error`；同时打印
+`METHODOLOGY_CHECKS_FOUND / CHECKS_WAIVED` 与 `TIMING_BEGIN/END` 的 WNS/WHS。
 
 ## XDC 约束文件的写法（xdc 不是完整的 tcl）
 
@@ -264,33 +281,61 @@ VCO 1012.5MHz、输出 450MHz）。当前签核结果（xc7z010clg400-1、Vivado
 
 ## 综合 / 实现日志的告警清理
 
-目标：run 日志末尾打印 `N Infos, 0 Warnings, 0 Critical Warnings and 0 Errors encountered.`
-分两类处理：
+目标：整条脚本流程（打包 → BD → 综合 → 实现）日志 **0 Warnings / 0 Critical Warnings / 0 Errors**。
+分三类：
 
-1. **根因在本仓库的，改设计**：顶层 xdc 里失效的旧时钟名与硬取对象 → 改成「通配 + `-quiet`」；
-   BD 里没用到的 IP 输出端口 → 关掉对应 `CONFIG`（如 `clk_wiz_0` 的 `USE_LOCKED {false}`）。
-   IP 属性写错值是静默失效的，所以要在 `create_bd.tcl` 里回读校验并 `error` 退出。
-2. **厂商 IP 固有、改不动的，显式屏蔽**：写进 `vivado/hook_filter_messages.tcl`，用
-   `set_msg_config -id "<ID>" -suppress`，每条写明理由。典型：`[Synth 8-7129]`（`xlconcat` 的
-   `In*` 端口是 IP 内部 HDL 写死的，本设计只用 `In0`）；`[Netlist 29-160]`（PS7 自带 xdc 给未使能的
-   MIO/DDR 引脚设属性，没有 board part 时必然出现）。**只屏蔽厂商 IP 的、不屏蔽自研 IP 的**，
-   并保留 `validate_bd_design` 与 xsim 顶层用例作为接口漏连的守门人。
+1. **根因在本仓库的，改设计**：
+   - `clk_wiz` 的 `PRIM_SOURCE` 改 `No_buffer`（消 `TIMING-4`/`TIMING-27` 两条 Critical）；
+   - `vivado/rtl/dpm_mmcm_src.v`：`BUFGCE` 显式 `SIM_DEVICE("7SERIES")`（消 `Netlist 29-345`）；
+     `reset | drpReset` 在 DCLK 域同步两拍后再驱动 MMCM.RST 与启动移位寄存器 CLR（消 `LUTAR-1`）；
+   - `Axi4LiteSlave` 只锁存实际使用的地址/数据位（`addrUsedWidth`/`dataUsedWidth`，高位在 payload
+     零扩展），消**自研 IP** OOC 综合的 `Synth 8-3936`（awAddr 32→6 / 32→12、wData 32→16、
+     wStrb 4→2；厂商 IP run 内部另有 INFO 级同名提示，不是告警）；
+   - `clk_wiz` 的 `USE_LOCKED=false`（端口无消费者）。
+   - IP/run 属性写错静默失效 → `create_bd.tcl` / `build_bitstream.tcl` 回读校验 `part`、
+     `PRIM_SOURCE`、`USE_LOCKED`，不匹配直接 `error`。
+2. **厂商 IP 固有、改不动的，显式屏蔽**（每条在文件内写明理由，**只屏蔽厂商的、不屏蔽自研的**）：
+   - `hook_filter_messages.tcl` → `synth_1/SYNTH_DESIGN`、`impl_1/INIT_DESIGN`：`Synth 8-7129`
+     （xlconcat 的 In* 写死在 IP 里）、`8-7071`/`8-7023`、`8-4446`、`Opt 31-32`、
+     `Netlist 29-160`(CRITICAL)（PS7 自带 xdc 给未使能 MIO/DDR 引脚设属性）；
+   - `hook_filter_vendor_ip.tcl` → **厂商 IP 的 OOC 综合 run**：`Netlist 29-345`（厂商生成的 BUFGCE
+     未覆盖 2025.2 unisim 默认 `SIM_DEVICE="ULTRASCALE"`）。IP run 是独立进程、不继承 `synth_1`
+     的 TCL.PRE，必须单独挂；
+   - `suppress_early_messages.tcl` → 各脚本 `open_project` **之前** source：`Board 49-26`（×96，
+     未安装 board/不绑 board part）、`Project 1-5713`、`Vivado 12-7122`、`Constraints 18-550`、
+     `IP_Flow 19-3664`（reset OOC run 后 .gen 产物暂时不存在的中间态）。
+     **早期过滤必须先于 `open_project` 加载**（放到 `open_project` 之后，告警已经打印，过滤无效）。
+3. **报告层的刻意例外 → methodology waiver**：`hook_methodology_waivers.tcl` 挂
+   `impl_1/ROUTE_DESIGN.TCL.PRE`，用 `create_waiver -type METHODOLOGY -id {...}` 声明
+   `TIMING-28`（按名字引用 auto-derived 时钟；为了让一份 xdc 兼容综合黑盒/实现两阶段并抗改名）与
+   `TIMING-47`（DRP 动态相位下用有界 `max_delay -datapath_only` 表达跨域，属有意）。waiver 是
+   **报告条目、不是 message**（`set_msg_config` 无效），且 `reset_run` 会清掉，稳定性/多策略脚本
+   每轮 reset 后要重挂。报告应显示 `Checks found: 0` + `Checks waived: N`；`build_bitstream.tcl`
+   以「存在任何未 waive 的 Critical Warning」为失败门禁。
 
 ### 三个必须记住的实测坑
 
 | 坑 | 现象 | 处理 |
 | --- | --- | --- |
-| **hook 必须挂在对的步骤上** | 综合告警出在 `SYNTH_DESIGN`，实现告警（`link_design`）出在 `INIT_DESIGN`，DRC 降级挂 `WRITE_BITSTREAM` | 见 `build_bitstream.tcl` 的 `apply_run_hooks` |
-| **`reset_run` 会清掉步骤属性** | 先 `set_property STEPS.*.TCL.PRE` 再 `reset_run` 等于没设 | 顺序是「先决策 → 全部 `reset_run` → 再统一挂 hook」 |
+| **hook 必须挂在对的步骤上** | 综合告警在 `SYNTH_DESIGN`、实现读网表在 `INIT_DESIGN`、methodology waiver 在 `ROUTE_DESIGN` | 见 `build_bitstream.tcl` 的 `apply_run_hooks` |
+| **`reset_run` 会清掉步骤属性，不 reset 的 run 也不会重新生成脚本** | 先 `set_property STEPS.*.TCL.PRE` 再 `reset_run` 等于没设；**厂商 IP 的 OOC run 不 reset 就沿用物化时生成的旧脚本，后挂 hook 不生效**（实测 clk_wiz 过滤漏过） | 顺序「先比较/决策 → 全部 reset（含厂商 OOC run）→ 统一挂 hook → 正式 launch」；不要在挂完后调 `launch_runs -scripts_only`（正式 launch 会报 `[Common 17-69]`） |
 | **hook 脚本要登记进工程** | 只写 `TCL.PRE` 不 `add_files` 报 `[Runs 36-537] File ... is not part of fileset utils_1` | `add_files -fileset utils_1 -norecurse <hook>` |
-| **`open_project` 内部的告警拦不住** | `[Board 49-26]` 在 `open_project` 内部打印，早于脚本任何语句 | `set_msg_config` 无效；绑定了 board part 的工程不会有，只能接受并说明 |
+| **`open_project` 的早期告警要提前过滤** | `[Board 49-26]`×96 在 `open_project` 内部打印 | 在 `open_project` **之前** source `suppress_early_messages.tcl`；放晚了才「拦不到」 |
+
+另有一条容易漏的：`package_ip.tcl` 的 `[IP_Flow 19-5661]`（`dspClock` 没有关联 bus interface）由
+`ipx::check_integrity` 打印，其 `set_msg_config` **必须挂在 `check_integrity` 调用之前**——
+`ipx::package_project` 之后 ipx 会重置消息规则（实测），挂在文件前部不生效。
 
 ## 交付前
 
 - 报告里写清实际跑到哪一步：IP 打包通过、`validate_bd_design` 通过、xsim 用例数与结果、
   综合实现是否 100%、时序 WNS/WHS（高速域单独给出域内 WNS）、bitstream/XSA 是否生成。
-- 告警类改动要把**清理前后的条数**都给出，并说明哪些是改设计消掉的、哪些是屏蔽的（附理由文件）。
+- 告警类改动要把**清理前后的条数**都给出，并说明哪些是改设计消掉的、哪些是屏蔽/waiver 的（附理由
+  文件）；给出所有 run 的 `runme.log` 计数与 methodology 报告的 `Checks found / Checks waived`。
 - 高速时钟类改动要给出**多次实现**的结果（`impl_stability.tcl`），单次通过不作为签核依据。
 - **改了 RTL 之后**：`package_ip.tcl` → `package_src_ip.tcl` → `create_bd.tcl` →
   `build_bitstream.tcl` 必须按顺序重跑；只重跑后面几步会用到旧的 IP 内容。
+- **改了 BD 源文件（`vivado/rtl/dpm_mmcm_src.v` / `create_bd.tcl`）也必须重建工程**：`build_bitstream.tcl`
+  的复用判断只看策略与 hook，**不看 RTL 内容**；不重建会静默复用旧网表。临时改动可以显式
+  `reset_run` 相关 run，但最稳妥是重跑 `create_bd.tcl`。
 - 没有跑到的步骤（例如没上板）要明确写成「未验证」，不要用「已验证」概括。

@@ -47,14 +47,15 @@ set_msg_config -id "Synth 8-7023" -suppress
 set_msg_config -id "Synth 8-4446" -suppress
 
 # ---------------------------------------------------------------------------
-# 4) clk_wiz_0 的输入时钟由 fabric 上的 FCLK_CLK0 驱动（不是从顶层引脚进来），
-#    于是它内部例化的 IBUFG 是多余的、被优化掉；随 IP 生成的 xdc 又试图给这条
-#    内部网络设 IBUF_LOW_PWR。两条都源于「MMCM 参考时钟来自 PS 而不是外部引脚」，
-#    是本设计的既定结构，不是缺陷。
+# 4) clk_wiz_0 的输入时钟由 fabric 上的 FCLK_CLK0 驱动（不是从顶层引脚进来）。
+#    早期配置（PRIM_SOURCE=Single_ended_clock_capable_pin）会让 Wizard 例化一个多余的
+#    IBUFG 并被优化掉（报 [Opt 31-32]）；现在改为 PRIM_SOURCE=No_buffer 后 IBUFG 已不存在，
+#    这条预计不再触发，保留作换配置时的兜底。
 #
-#    注意：`Constraints 18-550` 不在这里屏蔽——build_bitstream.tcl 已经在主进程里
-#    （open_project 之后）屏蔽过它，而主进程的规则会传到 run 的子进程；这里再写一遍会触发
-#    [Common 17-1361]「新的消息控制规则与已有规则等价，原规则将被替换」——反而多出一条告警。
+#    注意：`Constraints 18-550`（IBUF_LOW_PWR 落不到顶层引脚网络）不在这里屏蔽——它在
+#    open_project 之后的约束处理阶段出现，统一由 vivado/suppress_early_messages.tcl 在
+#    open_project **之前**屏蔽（本文件在 run 子进程里加载，重复加载等价规则会报
+#    [Common 17-1361]，因此两边不要重复写同一条）。
 # ---------------------------------------------------------------------------
 set_msg_config -id "Opt 31-32" -suppress
 

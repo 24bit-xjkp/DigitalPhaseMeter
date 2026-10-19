@@ -23,6 +23,8 @@ if {![file exists $proj_file]} {
 
 # 把 Vivado 的工作目录放到 build 下，避免在仓库根目录留下 .Xil 等临时文件
 cd [file join $root_dir build vivado]
+# 早期消息过滤必须先于 open_project 加载（Board 49-26 / Project 1-5713 在 open_project 内部打印）
+source [file join $script_dir suppress_early_messages.tcl]
 open_project $proj_file
 
 puts "RUN_QUERY_BEGIN"

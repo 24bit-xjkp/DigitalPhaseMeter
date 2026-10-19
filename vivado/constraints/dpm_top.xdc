@@ -61,6 +61,13 @@ set_false_path -quiet -from [get_clocks -quiet clkout*_raw] \
 set_max_delay -quiet -datapath_only -from [get_clocks -quiet clkout*_raw] \
     -to [get_clocks -quiet clk_fpga_0] 20.000
 
+# ---- 片内源 MMCM 的 Safe Clock Startup 移位寄存器 ----
+# vivado/rtl/dpm_mmcm_src.v 的 seq_reg1/seq_reg2 由 DCLK 域同步后的复位异步清零（消 LUTAR-1），
+# 输入是 MMCM 的 LOCKED 准静态电平，清零释放发生在 MMCM 输出时钟停止期间——这些路径不按
+# 逐沿时序检查（与 clk_wiz 自带 XDC 对 *seq_reg* 的 set_false_path 同义）。
+# 通配 + -quiet 的理由同上：综合阶段 BD 还是黑盒，get_cells 为空时约束安静地不生效。
+set_false_path -quiet -to [get_cells -quiet -hier -filter {NAME =~ *dpm_mmcm_src_0/inst/seq_reg*}]
+
 # ---- 两个时钟域之间的握手通路（双向）----
 # 跨域信号有两类，都是「电平翻转 + 同步器」结构：
 #   - 慢 → 快：Controller 的 request / responseReady 在 DSP 域被 EdgeDetector(both) 的

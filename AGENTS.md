@@ -8,6 +8,8 @@
 
 **工程已完成并通过实测验收（2026-10-19）**：PL 侧测量与控制 RTL、PS↔PL 互联、Vivado IP 与 block design、PS 侧裸机软件、PC 侧上位机均已实现，Verilator / xsim / 综合实现 / 上板验收均已跑通。当前工作以维护（缺陷修复、补充测试、文档更新）为主。
 
+**固定器件**：`xc7z010clg400-1`（ALINX AX7010 的芯片）。`vivado/` 下的脚本写死该 part，创建/打开工程时回读校验，不提供切换器件的能力；综合实现签核目标是「全流程日志 0 Warnings / 0 Critical Warnings」+ 实现 methodology 报告 0 条未 waive 的 Critical（细节见 `vivado/README.md` 与 `dpm-vivado-ip`）。
+
 ## 目录结构与任务优先级
 
 ```text

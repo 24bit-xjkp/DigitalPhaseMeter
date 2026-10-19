@@ -21,18 +21,25 @@ set script_dir [file dirname [file normalize [info script]]]
 set build_dir [file normalize [file join $script_dir .. build vivado]]
 set proj_dir [file join $build_dir bd_proj]
 set xdc_file [file normalize [file join $script_dir constraints dpm_top.xdc]]
-set hook_bs [file normalize [file join $script_dir hook_write_bitstream.tcl]]
 # 同一套「屏蔽厂商 IP 固有告警」的过滤器（理由见 hook_filter_messages.tcl）。
 # 本脚本每轮都 reset_run impl_1，会把步骤属性清回默认值，因此每轮 reset 后重新挂一遍。
 set hook_filter [file normalize [file join $script_dir hook_filter_messages.tcl]]
+set hook_waivers [file normalize [file join $script_dir hook_methodology_waivers.tcl]]
 
 set attempts 6
 if {[llength $argv] >= 1 && [lindex $argv 0] ne ""} { set attempts [lindex $argv 0] }
 set places {Explore AggressiveExplore ExtraTimingOpt ExtraPostPlacementOpt Explore AggressiveExplore}
 set routes {AggressiveExplore AggressiveExplore AggressiveExplore AggressiveExplore Explore Explore}
 
+# 早期消息过滤必须先于 open_project 加载（Board 49-26 / Project 1-5713 在 open_project 内部打印）
+source [file join $script_dir suppress_early_messages.tcl]
+
 cd $build_dir
 open_project [file join $proj_dir dpm_bd.xpr]
+set expected_part "xc7z010clg400-1"
+if {[get_property part [current_project]] ne $expected_part} {
+    error "工程器件为 '[get_property part [current_project]]'，期望 '$expected_part'"
+}
 foreach old [get_files -quiet -of_objects [get_filesets constrs_1] {*dpm_top.xdc}] { remove_files -quiet $old }
 add_files -fileset constrs_1 -norecurse $xdc_file
 set_property target_language Verilog [current_project]
@@ -86,8 +93,8 @@ for {set i 1} {$i <= $attempts} {incr i} {
     catch { set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.ARGS.DIRECTIVE AggressiveExplore [get_runs impl_1] }
 
     reset_run impl_1
-    set_property STEPS.WRITE_BITSTREAM.TCL.PRE $hook_bs [get_runs impl_1]
     set_property STEPS.INIT_DESIGN.TCL.PRE $hook_filter [get_runs impl_1]
+    set_property STEPS.ROUTE_DESIGN.TCL.PRE $hook_waivers [get_runs impl_1]
     launch_runs impl_1 -to_step write_bitstream -jobs 8
     wait_on_run impl_1
     if {[get_property PROGRESS [get_runs impl_1]] ne "100%"} {

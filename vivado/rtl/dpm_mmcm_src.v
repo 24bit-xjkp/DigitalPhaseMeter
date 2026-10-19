@@ -25,6 +25,15 @@
  * 不会放行。这与 clk_wiz 的 `USE_SAFE_CLOCK_STARTUP` 行为一致，也避免了
  * 「组合逻辑门控时钟」（UG949 点名的反模式）。
  *
+ * 两个实现细节（都对应实现阶段的实际告警）：
+ * - `reset | drpReset` 先在 DCLK 域同步两拍，再用同步后的 `reset_high` 统一驱动 MMCM.RST 与
+ *   Safe Clock Startup 移位寄存器的异步清零：组合 LUT 直接驱动异步复位会命中 methodology
+ *   检查 LUTAR-1（LUT 毛刺可能触发意外复位）。两个复位源都是 DCLK 域的准静态信号，打两拍
+ *   不改变复位语义（上电初值即复位有效；DRP 写期间控制器保持 drpReset ≥8 个 DCLK）。
+ * - `BUFGCE` 显式写 `SIM_DEVICE("7SERIES")`：Vivado 2025.2 的 unisim 默认值是
+ *   `ULTRASCALE`，不写会让综合报 Netlist 29-345（且功能仿真的 CE 行为与 7 系列
+ *   硬件不一致）。本工程固定器件为 xc7z010clg400-1（7 系列）。
+ *
  * ## DRP
  *
  * `drpDaddr`/`drpDi`/`drpDen`/`drpDwe`/`drpDout`/`drpDrdy` 直接对应
@@ -88,6 +97,8 @@ module dpm_mmcm_src #(
     wire clkout1_raw;
     wire locked_int;
     wire reset_high;
+    // 「系统复位 | 重配置复位」在 DCLK 域的同步寄存器；初值 2'b11 保证配置/仿真 0 时刻复位有效。
+    (* ASYNC_REG = "TRUE" *) reg [1:0] reset_high_sync = 2'b11;
     wire psdone_unused;
     wire clkfbstopped_unused;
     wire clkinstopped_unused;
@@ -102,11 +113,22 @@ module dpm_mmcm_src #(
     wire clkout6_unused;
     wire clkfboutb_unused;
 
-    // MMCM 的复位 = 系统复位 或 重配置复位（DRP 写期间必须让 MMCM 处于复位）
-    assign reset_high = reset | drpReset;
+    // ---- 复位：组合 OR 先在 DCLK 域同步两拍，再驱动 MMCM.RST 与启动移位寄存器的异步清零 ----
+    // 【为什么要同步】把 reset | drpReset 这个 2 输入 OR LUT 直接接到异步复位（MMCM.RST 或
+    // 触发器的 CLR）会命中实现的 methodology 检查 LUTAR-1：工具无法证明 LUT 无毛刺，而毛刺
+    // 可能触发意外复位。两个复位源本身都是 FCLK_CLK0（= DCLK）域的准静态信号，打两拍不改变
+    // 语义：
+    //   - 上电：同步寄存器初值 2'b11，MMCM 一直处于复位；FCLK_CLK0 起振且 reset 释放后两拍
+    //     才放开复位（MMCM 从复位释放到锁定远长于这两拍）；
+    //   - DRP 重配置：控制器先拉高 drpReset 并保持 ≥8 个 DCLK 才发第一笔 DRP 写，RST 晚 2 拍
+    //     仍完整覆盖整个 DRP 写序列；释放也晚 2 拍，仍在控制器 sRelease 的 8 拍保持期内。
+    always @(posedge drpDclk) begin
+        reset_high_sync <= {reset_high_sync[0], reset | drpReset};
+    end
+    assign reset_high = reset_high_sync[1];
 
     // Safe Clock Startup：每个输出各自 8 位移位寄存器，连续 8 拍锁定后才放行。
-    // ASYNC_REG + KEEP 与厂商生成物一致（该寄存器由复位异步清零）。
+    // ASYNC_REG + KEEP 与厂商生成物一致（该寄存器由 reset_high 异步清零）。
     (* KEEP = "TRUE" *) (* ASYNC_REG = "TRUE" *) reg [7:0] seq_reg1 = 8'h00;
     (* KEEP = "TRUE" *) (* ASYNC_REG = "TRUE" *) reg [7:0] seq_reg2 = 8'h00;
 
@@ -173,7 +195,9 @@ module dpm_mmcm_src #(
     );
 
     // ---- 输出 1（参考） ----
-    BUFGCE clkout1_buf (
+    // SIM_DEVICE 必须显式写 "7SERIES"：Vivado 2025.2 unisim 的 BUFGCE 默认是 "ULTRASCALE"，
+    // 不写会报 Netlist 29-345，且功能仿真行为与 7 系列硬件不一致。
+    BUFGCE #(.SIM_DEVICE("7SERIES")) clkout1_buf (
         .O  (clkOut1),
         .CE (seq_reg1[7]),
         .I  (clkout0_raw)
@@ -192,7 +216,7 @@ module dpm_mmcm_src #(
     end
 
     // ---- 输出 2（移相） ----
-    BUFGCE clkout2_buf (
+    BUFGCE #(.SIM_DEVICE("7SERIES")) clkout2_buf (
         .O  (clkOut2),
         .CE (seq_reg2[7]),
         .I  (clkout1_raw)

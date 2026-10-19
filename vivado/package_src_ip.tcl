@@ -62,6 +62,18 @@ file delete -force $proj_dir
 create_project -force dpm_src_ip_pack $proj_dir -part $part
 read_verilog -sv $sources
 
+# ---- 打包流程的提示级告警过滤（理由同 package_ip.tcl）----
+#   19-5101  SV 顶层打包的已知限制提示；19-11888 description 默认值的时序噪声；
+#   19-11770 FREQ_HZ 在接口推断之后才补；19-2187 不维护 Product Guide 文件。
+foreach id {
+    {IP_Flow 19-5101}
+    {IP_Flow 19-11888}
+    {IP_Flow 19-11770}
+    {IP_Flow 19-2187}
+} {
+    set_msg_config -id $id -suppress
+}
+
 file delete -force [file join $ip_root $ip_name]
 ipx::package_project -root_dir [file join $ip_root $ip_name] -vendor $vendor -library $library -taxonomy "/UserIP" \
     -import_files -set_current true

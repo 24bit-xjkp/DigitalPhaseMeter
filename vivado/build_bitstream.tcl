@@ -26,6 +26,10 @@ set proj_dir [file join $build_dir bd_proj]
 set xdc_file [file join $script_dir constraints dpm_top.xdc]
 set xsa_file [file join $build_dir dpm_system.xsa]
 
+# open_project 之前必须加载「早期消息过滤」：Board 49-26（~96 条）与 Project 1-5713 是在
+# open_project **内部**打印的，过滤规则必须先于 open_project 生效才拦得住（实测）。
+source [file join $script_dir suppress_early_messages.tcl]
+
 # ---- 参数 ----
 set retiming 0
 set dsp_budget 2
@@ -50,42 +54,34 @@ if {![file exists $proj_file]} {
 
 open_project $proj_file
 
-# ---- 打开工程后才出现的两条告警：本工程刻意不绑开发板 ----
-# `open_project` 发生在主进程里、run 的 TCL.PRE hook 之前，所以 hook_filter_messages.tcl 管不到，
-# 这里补上。两条都源于「不绑定 board part」这一既定选择（引脚由 vivado/constraints/dpm_top.xdc 直接给出）：
-#   [Project 1-5713]    × 1：工程没有 board part，Vivado 把 BoardPart 属性置空。
-#   [Vivado 12-7122]    × 1：没有参考 checkpoint，自动增量编译不启用（本工程本来就每轮全跑）。
-#   [Constraints 18-550]× 1：随 clk_wiz 生成的 xdc 给「由 fabric（FCLK_CLK0）驱动、不是顶层引脚」
-#                       的输入网络设 IBUF_LOW_PWR——与 run 内那条同类，理由见 hook_filter_messages.tcl。
-#
-# 不在这里屏蔽 [Board 49-26]：那 96 条在 `open_project` **内部**就打印了，晚于本脚本的任何语句，
-# 因此 set_msg_config 对它无效（实测：过滤在 open_project 之后加载，96 条照旧）。
-# 它是 Vivado 扫描 XilinxBoardStore 时逐个报告「board 声明的 part 未安装」，与本设计无关；
-# 绑定了具体开发板的工程不会看到。见 vivado/README.md 的「告警清理」。
-foreach early_pattern {
-    {Project 1-5713}
-    {Vivado 12-7122}
-    {Constraints 18-550}
-} {
-    set_msg_config -id $early_pattern -suppress
+# ---- 器件绑定校验：本工程固定为 xc7z010clg400-1（AX7010 的芯片）----
+# 设计、综合实现与上板测试都只针对这一颗器件；换器件必须改 create_bd.tcl 并重跑全流程。
+# 这里显式回读，避免工程被意外换器件后仍然产出"看起来通过"的结果。
+set expected_part "xc7z010clg400-1"
+set project_part [get_property part [current_project]]
+puts "PROJECT_PART: $project_part"
+if {$project_part ne $expected_part} {
+    error "工程绑定的器件是 '$project_part'，本仓库固定为 '$expected_part'（见 vivado/create_bd.tcl）"
 }
-puts "EARLY_FILTER_LOADED: 已屏蔽工程级告警（board part 未绑定、增量编译未启用、IBUF_LOW_PWR）"
 
 # ---- hook 文件（必须在下面第一次引用之前定义）----
-# 1) hook_write_bitstream.tcl：把「引脚未约束 / IO 标准未指定」两条 DRC 降级为警告，使
-#    bitstream 仍能生成（本仓库不绑定具体开发板）。降级必须放在 write_bitstream 步骤的
-#    pre-hook 里：run 在独立进程中执行 DRC，主进程里设置 SEVERITY 不生效。
-#    使用具体开发板时填好 vivado/constraints/dpm_top.xdc 里的引脚并去掉这个 hook。
-# 2) hook_filter_messages.tcl：用 set_msg_config 屏蔽「厂商 IP 固有」告警（xlconcat 写死的
+# 1) hook_filter_messages.tcl：用 set_msg_config 屏蔽「厂商 IP 固有」告警（xlconcat 写死的
 #    128 个输入端口、PS7 未使能的 DDR/MIO 端口、proc_sys_reset 无消费者的输出等）。
 #    逐条理由写在该文件里；它们挂在 run 步骤的 TCL.PRE 上：
 #      - SYNTH_DESIGN.TCL.PRE → 综合（8-7129 / 8-7071 / 8-7023 / 8-4446 都出在这一步）
 #      - INIT_DESIGN.TCL.PRE  → 实现（link_design 时出现的告警都归这一步）
-#    加进 utils_1 fileset，否则 Vivado 会抱怨 hook 脚本不属于工程（[Runs 36-537]）。
-#    两个 hook 都是本脚本挂上去的 TCL.PRE，因此都要登记。
-set hook_bs [file join $script_dir hook_write_bitstream.tcl]
+# 2) hook_methodology_waivers.tcl：ROUTE_DESIGN.TCL.PRE，创建 TIMING-28/47 的 methodology waiver
+#    （报告里的已知例外，理由见该文件；waiver 在 run 进程里创建，主进程打开 checkpoint 时看不到）。
+# 3) hook_filter_vendor_ip.tcl：只挂厂商 IP 的 OOC 综合 run（它们不继承 synth_1 的 TCL.PRE），
+#    屏蔽厂商生成 RTL 固有的 Netlist 29-345 等；**不挂自研 IP 的 run**，避免掩盖自研代码问题。
+# 所有 hook 都要加进 utils_1 fileset，否则 Vivado 会抱怨 hook 脚本不属于工程（[Runs 36-537]）。
+#
+# 注：原 write_bitstream 的 NSTD-1/UCIO-1 DRC 降级 hook 已删除——引脚已在 dpm_top.xdc 固定为
+# W18/W19 + LVCMOS33，write_bitstream 的 DRC 实测 0 违例，不需要把未约束引脚的 DRC 降级。
 set hook_filter [file join $script_dir hook_filter_messages.tcl]
-foreach h [list $hook_bs $hook_filter] {
+set hook_waivers [file join $script_dir hook_methodology_waivers.tcl]
+set hook_vendor_ip [file join $script_dir hook_filter_vendor_ip.tcl]
+foreach h [list $hook_filter $hook_waivers $hook_vendor_ip] {
     if {![file exists $h]} {
         error "找不到 $h"
     }
@@ -97,17 +93,45 @@ foreach h [list $hook_bs $hook_filter] {
 # **apply_run_hooks 必须在所有 reset_run 之后调用**：reset_run 会把步骤属性恢复成策略默认值，
 # 先设后 reset 等于没设（实测如此）。调用点在下面「先决策、后 reset、再统一挂 hook」那一段。
 # 属性值没变就不写，避免让已完成的 run 过期（过期会导致下一次无法复用网表）。
-proc apply_run_hooks {hook_filter hook_bs} {
+# vendor_runs 是厂商 IP 的 OOC 综合 run 列表（由调用方算好传入）。
+proc apply_run_hooks {hook_filter hook_waivers hook_vendor_ip vendor_runs} {
     set changed 0
-    foreach {run step} [list synth_1 SYNTH_DESIGN impl_1 INIT_DESIGN impl_1 WRITE_BITSTREAM] {
+    foreach {run step want} [list \
+        synth_1 SYNTH_DESIGN $hook_filter \
+        impl_1 INIT_DESIGN $hook_filter \
+        impl_1 ROUTE_DESIGN $hook_waivers] {
         set prop "STEPS.${step}.TCL.PRE"
-        set want [expr {$step eq "WRITE_BITSTREAM" ? $hook_bs : $hook_filter}]
-        if {[get_property $prop [get_runs $run]] ne $want} {
+        if {[get_property -quiet $prop [get_runs $run]] ne $want} {
             set_property $prop $want [get_runs $run]
             incr changed
         }
     }
+    # 厂商 IP 的 OOC 综合 run 是独立进程，不继承 synth_1 的 TCL.PRE，单独挂厂商过滤器
+    foreach run $vendor_runs {
+        set prop "STEPS.SYNTH_DESIGN.TCL.PRE"
+        if {[get_property -quiet $prop [get_runs $run]] ne $hook_vendor_ip} {
+            set_property $prop $hook_vendor_ip [get_runs $run]
+            incr changed
+        }
+    }
     return $changed
+}
+
+# 统计「run 当前步骤属性」与目标 hook 的差异数。必须在 reset_run **之前**调用（reset 会把
+# 步骤属性清回默认值，之后再看就永远是"有差异"）。用于让 hook 变化也触发重新综合，
+# 避免复用旧网表时脚本/过滤没更新。
+proc count_hook_diffs {hook_filter hook_waivers hook_vendor_ip vendor_runs} {
+    set n 0
+    foreach {run step want} [list \
+        synth_1 SYNTH_DESIGN $hook_filter \
+        impl_1 INIT_DESIGN $hook_filter \
+        impl_1 ROUTE_DESIGN $hook_waivers] {
+        if {[get_property -quiet STEPS.${step}.TCL.PRE [get_runs $run]] ne $want} { incr n }
+    }
+    foreach run $vendor_runs {
+        if {[get_property -quiet STEPS.SYNTH_DESIGN.TCL.PRE [get_runs $run]] ne $hook_vendor_ip} { incr n }
+    }
+    return $n
 }
 
 # 加入顶层约束：**已经在工程里就不要动**。实测 `remove_files` 会把已完成的 run 立刻标记为
@@ -160,6 +184,21 @@ foreach ip_name $custom_ip_names {
 }
 puts "CUSTOM_IP_SYNTH_RUNS: $custom_ip_synth_runs"
 
+# ---- 厂商 IP 的 OOC 综合 run（用于挂厂商告警过滤）----
+# 排除 synth_1 与自研 IP / 自研模块（dpm_top、dpm_src_drp、dpm_mmcm_src）的 run：自研代码的
+# 综合告警不能被屏蔽，必须留在日志里。厂商 run 包括 PS7、proc_sys_reset、clk_wiz、
+# axi_interconnect、xbar、auto_pc 等。
+set vendor_ip_synth_runs {}
+foreach run [get_runs -quiet] {
+    set rn [get_property NAME $run]
+    if {$rn eq "synth_1"} { continue }
+    if {![string match "*_synth_1" $rn]} { continue }
+    # 自研 IP/模块（dpm_top、dpm_src_drp、dpm_mmcm_src）的 run 不挂厂商过滤器
+    if {[string match "*dpm_top_0_0*" $rn] || [string match "*dpm_src_drp_0_0*" $rn] || [string match "*dpm_mmcm_src_0_0*" $rn]} { continue }
+    lappend vendor_ip_synth_runs $rn
+}
+puts "VENDOR_IP_SYNTH_RUNS: $vendor_ip_synth_runs"
+
 # GLOBAL_RETIMING：跨寄存器重定时，默认 off（可用 -retiming 1 打开）。当前 RTL 把两个计数器的
 #   使能/清零写成 `when(clear){0}.elsewhen(enable){+1}`，让综合器映射成 DSP48E1 的 RSTP（同步
 #   复位）+ CEP（时钟使能），使能由**寄存器直接**进 DSP 控制脚；打开重定时有可能把使能寄存器
@@ -170,7 +209,7 @@ puts "CUSTOM_IP_SYNTH_RUNS: $custom_ip_synth_runs"
 # 实现选 Performance_Retiming 而不是 Performance_ExplorePostRoutePhysOpt：前者的 phys_opt 用
 #   AlternateFlowWithRetiming（官方描述：更激进的复制 + **DSP/BRAM 优化** + 开启重定时），正是本设计
 #   需要的——关键路径终点是 DSP48 的控制脚。
-# 当前 450MHz 签核（2026-10-19，Design State: Routed）：全设计 WNS +0.291ns / WHS +0.052ns /
+# 当前 450MHz 签核（2026-10-19，Design State: Routed）：全设计 WNS +0.271ns / WHS +0.026ns /
 #   WPWS +0.067ns，TNS = THS = 0、0 个失败端点；同一策略用 impl_stability.tcl 做 6 次独立实现，
 #   结果一致。策略对比调优用 impl_multi.tcl，签核以本脚本 + impl_stability 为准。
 # 有意**不**覆盖 Performance_Retiming 自带的步骤 directive：该策略的关键正是 phys_opt 的
@@ -218,7 +257,8 @@ max_dsp=[get_property STEPS.SYNTH_DESIGN.ARGS.MAX_DSP [get_runs $run]]"
 }
 # hook 文件位置（TCL.PRE 的实际挂载在 reset_run 之后由 apply_run_hooks 完成）
 puts "synth hook = $hook_filter"
-puts "impl  hook = $hook_filter (INIT_DESIGN) / $hook_bs (WRITE_BITSTREAM)"
+puts "impl  hook = $hook_filter (INIT_DESIGN) / $hook_waivers (ROUTE_DESIGN)"
+puts "vendor IP hook = $hook_vendor_ip ($vendor_ip_synth_runs)"
 # 只读 ARGS.DIRECTIVE：STEPS.<步骤>.IS_ENABLED 在这些步骤上不是合法属性（读它会报 [Common 17-673]）
 foreach step {OPT_DESIGN PLACE_DESIGN PHYS_OPT_DESIGN ROUTE_DESIGN POST_ROUTE_PHYS_OPT_DESIGN} {
     puts "impl $step directive=[get_property -quiet STEPS.${step}.ARGS.DIRECTIVE [get_runs impl_1]]"
@@ -232,10 +272,14 @@ if {$strategy_only} {
     exit 0
 }
 
-# 策略刚变化过 → 已完成的 run 是旧参数跑出来的，必须重跑，否则会静默复用旧网表。
-set force_rerun [expr {$strategy_changed > 0}]
-if {$force_rerun} {
+# 策略或 hook 刚变化过 → 已完成的 run 是旧参数跑出来的，必须重跑，否则会静默复用旧网表。
+set hook_pre_changed [count_hook_diffs $hook_filter $hook_waivers $hook_vendor_ip $vendor_ip_synth_runs]
+set force_rerun [expr {$strategy_changed > 0 || $hook_pre_changed > 0}]
+if {$strategy_changed > 0} {
     puts "STRATEGY_FORCE_RERUN: 综合/实现参数刚变化，已完成的 run 将重跑"
+}
+if {$hook_pre_changed > 0} {
+    puts "HOOK_FORCE_RERUN: TCL.PRE hook 与目标不一致（$hook_pre_changed 处），已完成的 run 将重跑"
 }
 
 # ---- 先决定两个 run 是否复用，并把要重跑的 run 全部 reset 掉 ----
@@ -244,18 +288,32 @@ if {$force_rerun} {
 # 决策只看 run 当前状态，不受 reset 影响，所以先决策、后 reset。
 set synth_reuse [expr {!$force_rerun && [string match "*Complete*" [get_property STATUS [get_runs synth_1]]]}]
 set impl_reuse [expr {!$force_rerun && [string match "*Complete*" [get_property STATUS [get_runs impl_1]]]}]
+# 综合要重跑时实现必须跟着重跑（实现依赖综合产物的网表）
+if {!$synth_reuse} { set impl_reuse 0 }
 if {!$synth_reuse} {
-    # IP 的 OOC run 是 synth_1 的子 run，reset synth_1 不会连带 reset 它们；
-    # 策略或 IP 内容变化后必须把 OOC run 一起 reset，否则会复用旧 checkpoint。
-    foreach run $custom_ip_synth_runs { reset_run $run }
+    # IP/模块的 OOC 综合 run 都是 synth_1 的子 run，reset synth_1 不会连带 reset 它们。
+    # 统一 reset 全部 *_synth_1（synth_1 自身除外）：既避免复用旧 checkpoint，也让 run 脚本
+    # 重新生成（否则脚本还停在"物化"时生成的版本，后挂的 TCL.PRE 不生效——实测厂商 IP 的
+    # 过滤器就这样漏过一次）。覆盖 dpm_top / dpm_src_drp / dpm_mmcm_src 与全部厂商 run。
+    foreach run [get_runs -quiet] {
+        set rn [get_property NAME $run]
+        if {$rn eq "synth_1"} { continue }
+        if {[string match "*_synth_1" $rn]} { reset_run $run }
+    }
     reset_run synth_1
 }
 if {!$impl_reuse} { reset_run impl_1 }
-set hook_changed [apply_run_hooks $hook_filter $hook_bs]
+set hook_changed [apply_run_hooks $hook_filter $hook_waivers $hook_vendor_ip $vendor_ip_synth_runs]
 puts "HOOK_APPLIED: changed=$hook_changed"
-foreach {run step} [list synth_1 SYNTH_DESIGN impl_1 INIT_DESIGN impl_1 WRITE_BITSTREAM] {
+foreach {run step} [list synth_1 SYNTH_DESIGN impl_1 INIT_DESIGN impl_1 ROUTE_DESIGN] {
     puts "HOOK_CHECK: $run STEPS.${step}.TCL.PRE = '[get_property -quiet STEPS.${step}.TCL.PRE [get_runs $run]]'"
 }
+foreach run $vendor_ip_synth_runs {
+    puts "HOOK_CHECK: $run STEPS.SYNTH_DESIGN.TCL.PRE = '[get_property -quiet STEPS.SYNTH_DESIGN.TCL.PRE [get_runs $run]]'"
+}
+# 注：不要在这里再调 `launch_runs synth_1 -scripts_only`——它会把 run 置成需要 reset 的状态，
+# 紧接着的正式 launch_runs 会报 [Common 17-69]。已 reset 的 run 在正式 launch 时会自动
+# 重新生成 run 脚本，从而带上刚挂上的 TCL.PRE。
 
 # ---- 综合 ----
 if {$synth_reuse} {
@@ -285,6 +343,34 @@ open_run impl_1
 report_timing_summary -file [file join $build_dir timing_summary.rpt]
 report_utilization -file [file join $build_dir utilization.rpt]
 report_drc -file [file join $build_dir drc.rpt]
+
+# ---- 方法学签核：解析实现 run 自动生成的 methodology 报告 ----
+# route_design 步骤末尾会自动跑 report_methodology，waiver 在 run 进程里由
+# STEPS.ROUTE_DESIGN.TCL.PRE 创建；主进程 open_run 打开 checkpoint 时拿不到这些 waiver，
+# 所以不在主进程重跑 report_methodology，而是直接解析 run 目录里那份报告（签核产物）。
+set impl_dir [get_property DIRECTORY [get_runs impl_1]]
+set meth_rpts [glob -nocomplain -directory $impl_dir *_methodology_drc_routed.rpt]
+if {[llength $meth_rpts] == 0} {
+    error "找不到实现的 methodology 报告：$impl_dir/*_methodology_drc_routed.rpt"
+}
+set meth_rpt [lindex $meth_rpts 0]
+file copy -force $meth_rpt [file join $build_dir methodology.rpt]
+set mfh [open $meth_rpt r]
+set meth_text [read $mfh]
+close $mfh
+if {[regexp {Checks found:\s+([0-9]+)} $meth_text -> meth_found]} {
+    puts "METHODOLOGY_CHECKS_FOUND: $meth_found"
+} else {
+    error "methodology 报告格式无法识别：$meth_rpt"
+}
+if {[regexp {Checks waived:\s+([0-9]+)} $meth_text -> meth_waived]} {
+    puts "METHODOLOGY_CHECKS_WAIVED: $meth_waived"
+}
+if {[regexp {Critical Warning} $meth_text]} {
+    error "实现存在未 waive 的 methodology Critical Warning，见 $meth_rpt"
+}
+puts "METHODOLOGY_CLEAN: 无未 waive 的 methodology Critical Warning"
+
 puts "TIMING_BEGIN"
 puts [get_property STATS.WNS [get_runs impl_1]]
 puts [get_property STATS.WHS [get_runs impl_1]]

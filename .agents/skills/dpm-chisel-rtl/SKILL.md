@@ -114,6 +114,15 @@ Verilator 与 xsim / Vivado 都能直接编译。
 - **AXI 从口在复位期间必须拉低所有 ready**：模块内可以直接读隐式复位
   （`io.axi.arready := (...) && !reset.asBool`）。否则会出现「已握手却等不到响应」——
   主机发请求、从口收下地址，但 `rvalid` 被复位压住，主机永久挂起。
+- **AXI 内部锁存寄存器只按实际使用位宽声明**：`Axi4LiteSlave` 的 `awAddr/wData/wStrb` 用
+  `addrUsedWidth` / `dataUsedWidth` 参数只锁存下游真正消费的低位，交回 payload 时再零扩展
+  （参数取 0 表示全宽；Scala 2 的默认参数不能引用前面的构造参数，所以用 0 作哨兵值）。不这样做，
+  综合器会把未读的寄存器高位 trim 掉并报 `[Synth 8-3936]`。新增/修改 AXI 从口时按下游实际译码
+  位宽传参：本仓库 `dpm_top` 只译码 `addr[5:2]`（`addrUsedWidth=6`），`dpm_src_drp` 用
+  `addr[11:0]`、写数据只用低 16 位（`addrUsedWidth=12` / `dataUsedWidth=16`）。行为等价性：
+  `MmcmDrpController` 的 Verilator 用例覆盖「真实基地址 + 页内偏移」；`dpm_top` 没有 Verilator
+  顶层用例，xsim 顶层激励用的是页内偏移地址，真实基地址下 `dpm_top` 的等价性靠静态理由
+  （译码只消费 `addr[5:2]`，高位/低位本来就不参与逻辑）。
 - **Bundle 构造参数不要叫 `width`**：与 Chisel `Aggregate.width` 冲突（要求 `override`），
   用 `dataWidth` 之类的名字。子类复用父 Bundle 的参数时要写 `override val`。
 - **显式复位端口也是普通端口，测试不驱动就等于该域不复位**：模块自己声明的复位端口（不在 `io` 里，
@@ -146,14 +155,15 @@ Verilator 与 xsim / Vivado 都能直接编译。
 - `Fill(n, value)` 是两个参数；`MuxCase(default, Seq(cond -> value))` 里的条件必须是 `Bool`
   （写 `(mode === 1.U) -> addr` 而不是 `mode -> addr`）。
 - **高速域（当前 450MHz）只放「边沿检测 + 计数器/比较器 + 二级 FSM」**：频率/相位全部交给 MMCM，
-  高速域不要放配置运算或分频逻辑。450MHz 下测量域自身最差路径余量 ≥ **+0.583ns**；**整体 WNS
-  受 clk_wiz Safe Clock Startup 内部路径限制（+0.291ns）**，不要拿整体 WNS 判断测量逻辑还剩多少
-  优化空间。
+  高速域不要放配置运算或分频逻辑。450MHz 下测量域自身最差 setup 路径余量 **+0.541ns**
+  （`stateReg[0] → sig_reg`）；**整体 WNS 受 clk_wiz Safe Clock Startup 内部路径限制（+0.271ns）**，
+  不要拿整体 WNS 判断测量逻辑还剩多少优化空间。
 - **450MHz 的 32 位计数器用 DSP48E1，不要用 fabric 进位链**：fabric 32 位计数器（8 个 CARRY4 串联）
   与「16 位低段 + 16 位高段」的分段计数器在该器件上都收敛不到正余量，固定开销在
   「FF → LUT → CARRY4 的 S 输入」与计数器 Q 的远端布线。DSP48E1 在 -1 速度等级的 FMAX 是
   464.25MHz（DS187 Table 66），450MHz 用掉约 97%，但 Vivado 会检查 DSP 内部路径与
-  CARRYIN/CEP/RSTP 控制脚；本设计实现后计数器控制路径余量 +0.583 / +0.616ns。
+  CARRYIN/CEP/RSTP 控制脚；本设计实现后计数器/控制路径余量在 +0.5ns 量级（具体值以
+  `impl_stability.tcl` 的 `stability_a<N>_timing.rpt` 为准，随实现轮次略有变化）。
 - **计数器的控制写法决定 DSP 映射**：`cnt := Mux(io.clear, 0.U, cnt + io.enable)` 会让综合器把使能
   推断成 DSP 的 CARRYIN（前面多一级 LUT）；写成
   `when(io.clear) { cnt := 0.U }.elsewhen(io.enable) { cnt := cnt + 1.U }` 才会映射成 DSP 的
@@ -198,8 +208,8 @@ Verilator 与 xsim / Vivado 都能直接编译。
   拿主时钟域的复位去释放高速域寄存器，会让释放沿落在 `dspClock` 的建立/保持窗口里。**曾经踩过**——
   把 `dspReset` 也接到 `clock` 域的同步器上（照抄上一行），生成 RTL 表面完全正常，实际是跨域释放。
   DSP 域复位**由谁产生**还会影响 `dspClock` 域复位分配网络的布局与余量；当前 450MHz 设计把链的
-  异步端接在 `mainReset` 上，2026-10-19 轮次该复位分配路径余量 +0.583ns（已经是测量域内的最差路径，
-  整体 WNS 由 clk_wiz 内部路径决定）。
+  异步端接在 `mainReset` 上。2026-10-19 轮次测量域最差 setup 路径是 `stateReg[0] → sig_reg`
+  （+0.541ns），整体 WNS 由 clk_wiz Safe Clock Startup 内部路径决定（+0.271ns）。
 - `ResetSynchronizer` 是 `RawModule`，自己显式声明 `clock` / `resetn` / `reset`；复位链直接复用
   `MyShiftRegister(false.B, n, true.B)`（`ShiftRegister.scala`），并且例化在
   `withClockAndReset(clock, (!resetn).asAsyncReset)` 里，因此链上寄存器是**异步复位**的：置位立即生效，

@@ -89,7 +89,10 @@ class DigitalPhaseMeterTop(
         // 使能与选择位取自同一域的寄存器堆，因此写寄存器与切换同拍生效，不需要跨时钟域
         controller.io.sig := SignalInputMux(controlRegs.io.sigEnable, controlRegs.io.srcSelect, extSig, intSig)
 
-        val axiLiteSlave = Axi4LiteSlave(addrWidth, dataWidth)
+        // 寄存器堆只按 `addr[5:2]` 译码，地址高位不参与任何逻辑，因此 AXI 从口内部只锁存低 6 位
+        // （最高用到的位是 [5]，其余位零扩展回 32 位 payload）；数据通路是 32 位寄存器，数据保持全宽。
+        // 行为与全宽锁存完全一致，只是不再产生「未读寄存器位被 trim」的 Synth 8-3936 告警。
+        val axiLiteSlave = Axi4LiteSlave(addrWidth, dataWidth, addrUsedWidth = 6, dataUsedWidth = dataWidth)
 
         // AXI4-Lite 从口 ↔ 寄存器堆
         s_axi_lite :<>= axiLiteSlave.axi

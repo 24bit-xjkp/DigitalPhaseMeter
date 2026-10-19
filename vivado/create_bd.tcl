@@ -4,7 +4,7 @@
 #   vivado -mode batch -source vivado/create_bd.tcl [dsp_clk_mhz] [ps_fclk1_mhz] [-uart <uart0|uart1|none>] [-baud <波特率>]
 #
 #   dsp_clk_mhz  —— DSP 域时钟频率（MHz），默认 450（MMCM 小数倍频；本仓库实测在 xc7z010clg400-1
-#                   上综合/实现收敛，全设计 WNS +0.291ns、DSP 域内 WNS +0.291ns，见 vivado/README.md）
+#                   上综合/实现收敛，全设计 WNS +0.271ns、DSP 域内 WNS +0.271ns，见 vivado/README.md）
 #   ps_fclk1_mhz —— 给定时改用 PS 的 FCLK_CLK1 直供 DSP 域（不建 MMCM、不用 dsp_clk_mhz），
 #                   用于对比「PS 直供」与「MMCM 倍频」两条路。FCLK_CLK1 上限 250MHz，
 #                   因此这条路只能覆盖 250MHz 及以下。
@@ -75,6 +75,8 @@ set build_dir [file join $root_dir build vivado]
 set proj_dir [file join $build_dir bd_proj]
 set ip_repo [file join $build_dir ip]
 
+# 固定器件：本仓库的设计、综合实现与上板测试都按 ALINX AX7010 的芯片 xc7z010clg400-1 进行，
+# 不再提供切换器件的能力。工程创建后回读校验，写错或被其它流程换器件时直接报错退出。
 set part "xc7z010clg400-1"
 
 # ---- 参数：前两个位置参数保持原义，串口用 -uart / -baud 具名给出 ----
@@ -131,6 +133,29 @@ if {![file exists [file join $script_dir rtl dpm_mmcm_src.v]]} {
 
 file delete -force $proj_dir
 create_project -force dpm_bd $proj_dir -part $part
+# 器件绑定回读校验（见上方 part 说明）
+set bound_part [get_property part [current_project]]
+puts "PROJECT_PART: $bound_part"
+if {$bound_part ne $part} {
+    error "工程器件绑定错误：期望 '$part'，实际 '$bound_part'"
+}
+
+# ---- 早期消息过滤：厂商流程在 BD 生成/校验阶段打印的提示级告警 ----
+# 这些告警来自「模块参考推断出的时钟接口」与厂商生成文件的覆盖提示，不是本仓库代码问题；
+# 它们出现在 create_bd/validate_bd_design/generate_target 期间，必须在这些命令之前加载过滤。
+# 逐条理由：
+#   [IP_Flow 19-5661]  模块参考 dpm_mmcm_src 的 clkIn / clk_wiz_0 的 dspClock：时钟接口没有
+#                      关联的 bus interface——本设计这两个时钟确实不驱动 AXI 总线（AXI 在主时钟域）。
+#   [IP_Flow 19-11770] 同一个时钟接口没有 FREQ_HZ 参数：module reference 的时钟频率由 BD 连接
+#                      关系决定，BD 里没必要再声明；clk_wiz 的 FREQ_HZ 由 Wizard 配置负责。
+#   [IP_Flow 19-4994]  重复生成 BD 产物时覆盖 auto_pc 的 OOC 约束文件：每次从头建 BD 的必然现象。
+foreach early_id {
+    {IP_Flow 19-5661}
+    {IP_Flow 19-11770}
+    {IP_Flow 19-4994}
+} {
+    set_msg_config -id $early_id -suppress
+}
 set_property ip_repo_paths $ip_repo [current_project]
 update_ip_catalog -rebuild
 
@@ -277,10 +302,17 @@ if {$use_mmcm} {
     # 信号源那一路 MMCM 的 locked，即 SIG_STATUS 的 b2）。保留该端口只会让综合报一条
     # [Synth 8-7071] port 'locked' ... is unconnected，因此关掉，从源头消掉这条告警。
     # 若要回来看它的波形，把下面这行改成 {true} 并把通道接到 ILA 即可。
+    # PRIM_SOURCE 必须写 No_buffer：clk_in1 由 fabric 上的 FCLK_CLK0 驱动（不是器件引脚）。
+    # 若用默认值 Single_ended_clock_capable_pin，Wizard 生成的 XDC 会在内部 pin
+    # `dpm_system_i/clk_wiz_0/inst/clk_in1` 上再 create_clock 一次——而该网络已由 PS7 的 XDC
+    # 定义主时钟 clk_fpga_0，于是实现的方法学检查报 TIMING-4/TIMING-27 两条 Critical Warning
+    # （主时钟在层次 pin 上重复定义、覆盖 clk_fpga_0 的 insertion delay/waveform）。
+    # 写成 No_buffer 后 Wizard 不再生成那条 create_clock（其 XDC 模板对应行被注释掉），
+    # DSP 时钟会正确派生在 clk_fpga_0 的时钟树下。
     create_bd_cell -type ip -vlnv xilinx.com:ip:clk_wiz:6.0 clk_wiz_0
     set_property -dict [list \
         CONFIG.PRIMITIVE {MMCM} \
-        CONFIG.PRIM_SOURCE {Single_ended_clock_capable_pin} \
+        CONFIG.PRIM_SOURCE {No_buffer} \
         CONFIG.PRIM_IN_FREQ {50.000} \
         CONFIG.CLKOUT1_REQUESTED_OUT_FREQ $dsp_clk_mhz \
         CONFIG.CLKOUT1_USED {true} \
@@ -294,7 +326,12 @@ if {$use_mmcm} {
         CONFIG.USE_SAFE_CLOCK_STARTUP {true} \
         CONFIG.USE_RESET {true}] [get_bd_cells clk_wiz_0]
     # 回读校验：IP 属性写错值时 Vivado 不报错，只是静默不生效，因此显式确认
-    # USE_LOCKED 真的落到 false（期望 BD 里不再有 locked 引脚，综合也就不会报未连接端口）。
+    # PRIM_SOURCE 真的落到 No_buffer（否则 TIMING-4/27 会再次出现）。
+    set cw_prim_src [get_property -quiet CONFIG.PRIM_SOURCE [get_bd_cells clk_wiz_0]]
+    puts "CLK_WIZ_CHECK: PRIM_SOURCE='$cw_prim_src'"
+    if {$cw_prim_src ne "No_buffer"} {
+        error "clk_wiz_0：PRIM_SOURCE 回读为 '$cw_prim_src'（期望 No_buffer）——该属性未生效"
+    }
     set cw_locked [get_property -quiet CONFIG.USE_LOCKED [get_bd_cells clk_wiz_0]]
     set cw_pins [get_bd_pins -quiet clk_wiz_0/locked]
     puts "CLK_WIZ_CHECK: USE_LOCKED='$cw_locked' locked_pin='$cw_pins'"

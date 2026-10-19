@@ -92,7 +92,11 @@ class MmcmDrpController(val addrWidth: Int = 32, val dataWidth: Int = 32, val re
 
         // ---- AXI4-Lite 从口 ----
         // 寄存器空间只有 11 个字、读写都一拍完成：就地吸收命令，不给 AXI 挂起。
-        val axiLiteSlave = Axi4LiteSlave(addrWidth, dataWidth)
+        // 地址译码只看页内偏移 addr[11:0]（[11:6] 窗口、[5:2] 寄存器索引、[1:0] 对齐），
+        // 写数据与字节选通只用低 16 位 / 低 2 字节，因此 AXI 从口内部只锁存这些低位，
+        // 其余位零扩展回 32 位 payload。行为与全宽锁存完全一致，只是不再产生
+        // 「未读寄存器位被 trim」的 Synth 8-3936 告警。
+        val axiLiteSlave = Axi4LiteSlave(addrWidth, dataWidth, addrUsedWidth = 12, dataUsedWidth = 16)
         axiLiteSlave.wr.ready := true.B
         axiLiteSlave.rd.ready := true.B
 
