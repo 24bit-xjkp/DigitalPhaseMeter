@@ -46,7 +46,7 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
 │   ├── ResetSynchronizer    DSP 域复位：从主复位同步得到（异步置位、与 dspClock 同步释放）
 │   └── PhaseMeter           高速域测量核心
 │       ├── EdgeDetector ×4  3 级流水的边沿检测（sig1、sig2 与两类握手脉冲）
-│       └── DspCounter   ×2  use_dsp 计数器，分别累计 edgeCnt / phaseCnt
+│       └── DspCounter ×2  DSP48E1 累加器计数器，分别累计 edgeCnt / phaseCnt
 └── （片内无存储：数据通道就是寄存器本身，见下文「PS↔PL 互联」）
 
 片内信号源的 MMCM（`dpm_mmcm_src`，裸 `MMCME2_ADV` 薄封装）不在 IP 内，而是 BD 里的独立单元：
@@ -142,12 +142,13 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
 因此测量核心的高速时钟改由 **PL 内的 MMCM** 从 `FCLK_CLK0`(50MHz) 倍频得到。「MMCM 锁定前不来时钟」
 由 **clk_wiz 自带的 Safe Clock Startup** 保证：它把 MMCM 输出经内部的 `BUFGCE` 放行，CE 由 8 bit
 移位寄存器连续采到 8 拍 `locked` 后才拉高（无毛刺，不需要外部门控模块）。实测在
-`xc7z010clg400-1`（−1 速度等级）上 450MHz 时序收敛：**WNS = +0.291ns、WHS = +0.032ns、
-TNS = THS = 0、0 个失败端点**（DSP 域内 WNS = +0.291ns / WHS = +0.163ns；官方实现策略
-`Performance_Retiming`，2026-10-18 一轮实现），详见
-[`vivado/README.md`](vivado/README.md#复位极性修复后的一轮复跑与两种实现策略对比)。
-同一设计的早期版本在 **400MHz 轮次**实测过 WNS +0.358ns / WHS +0.062ns 一档（历史数据，
-余量随 RTL 与实现策略的修订变化）。
+`xc7z010clg400-1`（−1 速度等级）上 450MHz 时序收敛（2026-10-19 轮次，策略见
+[`vivado/README.md`](vivado/README.md#450mhz-的策略build_bitstreamtcl-内联)）：
+**WNS = +0.291ns、WHS = +0.052ns、WPWS = +0.067ns，TNS = THS = 0、0 个失败端点**；
+同一份网表上 6 次独立布局布线全部给出相同结果（+0.291 / +0.052）。
+整体 WNS 的**限制者不是测量逻辑**，而是 clk_wiz 的 Safe Clock Startup 内部路径
+（`seq_reg1[7] → BUFGCE CE0`，周期 2.222ns 下 +0.291ns）；测量域自己的最差路径余量
+在 **+0.583ns 以上**（最差一条是 DSP 域复位分配 → `phaseCntEnable` 的同步复位端）。
 相位分辨率因此从 200MHz 下的 5ns 提升到 2.222ns（450MHz）。
 
 - **所有数据都走 AXI4-Lite 寄存器（GPIO 式）**：一次测量的结果只有 4 个字，PL 侧直接把最新结果锁存在只读寄存器里，PS 收到中断后连续读 4 个寄存器即可拿到一条完整结果。因此 IP 内部没有任何片内存储，对外也只有一个 AXI 从口——数据量小的时候，寄存器比 BRAM + 突发口简单得多。
@@ -236,7 +237,9 @@ xmake test -v                             # 全部测试
 xmake run Controller                      # 单个测试目标
 ```
 
-覆盖 `Controller` 的复位行为（DSP 域复位由模块内部的 `ResetSynchronizer` 从主复位同步得到，测试只驱动主复位）、闸门计数、相位计数、测量窗口跟随 `targetGate` 以及连续测量的一致性；`EdgeDetector` 有独立的时序测试；`ResetSynchronizer` 有独立的复位时序测试（异步置位、恰好 `resetDepth` 拍同步释放）；`MmcmDrpController` 覆盖 AXI/DRP 寄存器语义。
+覆盖 `Controller` 的复位行为（DSP 域复位由模块内部的 `ResetSynchronizer` 从主复位同步得到，测试只驱动主复位）、闸门计数、相位计数、测量窗口跟随 `targetGate` 以及连续测量的一致性；`EdgeDetector` 有独立的时序测试；`ResetSynchronizer` 有独立的复位时序测试（异步置位、恰好 `resetDepth` 拍同步释放）；`DspCounter` 覆盖使能/清零语义与跨 16 位边界的计数；`MmcmDrpController` 覆盖 AXI/DRP 寄存器语义。
+
+当前全量回归：`xmake test -v` 为 **5 个目标、15 个用例、709 条断言全过**。
 
 ### xsim 仿真（AXI4 接口与顶层 IP）
 
@@ -251,10 +254,15 @@ sim/run_xsim.sh --gui          # 运行结束后打开波形
 ### Vivado：打包 IP、创建 BD、综合实现
 
 ```bash
-vivado -mode batch -source vivado/package_ip.tcl       # 打包 IP → build/vivado/ip/dpm_top
-vivado -mode batch -source vivado/create_bd.tcl        # PS7 + 协议转换 + IP 的 BD → build/vivado/bd_proj
-vivado -mode batch -source vivado/build_bitstream.tcl  # 综合 / 实现 / bitstream / XSA
+vivado -mode batch -source vivado/package_ip.tcl        # 测量 IP → build/vivado/ip/dpm_top
+vivado -mode batch -source vivado/package_src_ip.tcl   # 片内源 DRP 控制器 IP → build/vivado/ip/dpm_src_drp
+vivado -mode batch -source vivado/create_bd.tcl         # PS7 + 互联 + 两个 IP + 裸 MMCM 的 BD
+vivado -mode batch -source vivado/build_bitstream.tcl   # 策略 → 综合 / 实现 / bitstream / XSA
+vivado -mode batch -source vivado/impl_stability.tcl -tclargs 6  # 同策略 6 次独立实现，验证余量稳定性
 ```
+
+`package_ip.tcl` 只删除/重建自己的 `build/vivado/ip/dpm_top`，不会清掉 `package_src_ip.tcl`
+生成的 `dpm_src_drp`（早先的整目录删除会让「先 package_ip、后 package_src_ip」变成隐式顺序依赖）。
 
 流程细节、地址映射、PS 侧访问示例与已知注意事项见 [`vivado/README.md`](vivado/README.md)。
 

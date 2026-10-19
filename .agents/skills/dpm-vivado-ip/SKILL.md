@@ -26,7 +26,8 @@ vivado -mode batch -source vivado/package_src_ip.tcl    # 打包 DRP 控制器 �
 vivado -mode batch -source vivado/create_bd.tcl         # BD → build/vivado/bd_proj（DSP 域默认 450MHz、PS 串口默认 uart1）
 sim/run_xsim.sh                                         # xsim 仿真（同一份生成产物）
 vivado -mode batch -source vivado/build_bitstream.tcl   # 写高速时钟策略 → 综合/实现/bitstream/XSA
-vivado -mode batch -source vivado/impl_multi.tcl 6      # 高速时钟：多次实现取余量最好的一次
+vivado -mode batch -source vivado/impl_stability.tcl 6  # 高速时钟：同策略多次独立实现，验证余量稳定性（签核）
+vivado -mode batch -source vivado/impl_multi.tcl 6      # 高速时钟：换 place/route directive 扫策略（调优）
 ```
 
 **改了 RTL 必须从打包重新开始**：两个 IP（`package_ip.tcl` + `package_src_ip.tcl`）的内容变了，
@@ -154,8 +155,8 @@ xsim <snapshot> -runall
 > 那套换算是纯整数算术，PS 软件完全算得出来。把它搬到软件后，PL 侧只留
 > 「把软件给的 16 位寄存器值按顺序写进 MMCM DRP 口」的状态机。400MHz 轮次实测整设计
 > **Slice LUTs 14,048（79.8%）→ 948（5.4%）**、**DSP 40 → 2**，且时序更好
-> （WNS +0.110 → +0.281ns；以上为 400MHz 轮次历史，当前 450MHz 轮次整设计为 891 LUT / 2 DSP、
-> WNS +0.291ns）。
+> （WNS +0.110 → +0.281ns；以上为 400MHz 轮次历史。当前 450MHz 轮次整设计为 893 LUT / 2 DSP、
+> 全设计 WNS +0.291ns——该数字由 clk_wiz 内部路径决定，不是测量逻辑）。
 
 ### 结构
 
@@ -287,10 +288,12 @@ PHASE_MUX  = m & 0x7       # 相位码的小数部分（1/8 VCO 周期）
 
 DSP 域（测量核心）的目标时钟频率由 `create_bd.tcl` 的第一个参数给出，**默认 450MHz**
 （450 = 50 × 9，clk_wiz 选小数倍频：`MMCM_CLKFBOUT_MULT_F=20.250`、`MMCM_DIVCLK_DIVIDE=1`、
-`MMCM_CLKOUT0_DIVIDE_F=2.250` → VCO 1012.5MHz、输出 450MHz。2026-10-18 的 450MHz 综合/实现收敛：
-全设计 WNS +0.291ns / WHS +0.032ns、DSP 域内 WNS +0.291ns / WHS +0.163ns、0 失败端点；
-400MHz 轮次曾用 6 次独立实现验证，最差 +0.191ns 是历史值）；频率参数同时也是 IP 侧
-`dspClock` 的 `FREQ_HZ` 声明值来源（`package_ip.tcl` 里写死为 450MHz，改频率时同步改）。
+`MMCM_CLKOUT0_DIVIDE_F=2.250` → VCO 1012.5MHz、输出 450MHz。**2026-10-19 轮次**的综合/实现：
+全设计 WNS +0.291ns / WHS +0.052ns / WPWS +0.067ns、0 失败端点；同一份网表用
+`impl_stability.tcl` 做 6 次独立实现，全部给出 **完全相同的 +0.291 / +0.052**。
+整体 WNS 由 **clk_wiz 的 Safe Clock Startup 内部路径**（`seq_reg1[7] → BUFGCE CE0`）决定，
+测量域自己的最差路径余量 ≥ **+0.583ns**；400MHz 轮次曾用 6 次独立实现验证，最差 +0.191ns 是历史值）；
+频率参数同时也是 IP 侧 `dspClock` 的 `FREQ_HZ` 声明值来源（`package_ip.tcl` 里写死为 450MHz，改频率时同步改）。
 要真正收敛，需要「时钟路径 + 约束 + 运行策略 + RTL」四件事配套：
 
 1. **PS 的 FCLK 不够用**：Zynq-7000 的 `FCLK_CLK1` 由 PS 的 IO PLL 分频，**上限 250MHz**；
@@ -316,48 +319,70 @@ DSP 域（测量核心）的目标时钟频率由 `create_bd.tcl` 的第一个�
    `set_max_delay -datapath_only` 表达，上限取一个慢时钟周期（20ns）。
    **两个方向都要写**：只写一个方向会让另一个方向变成新的最差路径（400MHz 轮次实测
    +0.055 → −0.258ns）。
-4. **运行策略**（写在 `build_bitstream.tcl` 里，启动 run 前设置）：综合 `PerformanceOptimized` +
-   `GLOBAL_RETIMING=on` + `MAX_DSP=2`；实现用内置
-   **`Performance_Retiming`**（phys_opt = `AlternateFlowWithRetiming`：DSP/BRAM 优化 + 重定时），
-   **不要覆盖它自带的步骤 directive**，否则掉回 +0.077ns 一档。逐档实测（400MHz 轮次历史：
-   同一综合网表只换 impl strategy）：`Performance_Retiming` +0.270ns >
-   `Performance_RefinePlacement` +0.109ns > `Performance_ExplorePostRoutePhysOpt` +0.077ns >
-   `Performance_Auto_1/2/3` +0.061ns；当前 450MHz 轮次沿用同一套策略，签核结果为
-   WNS +0.291ns / WHS +0.032ns、0 失败端点。
-   run 的 `STEPS.*.ARGS.*` 可以直接 `set_property` 改（内置 strategy 也允许），不需要
-   `create_strategy`（2025.2 实测 `get_strategies` / `create_strategy` 不存在）；
-   但注意**给 run 换 strategy 会把步骤参数重置回该 strategy 的预设**。
-   **写 run 属性之前先比较当前值**：把属性写成「相同的值」也会让已完成的 run 变成过期状态，
-   于是下一次 `build_bitstream.tcl` 无法复用网表、白跑一遍综合/实现（实测：
-   `set_property` 之后 `STATUS` 不再是 `Complete`）。脚本里因此用「值不同才写」，
-   并用「写了几项」决定要不要 `STRATEGY_FORCE_RERUN` 强制重跑。
+4. **运行策略（`build_bitstream.tcl` 内联）**——**策略必须同时写到 BD 里自定义 IP 的
+   out-of-context 综合 run 上，否则等于没写**（2026-10-19 发现的坑，见下表）：
+   - 综合（`synth_1` 与 `dpm_system_dpm_top_0_0_synth_1` 两处都写）：
+     `DIRECTIVE=PerformanceOptimized`、`GLOBAL_RETIMING=off`、`MAX_DSP=2`。
+     `GLOBAL_RETIMING` 默认 off：450MHz 计数器的正确写法是让综合器把 `when(clear)/.elsewhen(enable)`
+     映射成 DSP48E1 的 RSTP + CEP（使能由寄存器直接驱动控制脚），打开重定时有可能把使能寄存器
+     重新折成 CARRYIN 的组合输入（旧实现形态，见 `dpm-chisel-rtl`）。
+   - 实现：内置 **`Performance_Retiming`**（phys_opt = `AlternateFlowWithRetiming`：
+     DSP/BRAM 优化 + 重定时），**不要覆盖它自带的步骤 directive**。400MHz 轮次历史扫档：
+     `Performance_Retiming` +0.270ns > `Performance_RefinePlacement` +0.109ns >
+     `Performance_ExplorePostRoutePhysOpt` +0.077ns > `Performance_Auto_1/2/3` +0.061ns。
+   - run 的 `STEPS.*.ARGS.*` 可以直接 `set_property` 改（内置 strategy 也允许），不需要
+     `create_strategy`（2025.2 实测 `get_strategies` / `create_strategy` 不存在）；
+     但注意**给 run 换 strategy 会把步骤参数重置回该 strategy 的预设**。
+   - **写 run 属性之前先比较当前值**：把属性写成「相同的值」也会让已完成的 run 变成过期状态，
+     于是下一次 `build_bitstream.tcl` 无法复用网表、白跑一遍综合/实现（实测：
+     `set_property` 之后 `STATUS` 不再是 `Complete`）。脚本里因此用「值不同才写」，
+     并用「写了几项」决定要不要 `STRATEGY_FORCE_RERUN` 强制重跑。
+   - 综合策略变化后不仅要 `reset_run synth_1` / `impl_1`，**还要 reset 自定义 IP 的 OOC run**
+     （它不是 `synth_1` 的子步骤，`reset_run synth_1` 不会连带它）。
+   - **新建 BD 工程刚 open 时，IP 的 OOC 综合 run 还不存在**（`get_runs` 只有 `synth_1`/`impl_1`），
+     所以脚本先 `launch_runs synth_1 -scripts_only` 把 IP run 物化出来再写参数；BD 管理的 IP
+     不能用 `create_ip_run`（报 `[Vivado 12-3424] IPI cores may not be directly generated`）。
 
 ### 三个必须记住的实测坑
 
 | 坑 | 现象 | 处理 |
 | --- | --- | --- |
-| **place/route 有 run-to-run 差异** | 同一网表、同一策略，WNS 在 +0.006 与 −0.202ns 之间摇摆（400MHz 轮次历史） | 「跑一次通过」不能算签核；用 `vivado/impl_multi.tcl` 多次独立实现取余量最好的一次，报告里给出多次结果 |
+| **place/route 有 run-to-run 差异** | 同一网表、同一策略，WNS 在 +0.006 与 −0.202ns 之间摇摆（400MHz 轮次历史） | 「跑一次通过」不能算签核；用 `vivado/impl_stability.tcl N` 做同策略 N 次独立实现（2026-10-19 轮次：6/6 全同 +0.291/+0.052），换 directive 调优再用 `impl_multi.tcl`；报告里写清 N 与最小/最大余量 |
 | **余量对 place directive 敏感，且同一条 directive 是可复现的** | 同一份网表（复位重构后，400MHz 轮次）逐次换 directive：`ExtraPostPlacementOpt`（`Performance_Retiming` 的 place 预设）只有 **+0.011ns**，而 `Explore` / `AggressiveExplore` / `ExtraTimingOpt` 稳定在 **+0.079 ～ +0.087ns**；同一条 directive 的多次尝试给出**完全相同**的 WNS/WHS（该结论后被复位极性修复推翻，见 `vivado/README.md` 历史小节） | 余量薄时先把 place directive 当变量扫一遍（`impl_multi.tcl`），不要默认是随机波动——换 directive 是零 RTL 代价的余量来源；报告里要写清用的哪条 |
 | **过约束只能用来逼工具，不能用来签核** | `set_clock_uncertainty` 0.15ns 过约束 → 清掉后 WNS −0.070ns；0.20ns → −0.083ns；0.25/0.30ns 反而退化到 −0.330ns（目标过紧，工具选到更差的解；以上为 400MHz 轮次历史实测） | 过约束下跑完 place/route 后，用 `reset_clock_uncertainty -setup` 清掉、重新出报告，用**清掉后**的 WNS 作为结论；本设计最终不用过约束 |
 | **控制脚寄存器化要成对做** | 只把边沿脉冲延迟一拍送 FSM：FSM 输出（握手翻转信号）也跟着晚一拍，改变与慢速域的握手时序 → Verilator 相位读数超容限（phaseCnt/edgeCnt 由 10.0 变成 14.24） | 时序优化只动不影响协议时序的通路（如计数器控制脚 `clear`/`enable` 的状态译码寄存）；两个使能要**同时**延迟，保持相对时序 |
 | **同一工程不能并发跑两个 Vivado** | 每次 `launch_runs` 按当前工程步骤参数重写 `*.runs/<run>/<top>.tcl`，后启动的进程覆盖先生效的配置。实测先设 `Performance_Retiming`、另一仍在跑的脚本改回 `ExplorePostRoutePhysOpt`，同一次改动报出 +0.077ns（与 +0.270ns 差 0.19ns；400MHz 轮次历史） | 改策略/跑实现前确认没有其它 Vivado 在跑；跑完用 `dpm_bd.runs/<run>/runme.log` 的 `Command:` 行核对实际 directive |
 | **手工 one-hot FSM 反而更慢** | 把 ChiselEnum（3 bit）手工改成 `RegInit(1.U(5.W))` one-hot：带 `PopCount` 兜底 WNS −0.444ns、不带兜底 −0.020ns，都差于 ChiselEnum 的 +0.109ns（400MHz 轮次历史） | 让 Vivado 自己做 FSM 重编码；要动编码先量测 |
 | **慢域参考频率会影响 DSP 域余量** | 同一 RTL/策略，慢域 50MHz 参考时 MMCM 离散抖动 127ps（100MHz 参考时 101ps），400MHz 轮次测得域内 WNS 差约 0.2ns | 选参考频率时把 MMCM 抖动算进去；当前 450MHz 用 50MHz 参考已实测收敛（WNS +0.291ns），但参考频率仍是先要算进去的余量项 |
+| **BD 里自定义 IP 的 OOC 综合不继承 `synth_1` 的策略** | 2026-10-19 实测：`synth_1` 已写 `DIRECTIVE=PerformanceOptimized / GLOBAL_RETIMING=on / MAX_DSP=2`，但真正含 450MHz 逻辑的 `dpm_system_dpm_top_0_0_synth_1` 仍是 `Default / auto / -1`（`runme.log` 的 `Command: synth_design` 行可核对）——`synth_1` 只综合 BD 顶层 wrapper，几乎没有逻辑。此前所有「综合策略」实验实际上都作用在 wrapper 上 | 在 `build_bitstream.tcl` 里把同一套策略写到自定义 IP 的 OOC run；用 `runme.log` 的 `Command:` 行核对每个 IP run 的实际参数 |
+| **IP OOC run 要等 `launch_runs` 才会被建出来** | 新建 BD 工程 open 时 `get_runs` 只有 `synth_1`/`impl_1`；`create_ip_run` 对 BD 管理的 IP 报 `[Vivado 12-3424] IPI cores may not be directly generated or have a netlist directly created from it` | 先 `launch_runs synth_1 -scripts_only`（只生成 run 脚本、不综合），再给 `*_synth_1` 写 `STEPS.SYNTH_DESIGN.ARGS.*`，然后 reset 并正式 launch |
 | **Safe Clock Startup 的放行延迟是 8 拍** | 在 xsim 里单独跑 clk_wiz（`-L unisims_ver` 才有 MMCME2_ADV/BUFGCE 模型；400MHz 轮次实测）：MMCM 锁定前未门控输出已有 322 个上升沿、门控后的 `clk_out1` 有 0 个；`locked` 拉高后再过 23ns（≈9 个 400MHz 周期：8 拍移位 + 缓冲器延迟）才出现第一个时钟沿 | 这是该功能应有的行为，不是缺陷；DSP 域复位本来就要等时钟，晚 8 拍放行不影响功能，不需要再叠一层外部 `locked` 门控 |
 | **`-tclargs` 必须写在 Vivado 命令行最后** | 写成 `vivado -mode batch -source x.tcl -tclargs 6 -log foo.log` 时，`-log`/`-journal` 会被当成 Tcl 参数吞掉：Vivado 改在**当前目录**写 `vivado.log`/`vivado.jou`（在仓库根跑就会在根目录留下这两个文件） | 把 `-log`/`-journal` 放在 `-tclargs` 之前，或直接用默认日志文件名；跑完顺手确认仓库根没有多出 `vivado.log` |
 
-### 高速域的关键路径与实测结果（当前 450MHz；400MHz 轮次为历史）
+### 高速域的关键路径与实测结果（当前 450MHz，2026-10-19 轮次）
 
-- 关键路径（400MHz 轮次历史）：`stateReg → LUT → DSP48 的 RSTP/CEP`（data path 2.006ns，其中布线
-  1.426ns、71% 是布线），即「组合逻辑跨 clock region 驱动 DSP 控制脚」。把计数器控制脚
-  （`clear`/`enable` 的状态译码）寄存器化后路径消失。
-- 400MHz 轮次结果：默认策略 WNS −0.391ns（失败）→ 上面策略组合 +0.006ns（通过但余量太薄）→
-  策略 + RTL 控制脚寄存器化：**6 次独立实现全部为正，最差 +0.236ns、最好 +0.328ns**。
-  当前 450MHz 轮次沿用同一策略，Routed 后全设计 WNS +0.291ns / WHS +0.032ns、DSP 域内
-  WNS +0.291ns / WHS +0.163ns、0 失败端点（该轮未重跑 `impl_multi.tcl`）。
-- 该器件 DSP48E1 的 FMAX（全寄存器）为 464.25MHz（DS187 Table 66），**450MHz 用掉约 97%**
-  （400MHz 轮次为 86%），因此高速域只放短逻辑；`place` 前给 DSP 路径留 ≥500ps 余量（UG949），
-  本轮实测 WNS +0.291ns。
+- **整体 WNS 的限制者不是测量逻辑**：全设计 WNS +0.291ns 来自 clk_wiz Safe Clock Startup 的内部路径
+  `seq_reg1[7] → clkout1_buf/CE0`（数据路径 0.837ns，其中布线 0.418ns；周期 2.222ns）。
+  这条是厂商 IP 结构决定的，6 次独立实现数值完全一致。
+- **测量域自己的最差路径**（同一份 Routed 报告，去掉 clk_wiz 后按余量排序）：
+  1. +0.583ns：`dspReset` 复位分配 → `phaseCntEnable` / `sig` 的同步复位端；
+  2. +0.616ns：`pulseSig1Valid` → `edgeCnt` DSP48 累加器的 **CEP**；
+  3. +0.669ns：`phaseCntEnable` → `phaseCnt` DSP48 累加器的 **CEP**；
+  4. +0.733/+0.744ns：`request` → FSM 次态、`clearCnt` → DSP48 的 **RSTP**。
+  即把「使能/清零由寄存器直接进 DSP 控制脚」和「边沿检测输出统一打一拍」做对之后，
+  原先 0.088 / 0.188 / 0.212 / 0.230ns 的一批路径全部消失了。
+- 失败与修复历史（同一 450MHz 目标）：最新修复提交 e7eacbe 之后，RTL 里 32 位计数器写成
+  `Mux(clear, 0, cnt+enable)`（使能进 CARRYIN，前面多一级 LUT）且综合策略只写在 `synth_1` 上，
+  实测两次实现一次 +0.088ns、一次 **−0.049ns**（不能稳定通过）。修复 = 上述 RTL 两条改动 +
+  综合策略写到 IP OOC run + 实现策略 `Performance_Retiming`：**6 次独立实现全部 PASS、
+  0 失败端点、WNS/WHS 恒定 +0.291/+0.052ns**（`impl_stability.tcl 6`）。
+- 资源（2026-10-19 轮次，Routed）：Slice LUT 893（5.07%）、Slice Register 1458（4.14%）、
+  DSP 2（2.50%，两个计数器各 1 个）、Block RAM 0、BUFGCTRL 6（18.75%）、MMCME2_ADV 2（100%）。
+- 该器件 DSP48E1 的 FMAX（全寄存器）为 464.25MHz（DS187 Table 66），**450MHz 用掉约 97%**，
+  但 Vivado 时序分析覆盖 DSP 内部与 CEP/RSTP 控制脚，实现后上述控制路径余量 +0.583/+0.616ns；
+  fabric 32 位计数器/分段计数器在本器件上都不如 DSP 方案（见 `dpm-chisel-rtl` 的实测）。
+- 签核方式：`build_bitstream.tcl` 一次 + `impl_stability.tcl 6` 同策略 6 次独立实现；
+  `impl_multi.tcl` 用于换 directive 调优，不用于签核（它会覆盖官方策略）。
 
 ## XDC 约束文件的写法（xdc 不是完整的 tcl）
 

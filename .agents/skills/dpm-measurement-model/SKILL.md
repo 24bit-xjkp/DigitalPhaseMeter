@@ -87,7 +87,7 @@ DSP 时钟按整数比缩放（`sim/tb_src_handoff.sv` 取 `T_MAIN=18900ps` / `T
 | 相位计数 | `2^32` 个高速周期 ≈ 9.54 s 的连续累加（450MHz） |
 | 边沿计数 | `2^32` 个参考沿 |
 
-`targetGate` 与闸门计数器同为 28 位（`UInt(gateCntWidth.W)`），所以 5.37 s 是**可达上限**而不是饱和点：想要更长的闸门时间必须同时加宽 `gateCntWidth` 与 `targetGate` 的位宽。`in.bits.targetGate` 在测量期间必须保持不变。`DspCounter` 另有一条 `width <= 48` 的约束，加宽时两处都要改。
+`targetGate` 与闸门计数器同为 28 位（`UInt(gateCntWidth.W)`），所以 5.37 s 是**可达上限**而不是饱和点：想要更长的闸门时间必须同时加宽 `gateCntWidth` 与 `targetGate` 的位宽。`in.bits.targetGate` 在测量期间必须保持不变。`DspCounter`（DSP48E1 累加器实现）另有一条 `width <= 48` 的约束，加宽时两处都要改。
 
 ## 已知局限
 
@@ -102,6 +102,7 @@ DSP 时钟按整数比缩放（`sim/tb_src_handoff.sv` 取 `T_MAIN=18900ps` / `T
   注意 MMCM 的相位先被吸附到 `45°/D` 网格、再被高速时钟周期量化，两重量化都要算进期望值
   （见 `docs/ps-protocol.md` §6.2 与 `ps/tools/onboard_accept.py` 的判据）。
 - **相位读数与两个时钟域的周期比无关**（相位计完全在高速域内测量参考沿到被测沿的间隔），因此低速时钟改频只影响闸门时长和 `gateCnt`，不影响 `phaseCnt / edgeCnt`。
+- **边沿检测输出在测量域里统一多打一拍是等价的**：`PhaseMeter` 把四条边沿检测输出（sig1/sig2/request/responseReady）都经同一级寄存器送进 FSM 与计数器控制逻辑，握手的绝对延迟增加 1 个高速周期，但 `pulseSig1Valid`/`pulseSig2Valid`/`phaseCntEnable` 之间的相对时序不变，相位计数窗口长度不变；计数器在测量停止后冻结、慢域握手完成后才锁存，因此读到的仍是同一个冻结值。功能判据（`gateCnt`/`edgeCnt`/`phaseCnt`）与加流水前逐条一致（xsim 顶层用例 diff 为空）。
 - 闸门时间越长，随机量化误差在平均中抵消得越充分（本项目取 2000 个低速周期 ≈ 40µs）。短闸门时间下容限公式不变，但相对误差明显变大。
 
 ## 怎么用

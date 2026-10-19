@@ -900,7 +900,7 @@ C 源码（`ps/**/*.c|h`）本轮只动了 §14.2 的两处宏/注释与测试�
    原实现置位优先，清零被吞掉，使能一直保持到**下一个信号周期**的 `sig2` 沿，读数跳成整个
    信号周期（45/50MHz 的 22.5° 点因此偏 3~4 个 DSP 周期）。修复：**清零优先**（两个边沿同拍只
    可能来自同一参考周期内的 `sig1→sig2`，不会吞掉合法的置位）；同时给 `phaseCntEnable` 加
-   复位值，避免「清零优先」表达式在 xsim 里把 X 保持到第一次测量、污染 `DspCounter`。
+   复位值，避免「清零优先」表达式在 xsim 里把 X 保持到第一次测量、污染计数器（当时的 `DspCounter`，现更名 `DspCounter`）。
 3. **仿真时基不是整数比（激励问题，不是设计缺陷）**：450MHz 的周期 `2222.22…ps` 在 1ps 时基
    下只能取 2222ps，与 20000ps 主时钟不是严格 9:1；MMCM 行为模型的输出沿又按 1ps 取整
    （6MHz/15MHz/30MHz 频点第二路输出的周期在 166650/166651ps 间抖），几百个参考沿累加后
@@ -921,12 +921,12 @@ C 源码（`ps/**/*.c|h`）本轮只动了 §14.2 的两处宏/注释与测试�
 
 **验证（本轮实测）**
 
-| 入口 | 命令 | 结果 |
-| --- | --- | --- |
-| xsim 联调（80 点） | `sim/run_handoff_tb.sh --clean` | **80/80 点通过**，`fails=0`，退出码 0，约 17s；日志留档 `spec/golden/handoff_meas.txt` |
-| Verilator 全量 | `xmake test -v` | 4 个目标 100%：EdgeDetector 13、ResetSynchronizer 17、MmcmDrpController 110、Controller **554** 条断言 |
-| xsim 顶层（AXI/寄存器） | `sim/run_xsim.sh --clean` | 出现 `==== 测试通过：DigitalPhaseMeterTop 寄存器数据通道 ====`，退出码 0 |
-| 格式化/静态检查 | `scalafmt --test`、`clang-format -i test/Controller.cpp`、`clang-tidy -p .vscode test/Controller.cpp` | 无差异、0 warning |
+| 入口                    | 命令                                                                                                  | 结果                                                                                                   |
+| ----------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| xsim 联调（80 点）      | `sim/run_handoff_tb.sh --clean`                                                                       | **80/80 点通过**，`fails=0`，退出码 0，约 17s；日志留档 `spec/golden/handoff_meas.txt`                 |
+| Verilator 全量          | `xmake test -v`                                                                                       | 4 个目标 100%：EdgeDetector 13、ResetSynchronizer 17、MmcmDrpController 110、Controller **554** 条断言 |
+| xsim 顶层（AXI/寄存器） | `sim/run_xsim.sh --clean`                                                                             | 出现 `==== 测试通过：DigitalPhaseMeterTop 寄存器数据通道 ====`，退出码 0                               |
+| 格式化/静态检查         | `scalafmt --test`、`clang-format -i test/Controller.cpp`、`clang-tidy -p .vscode test/Controller.cpp` | 无差异、0 warning                                                                                      |
 
 **未验证 / 未做的部分**
 

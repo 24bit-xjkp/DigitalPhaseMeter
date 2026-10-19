@@ -3,7 +3,8 @@
 # 用法：
 #   vivado -mode batch -source vivado/build_bitstream.tcl [-retiming 0|1] [-dsp <个数>] [-strategy-only]
 #
-#   -retiming       全局寄存器重定时，默认 1（on）
+#   -retiming       全局寄存器重定时，默认 0（off；当前 RTL 的 DSP 控制脚与两级流水结构不需要，
+#                   打开反而可能把使能寄存器重新折进 DSP 的 CARRYIN 路径）
 #   -dsp            综合允许占用的 DSP 个数，默认 2（给 0 表示不设，用综合器默认）
 #   -strategy-only  只把综合/实现策略写进工程并打印当前取值，不启动 run
 #                   （工程已建好、只想换策略不重建时用；原来独立的 apply_timing_strategy.tcl 就是这件事）
@@ -26,7 +27,7 @@ set xdc_file [file join $script_dir constraints dpm_top.xdc]
 set xsa_file [file join $build_dir dpm_system.xsa]
 
 # ---- 参数 ----
-set retiming 1
+set retiming 0
 set dsp_budget 2
 set strategy_only 0
 for {set i 0} {$i < [llength $argv]} {incr i} {
@@ -130,11 +131,42 @@ if {[get_property target_language [current_project]] ne "Verilog"} {
 }
 
 # ---- 综合/实现策略（run 参数，必须在本轮 launch_runs 之前写）----
-# GLOBAL_RETIMING：跨寄存器重定时（默认 auto）。DSP48 的时钟使能/复位路径上如果只有一层组合逻辑，
-#   重定时能把它收进 DSP 内部，直接消掉这一段 LUT + 布线。
+# 【策略作用在哪个 run 上】本工程是 BD 工程：BD 顶层 wrapper 由 synth_1 综合，而 BD 里的 IP
+#   默认各自做 out-of-context 综合（run 名 <ip>_synth_1）。**IP 的 OOC run 不继承 synth_1 的
+#   STEPS.SYNTH_DESIGN.ARGS**：实测 dpm_top 的 OOC run 在写策略前是
+#   DIRECTIVE=Default / GLOBAL_RETIMING=auto / MAX_DSP=-1，而真正包含 DSP 域 450MHz 逻辑的正是
+#   dpm_top 这个自定义 IP（synth_1 只综合顶层 wrapper，几乎没有逻辑）。因此策略必须**同时**写到
+#   synth_1 与自定义 IP 的 OOC run 上，否则等于没写（历史坑：此前只改了 synth_1）。
+#   只处理本仓库打包的 dpm_top；厂商 IP（PS7 / clk_wiz / 互联等）保持默认，避免无关重跑与风险。
+# 只按 IP 实例名匹配（前面不写 BD 名），这样 BD 改名后策略仍然落到位
+set custom_ip_names {dpm_top_0_0}
+set custom_ip_synth_runs {}
+foreach ip_name $custom_ip_names {
+    set runs [get_runs -quiet -filter "NAME =~ *${ip_name}_synth_1"]
+    if {[llength $runs] == 0} {
+        # 新建的 BD 工程刚 open 时**还没有** IP 的 OOC 综合 run：它们要等 launch_runs 才被建出来。
+        # `launch_runs synth_1 -scripts_only` 只生成 run 脚本、不启动任何综合，正好用来把 IP run
+        # 物化出来（实测；BD 管理的 IP 不能用 create_ip_run，会报 [Vivado 12-3424] IPI cores ...）。
+        puts "IP_SYNTH_RUNS_MATERIALIZE: launch_runs synth_1 -scripts_only"
+        launch_runs synth_1 -scripts_only
+        set runs [get_runs -quiet -filter "NAME =~ *${ip_name}_synth_1"]
+    }
+    if {[llength $runs] > 0} {
+        lappend custom_ip_synth_runs [get_property NAME [lindex $runs 0]]
+    } else {
+        # 不能静默跳过：策略没落到 450MHz 逻辑所在的 IP 上 = 没有策略（2026-10-19 的教训）
+        error "找不到 $ip_name 的 OOC 综合 run：策略无法作用到高速域逻辑，检查 BD/IP 是否已正确建立"
+    }
+}
+puts "CUSTOM_IP_SYNTH_RUNS: $custom_ip_synth_runs"
+
+# GLOBAL_RETIMING：跨寄存器重定时，默认 off（可用 -retiming 1 打开）。当前 RTL 把两个计数器的
+#   使能/清零写成 `when(clear){0}.elsewhen(enable){+1}`，让综合器映射成 DSP48E1 的 RSTP（同步
+#   复位）+ CEP（时钟使能），使能由**寄存器直接**进 DSP 控制脚；打开重定时有可能把使能寄存器
+#   重新折成 CARRYIN 的组合输入，反而把路径拉长（2026-10-19 之前的实现就是这种形态）。
 # DIRECTIVE PerformanceOptimized：以时序为目标做跨层次优化与寄存器复制。
-# MAX_DSP：把 DSP 用量钉在已知规模上，避免综合器为了别处的时序把 32 位计数器搬来搬去
-#   （本设计只需要 2 个 DSP48）；给 0 表示不设。
+# MAX_DSP：DSP 用量上限，默认 2——两个计数器各占 1 个 DSP48E1，并防止综合器为别处时序再搬
+#   逻辑进 DSP（DSP48E1 在 -1 速度等级下 450MHz 已用掉约 97% 的额定 FMAX）。给 0 表示不设。
 # 实现选 Performance_Retiming 而不是 Performance_ExplorePostRoutePhysOpt：前者的 phys_opt 用
 #   AlternateFlowWithRetiming（官方描述：更激进的复制 + **DSP/BRAM 优化** + 开启重定时），正是本设计
 #   需要的——关键路径终点是 DSP48 的控制脚。
@@ -161,6 +193,14 @@ set strategy_targets [list \
 if {$dsp_budget > 0} {
     lappend strategy_targets [list synth_1 STEPS.SYNTH_DESIGN.ARGS.MAX_DSP $dsp_budget]
 }
+# 同一套综合策略也写到自定义 IP 的 OOC run 上（原因见本节开头）
+foreach run $custom_ip_synth_runs {
+    lappend strategy_targets [list $run STEPS.SYNTH_DESIGN.ARGS.GLOBAL_RETIMING [expr {$retiming ? "on" : "off"}]]
+    lappend strategy_targets [list $run STEPS.SYNTH_DESIGN.ARGS.DIRECTIVE PerformanceOptimized]
+    if {$dsp_budget > 0} {
+        lappend strategy_targets [list $run STEPS.SYNTH_DESIGN.ARGS.MAX_DSP $dsp_budget]
+    }
+}
 # 逐个核对：**只有当前值与目标值不同才写**。对已完成的 run，即使写入相同的值也会让它变成
 # 过期状态（STATUS 不再是 Complete），下一次就无法复用网表——因此这里先比较再决定是否写。
 # 属性值的格式由 Vivado 决定，用字符串比较即可（实测 "on" / "PerformanceOptimized" /
@@ -181,6 +221,11 @@ puts "synth_1 strategy = [get_property strategy [get_runs synth_1]]"
 puts "impl_1  strategy = [get_property strategy [get_runs impl_1]]"
 puts "synth retiming    = [get_property STEPS.SYNTH_DESIGN.ARGS.GLOBAL_RETIMING [get_runs synth_1]]"
 puts "synth directive   = [get_property STEPS.SYNTH_DESIGN.ARGS.DIRECTIVE [get_runs synth_1]]"
+foreach run $custom_ip_synth_runs {
+    puts "ip run $run: directive=[get_property STEPS.SYNTH_DESIGN.ARGS.DIRECTIVE [get_runs $run]] \
+retiming=[get_property STEPS.SYNTH_DESIGN.ARGS.GLOBAL_RETIMING [get_runs $run]] \
+max_dsp=[get_property STEPS.SYNTH_DESIGN.ARGS.MAX_DSP [get_runs $run]]"
+}
 # hook 文件位置（TCL.PRE 的实际挂载在 reset_run 之后由 apply_run_hooks 完成）
 puts "synth hook = $hook_filter"
 puts "impl  hook = $hook_filter (INIT_DESIGN) / $hook_bs (WRITE_BITSTREAM)"
@@ -209,7 +254,12 @@ if {$force_rerun} {
 # 决策只看 run 当前状态，不受 reset 影响，所以先决策、后 reset。
 set synth_reuse [expr {!$force_rerun && [string match "*Complete*" [get_property STATUS [get_runs synth_1]]]}]
 set impl_reuse [expr {!$force_rerun && [string match "*Complete*" [get_property STATUS [get_runs impl_1]]]}]
-if {!$synth_reuse} { reset_run synth_1 }
+if {!$synth_reuse} {
+    # IP 的 OOC run 是 synth_1 的子 run，reset synth_1 不会连带 reset 它们；
+    # 策略或 IP 内容变化后必须把 OOC run 一起 reset，否则会复用旧 checkpoint。
+    foreach run $custom_ip_synth_runs { reset_run $run }
+    reset_run synth_1
+}
 if {!$impl_reuse} { reset_run impl_1 }
 set hook_changed [apply_run_hooks $hook_filter $hook_bs]
 puts "HOOK_APPLIED: changed=$hook_changed"

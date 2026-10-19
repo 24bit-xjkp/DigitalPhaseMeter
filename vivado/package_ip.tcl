@@ -60,7 +60,9 @@ file delete -force $proj_dir
 create_project -force dpm_ip_pack $proj_dir -part $part
 read_verilog -sv $sources
 
-file delete -force $ip_root
+# 只删自己这个 IP 的目录：ip_root 下还有 package_src_ip.tcl 打的 dpm_src_drp，
+# 整个 ip_root 删掉会让「先 package_ip、后 package_src_ip」的顺序变成隐式陷阱
+file delete -force [file join $ip_root $ip_name]
 # 按 Xilinx 约定把 IP 放在 <ip_root>/<ip_name>/ 下
 ipx::package_project -root_dir [file join $ip_root $ip_name] -vendor $vendor -library $library -taxonomy "/UserIP" \
     -import_files -set_current true

@@ -155,13 +155,30 @@ Verilator 与 xsim / Vivado 都能直接编译。
   只保留最新一条时，配一个 `LOST_COUNT`（结果未被读走即被覆盖的次数）加自增 `seq`，软件就能发现漏读。
 - `Fill(n, value)` 是两个参数；`MuxCase(default, Seq(cond -> value))` 里的条件必须是 `Bool`
   （写 `(mode === 1.U) -> addr` 而不是 `mode -> addr`）。
-- **高速域（当前 450MHz）里不要放 32 位加减法**：片内信号源最初用「32 位相位累加器 + 相位字预置」实现，
-  400MHz 轮次实测在 `xc7z010clg400-1`（−1）上综合实现直接违约（配置字预置 → 32 位进位链 → 累加器 D 端，
-  WNS −0.55ns），把预置值改成寄存器直连后违约路径换成了「跨区域取配置字 → 比较器」，WNS −0.71ns。
-  最终方案：**频率与相位差全部交给 PL 内 MMCM 的动态重配置（寄存器写），两路 MMCM 输出直接作为
-  被测信号**，高速域只剩边沿检测与 16 位计数器/比较器，时序一次通过（当前 450MHz 沿用这一结构，
-  Routed 后 WNS +0.291ns）。结论：**高速域只放计数器/比较器这类短逻辑，宽加减法与相位累加放到
-  MMCM 或低速域**。
+- **高速域（当前 450MHz）只放「边沿检测 + 计数器/比较器 + 二级 FSM」**：片内信号源最初用「32 位相位
+  累加器 + 相位字预置」实现，400MHz 轮次实测在 `xc7z010clg400-1`（−1）上直接违约（WNS −0.55 / −0.71 /
+  −1.7ns 等多轮），最终把频率/相位全部交给 MMCM，高速域只剩测量逻辑。450MHz 下测量域自身的
+  最差路径余量 ≥ **+0.583ns**（2026-10-19 轮次）；但**整体 WNS 受 clk_wiz Safe Clock Startup 的
+  内部路径限制（+0.291ns）**，不要拿整体 WNS 判断测量逻辑还剩多少优化空间。
+- **450MHz 的 32 位计数器用 DSP48E1，不要用 fabric 进位链**（2026-10-19 轮次实测，同一份工程）：
+  - 32 位 fabric 计数器（`-max_dsp 0` 强制）WNS −0.610ns（8 个 CARRY4 串联）；
+  - 「16 位低段 + 16 位高段、段间进位打一拍」的 fabric 分段计数器仍只有 −0.117ns；
+    继续加分段、输出流水或 pblock 都收敛不到正余量——固定开销在「FF → LUT → CARRY4 的 S 输入」
+    与「计数器 Q 被跨时钟域远负载拉长的布线」上；
+  - DSP48E1 在 -1 速度等级的 FMAX 是 464.25MHz（DS187 Table 66），450MHz 用掉约 97%，**但 Vivado
+    时序分析会检查 DSP 内部路径与 CARRYIN/CEP/RSTP 控制脚**；本设计实现后计数器控制路径余量
+    +0.583 / +0.616ns，所以这里 DSP 计数器反而比 fabric 稳。
+- **计数器的控制写法决定 DSP 映射**：`cnt := Mux(io.clear, 0.U, cnt + io.enable)` 会让综合器把使能
+  推断成 DSP 的 CARRYIN（前面多一级 LUT，2026-10-19 之前正是这条路径只留下 +0.088 / −0.049ns）；
+  写成 `when(io.clear) { cnt := 0.U }.elsewhen(io.enable) { cnt := cnt + 1.U }` 才会映射成 DSP 的
+  RSTP（同步复位）+ CEP（时钟使能），使能/清零由**寄存器直接**驱动控制脚（+0.583 / +0.616ns）。
+  用 `addAttribute(cnt, """use_dsp = "yes"""")` 显式要求 DSP，避免综合器换成 fabric 实现。
+- **边沿检测器的组合触发要打一拍再进 FSM/使能译码**：3 级同步链最后一级 → 组合触发脉冲 → FSM 两级
+  LUT 是一条 0.188~0.212ns 余量的路径。给**四条**边沿检测输出（sig1 / sig2 / request / responseReady）
+  统一加一级 `RegNext` 后：检测器输出只驱动本地触发器，FSM 输入来自寄存器，本设计里相关路径
+  余量 > +0.7ns。因为四路整体晚 1 个高速周期，`pulseSig1Valid` / `pulseSig2Valid` / `phaseCntEnable`
+  之间的相对时序与相位计数窗口长度不变，握手只是多 1 拍；计数器停止后冻结、慢域握手完成后才锁存，
+  读数不变（xsim 顶端用例与加流水前逐条 diff 为空、Verilator Controller 用例全过）。
 - **跨时钟域送来的多 bit 配置在高速域里落点可能很远**：400MHz 轮次的数字分频器实现里，分频比从
   配置总线到分频器属于同一个 DSP 域，但两者跟随的物理通路不同，布局后这条同域路径实测 6.3ns
   （逻辑 2.9 + 布线 3.5）。处理方式是在消费模块里先打一拍（`RegNext(io.config)`），让比较器与
@@ -206,7 +223,8 @@ Verilator 与 xsim / Vivado 都能直接编译。
   把 `dspReset` 也接到 `clock` 域的同步器上（照抄上一行），生成 RTL 表面完全正常，实际是跨域释放。
   另有一条 400MHz 轮次的实测结论：DSP 域复位**由谁产生**会影响 `dspClock` 域复位分配网络的布局，
   进而影响高速域余量（同一份实现流程下，链的异步端接 `resetn` 与接同步后的 `mainReset` 差
-  0.1～0.2ns）。当前 450MHz 设计把链的异步端接在 `mainReset` 上，Routed 后 WNS +0.291ns。
+  0.1～0.2ns）。当前 450MHz 设计把链的异步端接在 `mainReset` 上；2026-10-19 轮次该复位分配路径
+  余量 +0.583ns（已经是测量域内的最差路径，整体 WNS 由 clk_wiz 内部路径决定）。
 - `ResetSynchronizer` 是 `RawModule`，自己显式声明 `clock` / `resetn` / `reset`；复位链直接复用
   `MyShiftRegister(false.B, n, true.B)`（`ShiftRegister.scala`），并且例化在
   `withClockAndReset(clock, (!resetn).asAsyncReset)` 里，因此链上寄存器是**异步复位**的：置位立即生效，
