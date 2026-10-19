@@ -89,13 +89,13 @@ class DigitalPhaseMeterTop(
         // 使能与选择位取自同一域的寄存器堆，因此写寄存器与切换同拍生效，不需要跨时钟域
         controller.io.sig := SignalInputMux(controlRegs.io.sigEnable, controlRegs.io.srcSelect, extSig, intSig)
 
-        val axiLiteSlave = Module(new Axi4LiteSlave(addrWidth, dataWidth))
+        val axiLiteSlave = Axi4LiteSlave(addrWidth, dataWidth)
 
         // AXI4-Lite 从口 ↔ 寄存器堆
-        s_axi_lite :<>= axiLiteSlave.io.axi
-        controlRegs.io.wr :<>= axiLiteSlave.io.wr
-        controlRegs.io.rd :<>= axiLiteSlave.io.rd
-        axiLiteSlave.io.rdData := controlRegs.io.rdData
+        s_axi_lite :<>= axiLiteSlave.axi
+        controlRegs.io.wr :<>= axiLiteSlave.wr
+        controlRegs.io.rd :<>= axiLiteSlave.rd
+        axiLiteSlave.rdData := controlRegs.io.rdData
 
         // 寄存器堆 ↔ 控制器（测量请求/结果）
         controller.io.in := controlRegs.io.request

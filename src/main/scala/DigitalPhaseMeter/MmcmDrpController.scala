@@ -92,9 +92,9 @@ class MmcmDrpController(val addrWidth: Int = 32, val dataWidth: Int = 32, val re
 
         // ---- AXI4-Lite 从口 ----
         // 寄存器空间只有 11 个字、读写都一拍完成：就地吸收命令，不给 AXI 挂起。
-        val axiLiteSlave = Module(new Axi4LiteSlave(addrWidth, dataWidth))
-        axiLiteSlave.io.wr.ready := true.B
-        axiLiteSlave.io.rd.ready := true.B
+        val axiLiteSlave = Axi4LiteSlave(addrWidth, dataWidth)
+        axiLiteSlave.wr.ready := true.B
+        axiLiteSlave.rd.ready := true.B
 
         val busy = RegInit(false.B)
         // 软件写 LOAD=1 置起本标志；状态机在 IDLE 看到它就开始重配置并清除。
@@ -114,8 +114,8 @@ class MmcmDrpController(val addrWidth: Int = 32, val dataWidth: Int = 32, val re
             val rest = Cat(addr(11, 6), addr(1, 0))
             rest === 0.U
         }
-        val inWindow = inWindowOf(axiLiteSlave.io.wr.bits.addr)
-        val inWindowRd = inWindowOf(axiLiteSlave.io.rd.bits.addr)
+        val inWindow = inWindowOf(axiLiteSlave.wr.bits.addr)
+        val inWindowRd = inWindowOf(axiLiteSlave.rd.bits.addr)
 
         // 写通道：按 `wstrb` 合并字节（保持 AXI 字节选通语义，
         // 同时让 32 位写数据与 4 位选通全部被真正消费）。
@@ -126,29 +126,29 @@ class MmcmDrpController(val addrWidth: Int = 32, val dataWidth: Int = 32, val re
         def merged(old16: UInt, newIn: UInt): UInt = {
             val lo = Wire(UInt(8.W))
             val hi = Wire(UInt(8.W))
-            lo := Mux(axiLiteSlave.io.wr.bits.strb(0), newIn(7, 0), old16(7, 0))
-            hi := Mux(axiLiteSlave.io.wr.bits.strb(1), newIn(15, 8), old16(15, 8))
+            lo := Mux(axiLiteSlave.wr.bits.strb(0), newIn(7, 0), old16(7, 0))
+            hi := Mux(axiLiteSlave.wr.bits.strb(1), newIn(15, 8), old16(15, 8))
             Cat(hi, lo)
         }
 
         // LOAD 是写 1 触发，不落寄存器；用字节选通合并后的值
-        when(axiLiteSlave.io.wr.valid && inWindow) {
-            switch(axiLiteSlave.io.wr.bits.addr(5, 2)) {
-                is(2.U) { cfgClkfbout := merged(cfgClkfbout, axiLiteSlave.io.wr.bits.data)(15, 0) }
+        when(axiLiteSlave.wr.valid && inWindow) {
+            switch(axiLiteSlave.wr.bits.addr(5, 2)) {
+                is(2.U) { cfgClkfbout := merged(cfgClkfbout, axiLiteSlave.wr.bits.data)(15, 0) }
                 is(3.U) {
-                    cfgClkfbout2 := merged(cfgClkfbout2, axiLiteSlave.io.wr.bits.data)(15, 0)
+                    cfgClkfbout2 := merged(cfgClkfbout2, axiLiteSlave.wr.bits.data)(15, 0)
                 }
-                is(4.U) { cfgClkout0 := merged(cfgClkout0, axiLiteSlave.io.wr.bits.data)(15, 0) }
+                is(4.U) { cfgClkout0 := merged(cfgClkout0, axiLiteSlave.wr.bits.data)(15, 0) }
                 is(5.U) {
-                    cfgClkout0_2 := merged(cfgClkout0_2, axiLiteSlave.io.wr.bits.data)(15, 0)
+                    cfgClkout0_2 := merged(cfgClkout0_2, axiLiteSlave.wr.bits.data)(15, 0)
                 }
-                is(6.U) { cfgClkout1 := merged(cfgClkout1, axiLiteSlave.io.wr.bits.data)(15, 0) }
+                is(6.U) { cfgClkout1 := merged(cfgClkout1, axiLiteSlave.wr.bits.data)(15, 0) }
                 is(7.U) {
-                    cfgClkout1_2 := merged(cfgClkout1_2, axiLiteSlave.io.wr.bits.data)(15, 0)
+                    cfgClkout1_2 := merged(cfgClkout1_2, axiLiteSlave.wr.bits.data)(15, 0)
                 }
-                is(8.U) { cfgDivclk := merged(cfgDivclk, axiLiteSlave.io.wr.bits.data)(15, 0) }
-                is(9.U) { cfgPower := merged(cfgPower, axiLiteSlave.io.wr.bits.data)(15, 0) }
-                is(10.U) { when(axiLiteSlave.io.wr.bits.data(0)) { loadPending := true.B } }
+                is(8.U) { cfgDivclk := merged(cfgDivclk, axiLiteSlave.wr.bits.data)(15, 0) }
+                is(9.U) { cfgPower := merged(cfgPower, axiLiteSlave.wr.bits.data)(15, 0) }
+                is(10.U) { when(axiLiteSlave.wr.bits.data(0)) { loadPending := true.B } }
             }
         }
 
@@ -158,9 +158,9 @@ class MmcmDrpController(val addrWidth: Int = 32, val dataWidth: Int = 32, val re
         val drpLastRead = RegNext(drp_dout, 0.U)
 
         // 读数据：窗口外读回 0。寄存器的数据只用低 16 位，高 16 位恒 0。
-        axiLiteSlave.io.rdData := Mux(
+        axiLiteSlave.rdData := Mux(
             inWindowRd,
-            MuxLookup(axiLiteSlave.io.rd.bits.addr(5, 2), 0.U)(
+            MuxLookup(axiLiteSlave.rd.bits.addr(5, 2), 0.U)(
                 Seq(
                     0.U -> 0x44504d03L.U, // "DPM3"
                     1.U -> Cat(drpLastRead, 13.U(13.W), busy, busy, lockedSync),
@@ -239,7 +239,7 @@ class MmcmDrpController(val addrWidth: Int = 32, val dataWidth: Int = 32, val re
         }
 
         // AXI 从口：本模块顶层端口与 Axi4LiteSlave 的方向约定一致，直接整体连接
-        s_axi_lite :<>= axiLiteSlave.io.axi
+        s_axi_lite :<>= axiLiteSlave.axi
     }
 }
 
