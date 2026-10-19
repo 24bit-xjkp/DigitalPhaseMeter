@@ -191,16 +191,16 @@ BD 又无法直接例化原语（`-type primitive` 不支持，`-reference BUFGC
 **代价与对比**（400MHz 轮次历史；xc7z010clg400-1，同一份 RTL、同一策略、同一会话下重跑的 A/B，
 两版都跑完整的 `package_ip` → `create_bd` → `build_bitstream` 流水线）：
 
-| 项                    | 手写 BUFGCE 门控                         | Safe Clock Startup                   |
-| --------------------- | ---------------------------------------- | ------------------------------------ |
-| Slice LUT             | 557                                      | 557                                  |
-| Slice Register        | 946                                      | **954**（+8：8 bit 移位寄存器）      |
-| BUFGCTRL              | 4                                        | **3**（−1：不再需要外部那一级 BUFG） |
-| BUFH                  | 0                                        | **1**（+1：给移位寄存器供时钟）      |
-| DSP / Block RAM / IOB | 2 / 0 / 2                                | 2 / 0 / 2                            |
-| 综合+实现 WNS / WHS   | +0.270 / +0.095 ns                       | +0.358 / +0.062 ns                   |
-| `report_methodology`  | TIMING-4 / 27 / 28 = 1 / 1 / 2           | **完全相同**                         |
-| `check_timing`        | 12 项全零（仅 sig1/sig2 的 MEDIUM 提示） | **完全相同**                         |
+| 项                    | 手写 BUFGCE 门控                                       | Safe Clock Startup                   |
+| --------------------- | ------------------------------------------------------ | ------------------------------------ |
+| Slice LUT             | 557                                                    | 557                                  |
+| Slice Register        | 946                                                    | **954**（+8：8 bit 移位寄存器）      |
+| BUFGCTRL              | 4                                                      | **3**（−1：不再需要外部那一级 BUFG） |
+| BUFH                  | 0                                                      | **1**（+1：给移位寄存器供时钟）      |
+| DSP / Block RAM / IOB | 2 / 0 / 2                                              | 2 / 0 / 2                            |
+| 综合+实现 WNS / WHS   | +0.270 / +0.095 ns                                     | +0.358 / +0.062 ns                   |
+| `report_methodology`  | TIMING-4 / 27 / 28 = 1 / 1 / 2                         | **完全相同**                         |
+| `check_timing`        | 12 项全零（仅 extSig_sig1/extSig_sig2 的 MEDIUM 提示） | **完全相同**                         |
 
 最后两行说明这次替换没有引入新的方法学告警或未约束端点：TIMING-4/27 来自 clk_wiz 自带 XDC 在
 `clk_in1` 上建的 primary clock，TIMING-28 来自顶层 XDC 按时钟名引用自动派生时钟，两者都是既有写法。
@@ -234,10 +234,10 @@ processing_system7_0 ──M_AXI_GP0(AXI3, ID 12)──► axi_interconnect_0 �
         │                             └── DRP ◄── dpm_src_drp_0（PS 写 MMCM 寄存器镜像）
         └◄── IRQ_F2P ◄── xlconcat_0 ◄── dpm_top_0/interrupt（IRQ_F2P[0]）
 
-sig1 / sig2：BD 外部端口 → dpm_top_0（顶层 XDC 里约束到引脚 W18 / W19，LVCMOS33）
+extSig_sig1 / sig2：BD 外部端口 → dpm_top_0（顶层 XDC 里约束到引脚 W18 / W19，LVCMOS33）
 PS 串口：PS7 的 UART（默认 UART1 = MIO48/49，`create_bd.tcl -uart` 可换成 UART0 = MIO14/15 或 none）
 
-dpm_top_0 内部：外部 sig1/sig2 与片内源（MMCM 的两路输出）经 SignalInputMux 二选一，
+dpm_top_0 内部：外部 extSig_sig1/extSig_sig2 与片内源（MMCM 的两路输出）经 SignalInputMux 二选一，
 门控与选择都在主时钟域（s_axi_lite 寄存器区所在的域）完成，只有选择结果作为异步被测信号
 进测量域的采样链；使能/选择位与寄存器堆同域，因此写 SIG_CTRL 与切换同拍生效。
 ```
@@ -410,11 +410,11 @@ void dpm_irq_handler(void)
    `set_max_delay -datapath_only 20ns` 覆盖，450MHz 轮次实测余量 +17.053ns（慢→快）/
    +18.363ns（快→慢）。片内源的两路 `clkout*_raw` 到 DSP 域的采样链按异步输入处理
    （`set_false_path`），`srcLocked` 这类准静态电平用 `set_max_delay -datapath_only 20ns` 进慢域。
-3. **为什么 sig1/sig2 用 `set_false_path` 而不是 max_delay**：它们是外部异步输入，
+3. **为什么 extSig_sig1/extSig_sig2 用 `set_false_path` 而不是 max_delay**：它们是外部异步输入，
    在 IP 内部立刻进 `EdgeDetector` 的 3 级 `ASYNC_REG` 同步链（见 `dpm-chisel-rtl`），
    第一级就是同步器，不需要建立/保持关系。`check_timing` 把它列为 MEDIUM 提示是预期的
    （提示「有 false path 的输入端口没有 input delay」）；引脚与 IO 标准已在
-   [`constraints/dpm_top.xdc`](constraints/dpm_top.xdc) 中给出（`sig1 → W18`、`sig2 → W19`，
+   [`constraints/dpm_top.xdc`](constraints/dpm_top.xdc) 中给出（`extSig_sig1 → W18`、`extSig_sig2 → W19`，
    LVCMOS33），换板卡时按实际供电与引脚改这两行。片内信号源的两路 MMCM 输出同样是
    异步输入，已在同一文件里用 `set_false_path -from [get_clocks clkout*_raw]` 处理。
 4. **复位与时钟基础设施不是跨域数据通路**：`resetn` 经**每个时钟域各一个** `ResetSynchronizer`
@@ -498,17 +498,17 @@ void dpm_irq_handler(void)
 实现 `Performance_Retiming`）。**本轮没有重跑 `impl_multi.tcl`**，签核以 `build_bitstream.tcl` 这一次为准
 （`build/vivado/timing_summary.rpt`、`vivado.log`）：
 
-| 项 | 结果 |
-| --- | --- |
-| clk_wiz 实际配置 | `PRIM_IN_FREQ=50MHz`、`MMCM_CLKFBOUT_MULT_F=20.250`、`MMCM_DIVCLK_DIVIDE=1`、`MMCM_CLKOUT0_DIVIDE_F=2.250` → **VCO 1012.5MHz、输出 450MHz**（450 = 50 × 9，故为小数倍频/分频；来源：生成的 `dpm_system_clk_wiz_0_0.xci`） |
-| 全设计时序 | **WNS +0.291ns / WHS +0.032ns / WPWS +0.067ns**，TNS = THS = 0，**0 个失败端点**（端点总数 3427 / 3354 / 1540） |
-| DSP 域内（`clk_out1_dpm_system_clk_wiz_0_0`，周期 2.222ns / 450MHz） | **WNS +0.291ns / WHS +0.163ns / WPWS +0.067ns**，0 个失败端点（36 / 36 / 35） |
-| 片内信号源（`dpm_mmcm_src`，不受 DSP 频率影响） | 2 × 25MHz、相位差 90°（参考 50MHz，M=20、DIVCLK=1、CLKOUT0/1 分频 40，VCO 1000MHz） |
-| 慢域（`clk_fpga_0`） | 域内 WNS +12.493ns / WHS +0.032ns |
-| 跨时钟域（受 XDC 的 `set_max_delay 20ns` 约束） | dsp→slow WNS +18.363ns；slow→dsp WNS +17.053ns |
-| 资源占用 | Slice LUT 891（5.06%）、Slice Register 1453（4.13%）、Block RAM 0（0.00%）、DSP 2（2.50%）、BUFGCTRL 6（18.75%）、MMCME2_ADV 2（100%） |
-| 日志 | 综合 `58 Infos, 0 Warnings, 0 Critical Warnings and 0 Errors`；实现 `148 Infos, 0 Warnings, 0 Critical Warnings and 0 Errors`（`impl_1/runme.log`） |
-| 产物 | `write_bitstream` 成功，`build/vivado/dpm_system.xsa`（含 bitstream）已生成 |
+| 项                                                                   | 结果                                                                                                                                                                                                                      |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| clk_wiz 实际配置                                                     | `PRIM_IN_FREQ=50MHz`、`MMCM_CLKFBOUT_MULT_F=20.250`、`MMCM_DIVCLK_DIVIDE=1`、`MMCM_CLKOUT0_DIVIDE_F=2.250` → **VCO 1012.5MHz、输出 450MHz**（450 = 50 × 9，故为小数倍频/分频；来源：生成的 `dpm_system_clk_wiz_0_0.xci`） |
+| 全设计时序                                                           | **WNS +0.291ns / WHS +0.032ns / WPWS +0.067ns**，TNS = THS = 0，**0 个失败端点**（端点总数 3427 / 3354 / 1540）                                                                                                           |
+| DSP 域内（`clk_out1_dpm_system_clk_wiz_0_0`，周期 2.222ns / 450MHz） | **WNS +0.291ns / WHS +0.163ns / WPWS +0.067ns**，0 个失败端点（36 / 36 / 35）                                                                                                                                             |
+| 片内信号源（`dpm_mmcm_src`，不受 DSP 频率影响）                      | 2 × 25MHz、相位差 90°（参考 50MHz，M=20、DIVCLK=1、CLKOUT0/1 分频 40，VCO 1000MHz）                                                                                                                                       |
+| 慢域（`clk_fpga_0`）                                                 | 域内 WNS +12.493ns / WHS +0.032ns                                                                                                                                                                                         |
+| 跨时钟域（受 XDC 的 `set_max_delay 20ns` 约束）                      | dsp→slow WNS +18.363ns；slow→dsp WNS +17.053ns                                                                                                                                                                            |
+| 资源占用                                                             | Slice LUT 891（5.06%）、Slice Register 1453（4.13%）、Block RAM 0（0.00%）、DSP 2（2.50%）、BUFGCTRL 6（18.75%）、MMCME2_ADV 2（100%）                                                                                    |
+| 日志                                                                 | 综合 `58 Infos, 0 Warnings, 0 Critical Warnings and 0 Errors`；实现 `148 Infos, 0 Warnings, 0 Critical Warnings and 0 Errors`（`impl_1/runme.log`）                                                                       |
+| 产物                                                                 | `write_bitstream` 成功，`build/vivado/dpm_system.xsa`（含 bitstream）已生成                                                                                                                                               |
 
 作为对照，400MHz 轮次最终的权威历史报告（`build/vivado/timing_summary.rpt.old`，2026-10-16，Routed）为：
 全设计 WNS +0.180ns / WHS +0.036ns，DSP 域内 WNS +0.180ns / WHS +0.122ns（下文历史小节里各轮次记录的
@@ -545,27 +545,27 @@ void dpm_irq_handler(void)
 `(* ASYNC_REG = "TRUE" *)`，生成产物里不再有 XPM 原语。按
 `package_ip.tcl` → `package_src_ip.tcl` → `create_bd.tcl` → `build_bitstream.tcl` 完整重跑：
 
-| 步骤                                             | 结果                                                                                                                                                                                                                     |
-| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `package_ip.tcl` / `package_src_ip.tcl`          | 通过（`ipx::check_integrity: Integrity check passed`），0 ERROR / 0 CRITICAL WARNING；IP 对外 5 个 bus interface 与两段地址块不变                                                                                          |
-| `create_bd.tcl`                                  | 通过（`BD_DONE: dpm_system`），0 ERROR / 0 CRITICAL WARNING                                                                                                                                                               |
-| `build_bitstream.tcl`（官方策略那一次）          | `STRATEGY_CHANGED: 4` → `SYNTH_DONE` / `IMPL_DONE` / `XSA_DONE`、`write_bitstream completed successfully`；0 ERROR / 0 CRITICAL WARNING                                                                                  |
-| 时序（官方策略那一次）                           | **WNS +0.011ns / WHS +0.050ns**，TNS = THS = 0，**0 个失败端点**；最差路径在 DSP 域内部（`controller/phaseMeter/stateReg_reg[2]` → `.../edgeCnt_dspCounter/cnt_reg/CARRYIN`），**与复位同步器无关**                  |
-| 6 次独立实现（`impl_multi.tcl 6`）               | 全部为正、0 个失败端点；同一条 place directive 多次尝试给出完全相同的数值（不是随机波动），明细见下表                                                                                                                     |
-| `ASYNC_REG` 落位（官方策略那次的布线后网表）     | `get_cells -hier -filter {ASYNC_REG == 1}` 共 **71** 个触发器带该属性；每条同步链的触发器被放进**同一个 slice**（`dpm_top` 的 `dspReset` 4 级链在 `SLICE_X11Y46`、`mainReset` 在 `SLICE_X11Y53`，`dpm_src_drp` 的在 `SLICE_X13Y52`），属性确实在实现阶段生效             |
-| `check_timing`（同上）                           | 12 项全零；唯一非零项仍是 sig1/sig2 的「有 `set_false_path` 但无 input delay」MEDIUM 提示                                                                                                                                 |
-| `report_methodology`（同上）                     | TIMING-4 ×1、TIMING-27 ×1（clk_wiz 自带 XDC 在 `clk_in1` 上建 primary clock）、TIMING-28 ×7（顶层 XDC 按名字引用 MMCM 派生时钟）、TIMING-47 ×2（`clkout*_raw` ↔ `clk_fpga_0` 的 `set_max_delay -datapath_only`），全部 `Related violations: <none>`，均来自既有写法 |
+| 步骤                                         | 结果                                                                                                                                                                                                                                                                |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `package_ip.tcl` / `package_src_ip.tcl`      | 通过（`ipx::check_integrity: Integrity check passed`），0 ERROR / 0 CRITICAL WARNING；IP 对外 5 个 bus interface 与两段地址块不变                                                                                                                                   |
+| `create_bd.tcl`                              | 通过（`BD_DONE: dpm_system`），0 ERROR / 0 CRITICAL WARNING                                                                                                                                                                                                         |
+| `build_bitstream.tcl`（官方策略那一次）      | `STRATEGY_CHANGED: 4` → `SYNTH_DONE` / `IMPL_DONE` / `XSA_DONE`、`write_bitstream completed successfully`；0 ERROR / 0 CRITICAL WARNING                                                                                                                             |
+| 时序（官方策略那一次）                       | **WNS +0.011ns / WHS +0.050ns**，TNS = THS = 0，**0 个失败端点**；最差路径在 DSP 域内部（`controller/phaseMeter/stateReg_reg[2]` → `.../edgeCnt_dspCounter/cnt_reg/CARRYIN`），**与复位同步器无关**                                                                 |
+| 6 次独立实现（`impl_multi.tcl 6`）           | 全部为正、0 个失败端点；同一条 place directive 多次尝试给出完全相同的数值（不是随机波动），明细见下表                                                                                                                                                               |
+| `ASYNC_REG` 落位（官方策略那次的布线后网表） | `get_cells -hier -filter {ASYNC_REG == 1}` 共 **71** 个触发器带该属性；每条同步链的触发器被放进**同一个 slice**（`dpm_top` 的 `dspReset` 4 级链在 `SLICE_X11Y46`、`mainReset` 在 `SLICE_X11Y53`，`dpm_src_drp` 的在 `SLICE_X13Y52`），属性确实在实现阶段生效        |
+| `check_timing`（同上）                       | 12 项全零；唯一非零项仍是 extSig_sig1/extSig_sig2 的「有 `set_false_path` 但无 input delay」MEDIUM 提示                                                                                                                                                             |
+| `report_methodology`（同上）                 | TIMING-4 ×1、TIMING-27 ×1（clk_wiz 自带 XDC 在 `clk_in1` 上建 primary clock）、TIMING-28 ×7（顶层 XDC 按名字引用 MMCM 派生时钟）、TIMING-47 ×2（`clkout*_raw` ↔ `clk_fpga_0` 的 `set_max_delay -datapath_only`），全部 `Related violations: <none>`，均来自既有写法 |
 
 多次实现的明细（同一份综合网表，逐次 `reset_run impl_1` 后 place/route）：
 
-| 尝试 | place directive        | route directive    | WNS(ns) | WHS(ns) | 失败端点 |
-| ---- | ---------------------- | ------------------ | ------- | ------- | -------- |
-| 1    | Explore                | AggressiveExplore  | +0.087  | +0.013  | 0        |
-| 2    | AggressiveExplore      | AggressiveExplore  | +0.087  | +0.013  | 0        |
-| 3    | ExtraTimingOpt         | AggressiveExplore  | +0.079  | +0.012  | 0        |
-| 4    | ExtraPostPlacementOpt  | AggressiveExplore  | +0.011  | +0.050  | 0        |
-| 5    | Explore                | Explore            | +0.087  | +0.013  | 0        |
-| 6    | AggressiveExplore      | Explore            | +0.087  | +0.013  | 0        |
+| 尝试 | place directive       | route directive   | WNS(ns) | WHS(ns) | 失败端点 |
+| ---- | --------------------- | ----------------- | ------- | ------- | -------- |
+| 1    | Explore               | AggressiveExplore | +0.087  | +0.013  | 0        |
+| 2    | AggressiveExplore     | AggressiveExplore | +0.087  | +0.013  | 0        |
+| 3    | ExtraTimingOpt        | AggressiveExplore | +0.079  | +0.012  | 0        |
+| 4    | ExtraPostPlacementOpt | AggressiveExplore | +0.011  | +0.050  | 0        |
+| 5    | Explore               | Explore           | +0.087  | +0.013  | 0        |
+| 6    | AggressiveExplore     | Explore           | +0.087  | +0.013  | 0        |
 
 **余量结论（需要留意）**：这次重构后，官方策略（`Performance_Retiming`，其 place 预设是
 `ExtraPostPlacementOpt`）的余量只剩 **+0.011ns**，而改动前同一策略那一轮是 +0.281ns。差别是否由
@@ -592,23 +592,23 @@ place directive 的数值可复现、不是随机波动。可用的对策有两�
 > 按新的 `Controller` 结构更新测试后，6 个用例**全部超时**（测量永不返回），波形里 `dspReset` 在
 > 主复位拉低的同一拍被置位后再不释放。修复后按完整流水线重跑：
 
-| 检查                   | 实际运行                                                       | 结果                                                                                                                                                                                          |
-| ---------------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 修复内容               | `Controller.dspReset`                                          | `ResetSynchronizer(dspClock, !reset.asBool)`（取反接入，附注释说明极性）                                                                                                                       |
-| Verilator 全量回归     | `xmake test -v`                                                | **100% passed，4/4 目标**：Controller 6 用例/547 断言、EdgeDetector 1/13、MmcmDrpController 4/85、ResetSynchronizer 1/17（合计 12 用例/662 断言）                                             |
-| xsim 顶层              | `sim/run_xsim.sh --clean`                                      | `==== 测试通过：DigitalPhaseMeterTop 寄存器数据通道 ====`（AXI 通路与片内源切换都覆盖）                                                                                                        |
-| 完整流水线             | `package_ip.tcl` → `package_src_ip.tcl` → `create_bd.tcl` → `build_bitstream.tcl` | `PKG_TOP_OK` / `PKG_SRC_OK` / `BD_DONE` / `SYNTH_DONE` / `IMPL_DONE` / `XSA_DONE`，0 ERROR / 0 CRITICAL WARNING；bitstream 与 `dpm_system.xsa` 已按修复后的网表重新生成                          |
-| 时序（官方策略）       | `Performance_Retiming` 布线后报告                              | **WNS +0.192ns / WHS +0.050ns**，TNS = THS = 0，0 个失败端点；最差路径是 `phaseMeter/pulseSig2_edgeDetector/…/pipeline_1_reg` → `phaseMeter/stateReg_reg[1]/D`（数据 2.197ns，2 级 LUT）        |
-| 资源 / 功耗（同上）    | `report_utilization` / `report_power`                          | LUT 948 / FF 1487 / DSP 2 / BRAM 0 / BUFGCTRL 6；总功耗 **1.886 W**（vectorless）                                                                                                             |
+| 检查                | 实际运行                                                                          | 结果                                                                                                                                                                                     |
+| ------------------- | --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 修复内容            | `Controller.dspReset`                                                             | `ResetSynchronizer(dspClock, !reset.asBool)`（取反接入，附注释说明极性）                                                                                                                 |
+| Verilator 全量回归  | `xmake test -v`                                                                   | **100% passed，4/4 目标**：Controller 6 用例/547 断言、EdgeDetector 1/13、MmcmDrpController 4/85、ResetSynchronizer 1/17（合计 12 用例/662 断言）                                        |
+| xsim 顶层           | `sim/run_xsim.sh --clean`                                                         | `==== 测试通过：DigitalPhaseMeterTop 寄存器数据通道 ====`（AXI 通路与片内源切换都覆盖）                                                                                                  |
+| 完整流水线          | `package_ip.tcl` → `package_src_ip.tcl` → `create_bd.tcl` → `build_bitstream.tcl` | `PKG_TOP_OK` / `PKG_SRC_OK` / `BD_DONE` / `SYNTH_DONE` / `IMPL_DONE` / `XSA_DONE`，0 ERROR / 0 CRITICAL WARNING；bitstream 与 `dpm_system.xsa` 已按修复后的网表重新生成                  |
+| 时序（官方策略）    | `Performance_Retiming` 布线后报告                                                 | **WNS +0.192ns / WHS +0.050ns**，TNS = THS = 0，0 个失败端点；最差路径是 `phaseMeter/pulseSig2_edgeDetector/…/pipeline_1_reg` → `phaseMeter/stateReg_reg[1]/D`（数据 2.197ns，2 级 LUT） |
+| 资源 / 功耗（同上） | `report_utilization` / `report_power`                                             | LUT 948 / FF 1487 / DSP 2 / BRAM 0 / BUFGCTRL 6；总功耗 **1.886 W**（vectorless）                                                                                                        |
 
 两种实现策略对比（**同一份综合网表**，`synth` 参数两边完全相同——`PerformanceOptimized` +
 `GLOBAL_RETIMING on` + `MAX_DSP 2`；每个策略 3 次独立 place/route，由同一个会话内流程复刻
 `impl_1` 的 init_design 后跑，官方那次与工程里 `build_bitstream.tcl` 的结果一致，可交叉验证）：
 
-| 实现策略                                     | 步骤 directive                                                                                                     | WNS                    | WHS      | 最差路径                                                     | 资源 / 功耗                 |
-| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ---------------------- | -------- | ------------------------------------------------------------ | --------------------------- |
-| `Performance_Retiming`（官方，本仓库采用）   | opt `Default` / place `ExtraPostPlacementOpt` / phys_opt `AlternateFlowWithRetiming` / route `Explore`             | **+0.192ns**（3 次全同） | +0.050ns | `pulseSig2_edgeDetector` 采样链 → `stateReg[1]/D`（2.197ns） | 948 / 1487 / 2 DSP / 1.886 W |
-| `Performance_ExplorePostRoutePhysOpt`（`impl_multi.tcl` 留下的实验策略） | opt `Explore` / place `Explore` / phys_opt `AggressiveExplore` / route `Explore -tns_cleanup` / post-route phys_opt `AggressiveExplore` | +0.135ns（3 次全同）   | +0.050ns | `stateReg[2]` → `edgeCnt_dspCounter/cnt_reg/CARRYIN`（2.016ns） | 同上                        |
+| 实现策略                                                                 | 步骤 directive                                                                                                                          | WNS                      | WHS      | 最差路径                                                        | 资源 / 功耗                  |
+| ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ | -------- | --------------------------------------------------------------- | ---------------------------- |
+| `Performance_Retiming`（官方，本仓库采用）                               | opt `Default` / place `ExtraPostPlacementOpt` / phys_opt `AlternateFlowWithRetiming` / route `Explore`                                  | **+0.192ns**（3 次全同） | +0.050ns | `pulseSig2_edgeDetector` 采样链 → `stateReg[1]/D`（2.197ns）    | 948 / 1487 / 2 DSP / 1.886 W |
+| `Performance_ExplorePostRoutePhysOpt`（`impl_multi.tcl` 留下的实验策略） | opt `Explore` / place `Explore` / phys_opt `AggressiveExplore` / route `Explore -tns_cleanup` / post-route phys_opt `AggressiveExplore` | +0.135ns（3 次全同）     | +0.050ns | `stateReg[2]` → `edgeCnt_dspCounter/cnt_reg/CARRYIN`（2.016ns） | 同上                         |
 
 **结论**：极性修复后**官方策略反而更好**（+0.192ns vs +0.135ns，余量多约 42%），因此
 **不需要改 `build_bitstream.tcl` 里的策略**；上一节「把 place directive 换成 Explore/AggressiveExplore
@@ -628,7 +628,7 @@ Safe Clock Startup 之后重跑的脚本，均为实际运行结果（**BD 结�
 
 | 步骤                    | 结果                                                                                                                                                                                                                                                                                                                |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `package_ip.tcl`        | 通过，`ipx::check_integrity: Integrity check passed`，0 ERROR / 0 CRITICAL WARNING；IP 对外 **5 个** bus interface：`s_axi_lite`（19 根 AXI4-Lite 信号全部推断成功）、`clock`、`dspClock`、`resetn`、`interrupt`；片内源的三根信号（`srcSig1` / `srcSig2` / `srcLocked`）是普通引脚                                 |
+| `package_ip.tcl`        | 通过，`ipx::check_integrity: Integrity check passed`，0 ERROR / 0 CRITICAL WARNING；IP 对外 **5 个** bus interface：`s_axi_lite`（19 根 AXI4-Lite 信号全部推断成功）、`clock`、`dspClock`、`resetn`、`interrupt`；片内源的三根信号（`intSig_sig1` / `intSig_sig2` / `srcLocked`）是普通引脚                         |
 | `create_bd.tcl`         | 通过（`BD_DONE: dpm_system`），`validate_bd_design` 0 ERROR / 0 CRITICAL WARNING；BD 用 `axi_interconnect_0`（NUM_SI=1、NUM_MI=2，自动插入 `auto_pc` 做 AXI3→AXI4-Lite）、两个 MMCM（`clk_wiz_0` 出 DSP 域时钟、`clk_wiz_src` 带 DRP）；两段地址 `SEG_dpm_top_0_Reg 0x43C00000` 与 `SEG_clk_wiz_src_Reg 0x43C10000` |
 | 综合 + 实现 + bitstream | 通过（`SYNTH_DONE` / `IMPL_DONE` / `XSA_DONE`，`write_bitstream completed successfully`）；**6 次独立实现的 WNS 全部为正：最差 +0.153ns、最好 +0.389ns**，WHS 均为 +0.025ns，TNS = THS = 0，**0 个失败端点**（每次的报告见 `impl_multi.tcl` 的输出）                                                                |
 | 时钟                    | `clk_fpga_0` 50 MHz（FCLK_CLK0）、DSP 域 400 MHz（`clk_wiz_0` 的 MMCM 输出，2.5 ns）、片内源 2 × 25 MHz 且相位差 90°（`clk_wiz_src` 的 `clk_out1` / `clk_out2`，波形 `{0,20}` 与 `{10,30}` ns，即 90°）；**器件只有 2 个 MMCM，本设计两个都用掉了**                                                                 |
@@ -650,7 +650,7 @@ Safe Clock Startup 之后重跑的脚本，均为实际运行结果（**BD 结�
 ## 注意事项与已知限制
 
 - **本仓库不绑定开发板**：`build_bitstream.tcl` 把 `NSTD-1`（IO 标准未指定）与 `UCIO-1`
-  （引脚未约束）两条 DRC 降级为警告，否则 `sig1`/`sig2` 缺少引脚约束会让 `write_bitstream` 中断。
+  （引脚未约束）两条 DRC 降级为警告，否则 `extSig_sig1`/`extSig_sig2` 缺少引脚约束会让 `write_bitstream` 中断。
   使用具体开发板时，请加入板级约束文件并去掉这两条降级。
 - 没有板级文件时，综合/实现的日志里原本会出现约 100 条
   `[Netlist 29-160] Cannot set property 'iostandard'/'PACKAGE_PIN'/'slew'/'PIO_DIRECTION' ...` 的
@@ -662,8 +662,8 @@ Safe Clock Startup 之后重跑的脚本，均为实际运行结果（**BD 结�
   见上文「告警清理」）：这些语句落在「未使能因而在网表里不存在」的引脚上，改不动也不该改。
   若换成绑定了 board part 的工程，应当把该文件里对应的 `set_msg_config` 行删掉，
   让真正的引脚属性问题重新暴露出来。
-- `sig1`/`sig2` 的 `PACKAGE_PIN`/`IOSTANDARD` 已按本仓库默认板级方案写死在
-  [`constraints/dpm_top.xdc`](constraints/dpm_top.xdc)（`sig1 → W18`、`sig2 → W19`，LVCMOS33）。
+- `extSig_sig1`/`extSig_sig2` 的 `PACKAGE_PIN`/`IOSTANDARD` 已按本仓库默认板级方案写死在
+  [`constraints/dpm_top.xdc`](constraints/dpm_top.xdc)（`extSig_sig1 → W18`、`extSig_sig2 → W19`，LVCMOS33）。
   这两个引脚在 `xc7z010clg400-1` 上属于 bank 34 的差分对 `L22`（`IO_L22P_T3_34` / `IO_L22N_T3_34`），
   这里当两路独立单端输入用；换板卡时按实际引脚与 bank 供电（LVCMOS33 需要 VCCO=3.3V）改这两行。
   两个信号按异步输入约束（`set_false_path`），PL 内部由带 `ASYNC_REG` 的同步链采样。

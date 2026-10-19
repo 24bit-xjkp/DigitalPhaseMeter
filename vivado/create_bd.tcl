@@ -35,7 +35,7 @@
 #          │                          └── DRP ◄── dpm_src_drp_0（极简 DRP 控制器，方案 A）
 #          └◄── IRQ_F2P ◄── xlconcat_0 ◄── dpm_top_0/interrupt（IRQ_F2P[0]）
 #
-#   sig1 / sig2 作为 BD 外部端口引出，供顶层约束分配引脚
+#   extSig_sig1 / extSig_sig2 作为 BD 外部端口引出，供顶层约束分配引脚
 #
 # 片内信号源（方案 A：裸 MMCM + 极简 DRP 控制器）：
 #   - 两路输出同频（初始 25MHz）、相位差 90°，**频率与相位差都由 PS 写成 MMCM 的
@@ -322,7 +322,7 @@ if {$use_mmcm} {
 #   Write DRP 生成值逐点验证）。
 #
 # 结构：
-#   FCLK_CLK0(50MHz) ──► dpm_mmcm_src(clkIn) ──► clkOut1/clkOut2 ──► dpm_top_0/srcSig1,srcSig2
+#   FCLK_CLK0(50MHz) ──► dpm_mmcm_src(clkIn) ──► clkOut1/clkOut2 ──► dpm_top_0/intSig_sig1,intSig_sig2
 #                                          └──► locked ──► dpm_src_drp/locked、dpm_top_0/srcLocked
 #   dpm_src_drp（AXI4-Lite 从口 @0x43C1_0000）──► DRP 口 ──► dpm_mmcm_src
 #
@@ -350,8 +350,8 @@ create_bd_cell -type ip -vlnv xilinx.com:ip:xlconcat:2.1 xlconcat_0
 set_property -dict [list CONFIG.NUM_PORTS {16}] [get_bd_cells xlconcat_0]
 
 # ---- 被测信号引出为外部端口 ----
-create_bd_port -dir I sig1
-create_bd_port -dir I sig2
+create_bd_port -dir I extSig_sig1
+create_bd_port -dir I extSig_sig2
 
 # ---- 时钟与复位 ----
 connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0] [get_bd_pins processing_system7_0/M_AXI_GP0_ACLK]
@@ -385,8 +385,8 @@ connect_bd_net [get_bd_pins dpm_mmcm_src_0/drpDrdy] [get_bd_pins dpm_src_drp_0/d
 connect_bd_net [get_bd_pins dpm_src_drp_0/mmcm_reset] [get_bd_pins dpm_mmcm_src_0/drpReset]
 connect_bd_net [get_bd_pins dpm_mmcm_src_0/locked] [get_bd_pins dpm_src_drp_0/locked]
 # 两路源信号与锁定指示送给 IP
-connect_bd_net [get_bd_pins dpm_mmcm_src_0/clkOut1] [get_bd_pins dpm_top_0/srcSig1]
-connect_bd_net [get_bd_pins dpm_mmcm_src_0/clkOut2] [get_bd_pins dpm_top_0/srcSig2]
+connect_bd_net [get_bd_pins dpm_mmcm_src_0/clkOut1] [get_bd_pins dpm_top_0/intSig_sig1]
+connect_bd_net [get_bd_pins dpm_mmcm_src_0/clkOut2] [get_bd_pins dpm_top_0/intSig_sig2]
 connect_bd_net [get_bd_pins dpm_mmcm_src_0/locked] [get_bd_pins dpm_top_0/srcLocked]
 connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0] [get_bd_pins dpm_top_0/clock]
 connect_bd_net [get_bd_pins proc_sys_reset_0/peripheral_aresetn] [get_bd_pins dpm_top_0/resetn]
@@ -412,8 +412,8 @@ connect_bd_net [get_bd_pins dpm_top_0/interrupt] [get_bd_pins xlconcat_0/In0]
 connect_bd_net [get_bd_pins xlconcat_0/dout] [get_bd_pins processing_system7_0/IRQ_F2P]
 
 # ---- 被测信号 ----
-connect_bd_net [get_bd_ports sig1] [get_bd_pins dpm_top_0/sig1]
-connect_bd_net [get_bd_ports sig2] [get_bd_pins dpm_top_0/sig2]
+connect_bd_net [get_bd_ports extSig_sig1] [get_bd_pins dpm_top_0/extSig_sig1]
+connect_bd_net [get_bd_ports extSig_sig2] [get_bd_pins dpm_top_0/extSig_sig2]
 
 # ---- 地址分配：测量 IP 4KB + 片内源 MMCM 的动态重配置口 4KB ----
 assign_bd_address -quiet -target_address_space /processing_system7_0/Data \

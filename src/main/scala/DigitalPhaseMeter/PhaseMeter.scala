@@ -6,7 +6,7 @@ import chisel3.experimental.prefix
 
 /** 相位计输入信号，sig1为参考信号，sig2为被测信号
   */
-class PhaseMeterSignalPayload extends Bundle { val sig1, sig2 = Input(Bool()) }
+class PhaseMeterSignalPayload extends Bundle { val sig1, sig2 = Bool() }
 
 /** 相位计响应负载
   *
@@ -32,7 +32,7 @@ class PhaseMeterResponsePayload(val edgeCntWidth: Int = 32, val phaseCntWidth: I
 class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extends Module {
     val io = IO(new Bundle {
         // 输入信号
-        val sig = new PhaseMeterSignalPayload
+        val sig = Input(new PhaseMeterSignalPayload)
         // 请求控制字
         val request = Input(Bool())
         // 响应控制字

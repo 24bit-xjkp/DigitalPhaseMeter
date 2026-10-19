@@ -634,7 +634,7 @@ class DpmClient:
                 f"（{GATE_TIMEOUT_FACTOR:g}×闸门 + {GATE_TIMEOUT_SLACK_S:g}s）"
             )
         if st is not None:
-            source = "片内信号源" if st.sig_select else "外部引脚 sig1/sig2"
+            source = "片内信号源" if st.sig_select else "外部引脚 extSig_sig1/extSig_sig2"
             parts.append(
                 f"当前输入源 = {source}，status=0x{st.status:08X}"
                 f"（busy={int(st.busy)} resultValid={int(st.result_valid)}）"
@@ -644,7 +644,7 @@ class DpmClient:
                 parts.append("片内源未使能或 MMCM 未锁定：先 SET_SOURCE(1) 等 sourceReady=1，或改用外部输入")
             elif not st.sig_select:
                 parts.append(
-                    "外部引脚没有边沿：确认 sig1/sig2 已接两路同频信号、与开发板共地，"
+                    "外部引脚没有边沿：确认 extSig_sig1/extSig_sig2 已接两路同频信号、与开发板共地，"
                     "电平满足引脚 IO 标准（默认 LVCMOS33），且频率落在闸门窗口内"
                 )
             if st.busy and st.result_valid:

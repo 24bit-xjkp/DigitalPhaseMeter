@@ -89,37 +89,37 @@ python3 -m dpm_host --port /dev/pts/2 gui --port /dev/pts/2
 
 常用 `sim_server` 选项：
 
-| 选项 | 作用 |
-| --- | --- |
-| `--pty` / `--device PATH` | 建一对 pty / 在已有串口或别人建好的 pty 上服务（`spec/validate_sweep.py` 用 `--device {device}`） |
-| `--pty-link PATH` | 给 pty 从设备建一个固定路径的软链接（脚本里好引用） |
-| `--freq HZ` `--phase DEG` `--gate N` | 片内源初始频率/相位与闸门目标 |
-| `--mode single\|continuous` `--source ext\|int` | 初始模式与输入源 |
-| `--phase-model auto\|controllable\|static` | 片内源相位模型，见第 6 节 |
-| `--no-sig-enable` | 片内源不使能 → 两路恒低 → 测量**永不完成**（验证上位机超时退出） |
-| `--ext-freq/--ext-phase/--ext-disable` | 外部输入的模拟信号（默认 10MHz/0°，`--ext-disable` = 没信号） |
-| `--slow-hz/--dsp-hz/--gate/--meas-latency-ms/--config-delay-ms/--mmcm-lock-ms` | 模型参数 |
-| `--verbose` | 把收发帧日志打到 stderr |
+| 选项                                                                           | 作用                                                                                              |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| `--pty` / `--device PATH`                                                      | 建一对 pty / 在已有串口或别人建好的 pty 上服务（`spec/validate_sweep.py` 用 `--device {device}`） |
+| `--pty-link PATH`                                                              | 给 pty 从设备建一个固定路径的软链接（脚本里好引用）                                               |
+| `--freq HZ` `--phase DEG` `--gate N`                                           | 片内源初始频率/相位与闸门目标                                                                     |
+| `--mode single\|continuous` `--source ext\|int`                                | 初始模式与输入源                                                                                  |
+| `--phase-model auto\|controllable\|static`                                     | 片内源相位模型，见第 6 节                                                                         |
+| `--no-sig-enable`                                                              | 片内源不使能 → 两路恒低 → 测量**永不完成**（验证上位机超时退出）                                  |
+| `--ext-freq/--ext-phase/--ext-disable`                                         | 外部输入的模拟信号（默认 10MHz/0°，`--ext-disable` = 没信号）                                     |
+| `--slow-hz/--dsp-hz/--gate/--meas-latency-ms/--config-delay-ms/--mmcm-lock-ms` | 模型参数                                                                                          |
+| `--verbose`                                                                    | 把收发帧日志打到 stderr                                                                           |
 
 ## 4. CLI 子命令
 
-| 子命令 | 对应协议/功能 |
-| --- | --- |
-| `ping` | `PING`（连通性 + 往返时间 + 收发统计） |
-| `identify` | `IDENTIFY`（版本、caps、两侧时钟、flags） |
-| `status` | `GET_STATUS`（状态位 + `SIG_STATUS` 解读） |
-| `start [--no-wait]` | `START`（默认等结果并打印） |
-| `meas [--expect-deg X] [--no-start]` | `GET_MEAS`（无结果时自动测一次；`phaseCnt/edgeCnt` 主判据 + 期望值判据） |
-| `monitor [-n N] [-d SEC] [--stream] [--csv PATH]` | 连续测量（轮询或流模式通知） |
-| `mode single\|continuous` | `SET_MODE` |
-| `source ext\|int [--wait-ready]` | `SET_SOURCE` |
-| `sig [--freq HZ] [--phase DEG] [--dry-run]` | `SET_SIG`/`GET_SIG`（先本地求解 MMCM 工作点并打印 DRP 字） |
-| `gate N` | `SET_GATE` |
-| `stream on\|off [-n N] [-d SEC]` | `STREAM`（on 时打印收到的 `STREAM_DATA`） |
-| `clear` / `reset` | `CLEAR` / `RESET_COUNTERS` |
-| `scan --freqs ... --phases ... --out CSV` | 多频点 × 多相位扫描 → CSV |
-| `sigtable` | 离线：相位语义 + 冻结频点表 + 求解器自校验（不连串口） |
-| `gui [--port ...]` | 启动 PySide6 界面 |
+| 子命令                                            | 对应协议/功能                                                            |
+| ------------------------------------------------- | ------------------------------------------------------------------------ |
+| `ping`                                            | `PING`（连通性 + 往返时间 + 收发统计）                                   |
+| `identify`                                        | `IDENTIFY`（版本、caps、两侧时钟、flags）                                |
+| `status`                                          | `GET_STATUS`（状态位 + `SIG_STATUS` 解读）                               |
+| `start [--no-wait]`                               | `START`（默认等结果并打印）                                              |
+| `meas [--expect-deg X] [--no-start]`              | `GET_MEAS`（无结果时自动测一次；`phaseCnt/edgeCnt` 主判据 + 期望值判据） |
+| `monitor [-n N] [-d SEC] [--stream] [--csv PATH]` | 连续测量（轮询或流模式通知）                                             |
+| `mode single\|continuous`                         | `SET_MODE`                                                               |
+| `source ext\|int [--wait-ready]`                  | `SET_SOURCE`                                                             |
+| `sig [--freq HZ] [--phase DEG] [--dry-run]`       | `SET_SIG`/`GET_SIG`（先本地求解 MMCM 工作点并打印 DRP 字）               |
+| `gate N`                                          | `SET_GATE`                                                               |
+| `stream on\|off [-n N] [-d SEC]`                  | `STREAM`（on 时打印收到的 `STREAM_DATA`）                                |
+| `clear` / `reset`                                 | `CLEAR` / `RESET_COUNTERS`                                               |
+| `scan --freqs ... --phases ... --out CSV`         | 多频点 × 多相位扫描 → CSV                                                |
+| `sigtable`                                        | 离线：相位语义 + 冻结频点表 + 求解器自校验（不连串口）                   |
+| `gui [--port ...]`                                | 启动 PySide6 界面                                                        |
 
 全局选项：`--port`（串口或 pty 路径）、`--baud 115200`、`--timeout`（单次请求超时）、
 `--result-timeout`（等测量结果的总超时）、`--retries`、`--json`（机器可读输出）、`--debug`。
@@ -194,7 +194,7 @@ DSP 网格量化为 5 个周期 → 显示 23.992°）、**>180° 相位（25MHz
 
    由此 `phaseCnt / edgeCnt` 恰好是整数个 DSP 周期（相位量化下界）。
    **不覆盖**：MMCM 抖动/相位噪声、真实布线延迟与边沿检测通路的固定延迟差、
-   异步采样链的 CDC 亚稳态、闸门停止握手的额外低速周期（RTL 里 stop 要等 `sig2` 下一个上升沿，
+   异步采样链的 CDC 亚稳态、闸门停止握手的额外低速周期（RTL 里 stop 要等 `extSig_sig2` 下一个上升沿，
    容限见 `.agents/skills/dpm-measurement-model`）。
 3. **假 MMCM**（方案 A：MMCM 的 16 位寄存器镜像 + LOAD）：DRP 段在模型的平坦地址空间里是
    **`0x100 + off`**（模拟「另一段 AXI 基地址」，真实是 `0x43C1_0000`）：`0x100+0x00` ID、
@@ -202,11 +202,11 @@ DSP 网格量化为 5 个周期 → 显示 23.992°）、**>180° 相位（25MHz
    `0x100+0x28` LOAD（写 1 整批生效并重新锁定）。相位按 `45/D` 网格量化后生效。
    相位由 `--phase-model` 决定：
 
-   | 取值 | 行为 |
-   | --- | --- |
-   | `auto`（**默认**） | 跟随 `spec/drp_semantics.json` 的 `phase_controllable`（方案 A 实测为 **true**）：写相位字段即生效 |
-   | `controllable` | 同 `auto` 的可控分支，强制「相位可写」 |
-   | `static` | 复现旧 `clk_wiz_src` bitstream：CLKOUT1 的相位字段按 0 写，输出恒为静态 90°（用来验证上位机在「相位不可控」时的提示路径） |
+   | 取值               | 行为                                                                                                                      |
+   | ------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+   | `auto`（**默认**） | 跟随 `spec/drp_semantics.json` 的 `phase_controllable`（方案 A 实测为 **true**）：写相位字段即生效                        |
+   | `controllable`     | 同 `auto` 的可控分支，强制「相位可写」                                                                                    |
+   | `static`           | 复现旧 `clk_wiz_src` bitstream：CLKOUT1 的相位字段按 0 写，输出恒为静态 90°（用来验证上位机在「相位不可控」时的提示路径） |
 
 ## 7. 与 PS 侧的契约关系
 

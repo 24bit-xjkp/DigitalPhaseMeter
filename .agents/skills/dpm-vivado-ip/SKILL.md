@@ -151,7 +151,7 @@ xsim <snapshot> -runall
 ### 结构
 
 ```
-FCLK_CLK0(50MHz) ──► dpm_mmcm_src(clkIn) ──► clkOut1/clkOut2 ──► dpm_top_0/srcSig1,srcSig2
+FCLK_CLK0(50MHz) ──► dpm_mmcm_src(clkIn) ──► clkOut1/clkOut2 ──► dpm_top_0/intSig_sig1,intSig_sig2
                                        └──► locked ──► dpm_src_drp/locked、dpm_top_0/srcLocked
 dpm_src_drp（AXI4-Lite @0x43C1_0000）──► DRP 口 + mmcm_reset ──► dpm_mmcm_src（drpReset）
 ```
@@ -211,7 +211,7 @@ PHASE_MUX  = m & 0x7       # 相位码的小数部分（1/8 VCO 周期）
 越界请求（`m > 511`）会让 `PHASE_MUX`/`DELAY_TIME` 按位截断、相位**回绕**（旧 bitstream
 实测 8MHz 写 270° 读到 86.4°），因此协议层用 `dpm_mmcm_phase_code_fits` 显式回 `ERR_PARAM`。
 **旧的「请求必须 < 180°」规则已作废**（比硬件保守，会白扔掉 D ≤ 63 频点的 180°~360°）：
-相位计测的是无符号间隔（sig1 沿 → 下一个 sig2 沿，落在 `(0, 360°]`），>180° 同样可测，
+相位计测的是无符号间隔（sig1 沿 → 下一个 extSig_sig2 沿，落在 `(0, 360°]`），>180° 同样可测，
 上板与 xsim 联调都已覆盖（见 `docs/ps-protocol.md` §6.2/§6.4）。
 
 **`D ≤ 126`**：分频编码成 `HIGH_TIME + LOW_TIME`（各 6 位），上限 `63 + 63 = 126`；
@@ -272,7 +272,7 @@ PHASE_MUX  = m & 0x7       # 相位码的小数部分（1/8 VCO 周期）
 | `[BD 41-1732]` / `[BD 41-1761]` | IP-XACT 里复位与时钟的关联写多了，见上节 |
 | `write_bitstream` 报 `NSTD-1` / `UCIO-1` | 没有板级约束时 PS 的 MIO/DDR 引脚未指定；`build_bitstream.tcl` 把这两条 DRC 降级为警告，用具体开发板时应补板级约束并去掉降级 |
 | `xvlog` 编译激励时报「中文变成 `0xff`」 | 见上表；作为任务参数传递的字符串用 ASCII |
-| 引脚约束写法 | 外部被测信号 `sig1 → W18`、`sig2 → W19`（`xc7z010clg400-1` 的 bank 34，差分对 `L22` 的 P/N 两半，当两路独立单端输入用，LVCMOS33 需要该 bank VCCO = 3.3V）。只给 PL 引脚约束并不能消掉 `NSTD-1`/`UCIO-1`——没有 board part 时 PS 的 MIO/DDR 仍无法解析，所以 `hook_write_bitstream.tcl` 的降级要保留 |
+| 引脚约束写法 | 外部被测信号 `extSig_sig1 → W18`、`extSig_sig2 → W19`（`xc7z010clg400-1` 的 bank 34，差分对 `L22` 的 P/N 两半，当两路独立单端输入用，LVCMOS33 需要该 bank VCCO = 3.3V）。只给 PL 引脚约束并不能消掉 `NSTD-1`/`UCIO-1`——没有 board part 时 PS 的 MIO/DDR 仍无法解析，所以 `hook_write_bitstream.tcl` 的降级要保留 |
 
 ## DSP 域高速时钟（默认 450MHz）
 

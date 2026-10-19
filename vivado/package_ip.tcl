@@ -16,7 +16,7 @@
 #   dspClock      高速测量时钟（DSP 域，由 BD 内 MMCM 从 FCLK_CLK0 倍频，默认 450MHz）
 #   resetn        异步复位输入，低有效，与主时钟同步后供 PL 内部使用
 #   interrupt     测量完成中断，高有效电平
-#   sig1 / sig2   被测信号（sig1 为参考信号）
+#   extSig_sig1 / extSig_sig2   被测信号（sig1 为参考信号）
 #
 # 数据通道说明：一次测量的结果只有 4 个字，结果直接锁存在 ControlRegs 的只读结果
 # 寄存器里（RESULT_GATE/EDGE/PHASE/SEQ），PS 收到中断后读 4 个寄存器即可。

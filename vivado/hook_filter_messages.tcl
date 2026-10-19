@@ -41,7 +41,7 @@ set_msg_config -id "Synth 8-7023" -suppress
 # ---------------------------------------------------------------------------
 # 3) 顶层 wrapper 里唯一的实例没有任何输出端口。本设计的全部对外通路都在 PS 侧
 #    （AXI4-Lite 寄存器 + PS7 的 MIO/DDR 硬核引脚），PL 侧本来就没有输出引脚，
-#    因此 dpm_system_wrapper 只有 sig1/sig2 两个输入端口。要消掉这条告警必须刻意
+#    因此 dpm_system_wrapper 只有 extSig_sig1/extSig_sig2 两个输入端口。要消掉这条告警必须刻意
 #    加一个板级调试输出引脚（会同时引入未约束引脚相关的告警），收益不足，故屏蔽。
 # ---------------------------------------------------------------------------
 set_msg_config -id "Synth 8-4446" -suppress
@@ -62,7 +62,7 @@ set_msg_config -id "Opt 31-32" -suppress
 # 5) PS7 自带 xdc 给「未使能因而在网表里不存在」的引脚设 PACKAGE_PIN / IOSTANDARD /
 #    drive / slew / pullup / PIO_DIRECTION。实现阶段读网表时，这些 xdc 语句落在
 #    type=pin 的对象上，于是每一条都报一次 CRITICAL WARNING（实测 100 条）。
-#    真正需要约束的 sig1/sig2 在 vivado/constraints/dpm_top.xdc 里单独约束，
+#    真正需要约束的 extSig_sig1/extSig_sig2 在 vivado/constraints/dpm_top.xdc 里单独约束，
 #    与本条无关；UART 用到的 MIO48/49 由 PS7 的 PCW 配置决定，走的是硬核，
 #    不依赖这些 xdc 语句。
 # ---------------------------------------------------------------------------

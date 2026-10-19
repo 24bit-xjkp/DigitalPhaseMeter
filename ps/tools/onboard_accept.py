@@ -336,7 +336,7 @@ def sweep(rep: Report, c: DpmClient, csv_path: Path) -> None:
             # 频率判据：计数粒度决定分辨率（1 个信号计数 = f/edgeCnt）。
             f_tol = max(1_000.0, f / 1000.0, 2.0 * f / max(meas.edge_cnt, 1))
             # 计数自检（与 xsim 联调激励同一口径）：
-            #   * 闸门窗口在 sig2 的下一个上升沿关闭，跨时钟域同步还有几拍延迟，
+            #   * 闸门窗口在 extSig_sig2 的下一个上升沿关闭，跨时钟域同步还有几拍延迟，
             #     因此 gate ∈ [GATE, GATE + ceil(T_sig/T_slow) + 5]；
             #   * 相位计的 DSP 测量窗口还与闸门计数窗口差几拍（CDC + 启动对齐），
             #     折算成参考沿数是 f/f_slow 的比例，所以 edge 只能按闸门**区间**折算

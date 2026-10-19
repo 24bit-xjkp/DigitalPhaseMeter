@@ -19,9 +19,9 @@ argument-hint: '要验证的测量结果或要写的判据'
 | 阶段 | 发生的事 |
 | --- | --- |
 | `idle` | 闸门计数器清零并停用；两个测量计数器清零（`clearCnt = stateReg === idle`）；`in.valid` 到来时发出 `start` 请求 |
-| `waitStart` | `PhaseMeter` 等到参考信号 `sig1` 的上升沿，回 `start` 响应 |
-| `measuring` | 闸门计数器开始按低速时钟累加；`edgeCnt` 在 `sig1` 上升沿累加；相位计数在 `sig1` 上升沿使能、在 `sig2` 上升沿停用 |
-| `waitStop` | 闸门计数达到 `in.bits.targetGate` 后发出 `stop` 请求，`PhaseMeter` 等到 `sig2` 的下一个上升沿才回响应 |
+| `waitStart` | `PhaseMeter` 等到参考信号 `extSig_sig1` 的上升沿，回 `start` 响应 |
+| `measuring` | 闸门计数器开始按低速时钟累加；`edgeCnt` 在 `extSig_sig1` 上升沿累加；相位计数在 `extSig_sig1` 上升沿使能、在 `extSig_sig2` 上升沿停用 |
+| `waitStop` | 闸门计数达到 `in.bits.targetGate` 后发出 `stop` 请求，`PhaseMeter` 等到 `extSig_sig2` 的下一个上升沿才回响应 |
 | 锁存 | 收到 `stop` 响应后把 `edgeCnt` / `phaseCnt` / 当前 `gateCnt` 写入输出负载，`out.valid` 拉高**一个**低速周期，回到 `idle` |
 
 要点：
@@ -35,16 +35,16 @@ argument-hint: '要验证的测量结果或要写的判据'
 | 输出 | 单位 | 语义 |
 | --- | --- | --- |
 | `gateCnt` | 低速时钟周期 | 测量窗口的实际长度 |
-| `edgeCnt` | 个 | 窗口内 `sig1` 的上升沿数 |
-| `phaseCnt` | 高速时钟周期 | 每个参考周期内「`sig1` 上升沿 → 下一个 `sig2` 上升沿」间隔的累加值 |
+| `edgeCnt` | 个 | 窗口内 `extSig_sig1` 的上升沿数 |
+| `phaseCnt` | 高速时钟周期 | 每个参考周期内「`extSig_sig1` 上升沿 → 下一个 `extSig_sig2` 上升沿」间隔的累加值 |
 
 ## 理论值与容限
 
-设低速时钟周期 `T_clock`、高速时钟周期 `T_dsp`、参考信号周期 `T_sig1`、被测信号周期 `T_sig2`、相位偏移（`sig2` 上升沿相对 `sig1` 上升沿）为 `offset`，目标闸门计数为 `targetGate`：
+设低速时钟周期 `T_clock`、高速时钟周期 `T_dsp`、参考信号周期 `T_sig1`、被测信号周期 `T_sig2`、相位偏移（`extSig_sig2` 上升沿相对 `extSig_sig1` 上升沿）为 `offset`，目标闸门计数为 `targetGate`：
 
 | 观测量 | 理论值 | 容限 | 余量来源 |
 | --- | --- | --- | --- |
-| `gateCnt` | `targetGate` | `round(T_sig2 / T_clock) + 1` | 闸门到达目标值后还要等 `sig2` 的下一个上升沿，再经若干低速周期完成锁存 |
+| `gateCnt` | `targetGate` | `round(T_sig2 / T_clock) + 1` | 闸门到达目标值后还要等 `extSig_sig2` 的下一个上升沿，再经若干低速周期完成锁存 |
 | `edgeCnt` | `targetGate × T_clock / T_sig1` | `±2` | 窗口边界与被测频率不整除，可能多算/少算一个沿；实际窗口比目标闸门长（含停止握手），边沿数因此系统性偏多一个左右 |
 | `phaseCnt` | `(offset / T_dsp) × edgeCnt` | `±edgeCnt` | 每个参考周期的计数只能取整数，误差上限 1 个高速时钟周期 |
 
@@ -56,11 +56,11 @@ argument-hint: '要验证的测量结果或要写的判据'
 
 ## 相位映射成立的条件
 
-`phaseCnt / edgeCnt` 量的是**无符号**间隔：从 `sig1` 的上升沿到**下一个** `sig2` 的上升沿。
+`phaseCnt / edgeCnt` 量的是**无符号**间隔：从 `extSig_sig1` 的上升沿到**下一个** `extSig_sig2` 的上升沿。
 因此对任意相位差 `φ ∈ (0°, 360°)` 它都与 `φ` 一一对应（`phaseCnt/edgeCnt` 就是 `φ` 对应的
 高速时钟周期数），**不需要 `φ < 180°`**——`>180°` 的请求同样可测。两条边界要记住：
 
-- `φ → 0°`（两沿几乎重合）时「等下一个 `sig2` 沿」会落到**下一个周期**，读数是一个整周期
+- `φ → 0°`（两沿几乎重合）时「等下一个 `extSig_sig2` 沿」会落到**下一个周期**，读数是一个整周期
   （上板实测请求 0° 读到 360.000°，与 0° 同义；判据按取模 360 比较）；
 - 只有把相位差按**有符号**偏移解释（谁超前谁滞后、`|δ| < T/2`）时才需要 `|δ| < 180°`：
   负偏移 `-φ` 会被读成 `+(T-φ)`。协议的相位请求是无符号口径（`[0, 360)`），所以

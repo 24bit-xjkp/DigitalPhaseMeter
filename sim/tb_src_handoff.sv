@@ -1,7 +1,7 @@
 // 片内信号源 ↔ 测量通路联调激励（方案 A：裸 MMCM + 极简 DRP 控制器）
 //
 // 与 `tb_digital_phase_meter_top.sv` 的区别：那份激励用**理想信号源**驱动 dpm_top 的
-// srcSig1/srcSig2（只覆盖测量通路）；本激励把 **BD 里真实用的三个单元**接起来：
+// intSig_sig1/srcSig2（只覆盖测量通路）；本激励把 **BD 里真实用的三个单元**接起来：
 //
 //     dpm_mmcm_src（裸 MMCME2_ADV + BUFGCE 安全启动）
 //        ▲ DRP 口
@@ -159,10 +159,10 @@ module tb_src_handoff;
         .clock   (clock),
         .resetn  (resetn),
         .dspClock(dsp_clock),
-        .sig1    (1'b0),          // 外部输入未使用（片内源由 SIG_CTRL 选中）
-        .sig2    (1'b0),
-        .srcSig1 (src_clk1),      // 真实 MMCM 输出直接作为被测信号
-        .srcSig2 (src_clk2),
+        .extSig_sig1    (1'b0),          // 外部输入未使用（片内源由 SIG_CTRL 选中）
+        .extSig_sig2    (1'b0),
+        .intSig_sig1 (src_clk1),      // 真实 MMCM 输出直接作为被测信号
+        .intSig_sig2 (src_clk2),
         .srcLocked(src_locked),
         .s_axi_lite_awaddr (dpm_awaddr),
         .s_axi_lite_awprot (3'b000),
@@ -593,7 +593,7 @@ module tb_src_handoff;
             meas_delay_ps = (real'(phase_cnt) / real'(edge_cnt)) * T_DSP_PS;
             // 判据 2：测量通路与直接测得值之差 ≤ 1 个 DSP 周期 + 1 毫度。
             // 按周期取模比较：
-            //  * 0° 时两沿几乎重合，相位计「等下一个 sig2 沿」会量到**一整个周期**
+            //  * 0° 时两沿几乎重合，相位计「等下一个 extSig_sig2 沿」会量到**一整个周期**
             //    （上板与模型都如此，见 docs/onboard-ax7010.md 的 0° 边界约定）；
             //  * 361° 附近的点（如 359.1°）也可能因 1 个 DSP 周期的采样同步抖动量回 ~0°；
             //  * 直接测量也有 ±1 个 DSP 周期的采样同步抖动。
@@ -610,7 +610,7 @@ module tb_src_handoff;
             if (err_snap_ps < 0.0) err_snap_ps = -err_snap_ps;
 
             // 判据 4：计数模型（与上板验收同一口径）。闸门在 target 数满之后的下一个
-            // sig2 上升沿关闭，因此 gate ∈ [target, target + ceil(T_sig/T_slow)]，
+            // extSig_sig2 上升沿关闭，因此 gate ∈ [target, target + ceil(T_sig/T_slow)]，
             // 再加 5 个慢时钟周期的跨时钟域余量；参考沿数按**闸门区间**折算（±1 个沿，
             // 窗口边界不整除）。注意两点：
             //   * gate 的精确值依赖启动时刻与信号沿的相对相位，金标准里的 gate 是最坏

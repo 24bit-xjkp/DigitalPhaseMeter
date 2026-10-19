@@ -43,7 +43,7 @@ class ControllerOutPayload(
   * 片内信号源与外部输入的使能门控、二选一在**上级的本域**里完成（见 `SignalInputMux`），到本模块时 `io.sig` 已经是一条被测信号：
   *
   *   - 外部引脚输入（W18/W19）本来就是异步的；
-  *   - `io.sourceSig1` / `io.sourceSig2` 由 PL 内 MMCM 产生（可动态重配置，**频率与相位差都由 MMCM 的配置寄存器决定**，PS 通过 AXI4-Lite 写它的 DRP
+  *   - intSig 由 PL 内 MMCM 产生（可动态重配置，**频率与相位差都由 MMCM 的配置寄存器决定**，PS 通过 AXI4-Lite 写它的 DRP
   *     寄存器），对测量时钟域同样没有固定相位关系。
   *
   * 两者共用 `PhaseMeter` 的异步采样链，因此切换不改变测量通路的延迟，相位差只是被量化到 1 个测量时钟周期（即相位计本身的分辨率）。使能无效时片内源在上级被门成恒低。
@@ -64,7 +64,7 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
     val dspClock = IO(Input(Clock()))
     val io = IO(new Bundle {
         // 被测信号：由上级在本域完成外部输入/片内源的使能门控与二选一后送来（对外部与 MMCM 源都是异步信号）
-        val sig = new PhaseMeterSignalPayload
+        val sig = Input(new PhaseMeterSignalPayload)
         val in = Flipped(ValidIO(new ControllerInPayload(gateCntWidth)))
         val out = ValidIO(new ControllerOutPayload(gateCntWidth, edgeCntWidth, phaseCntWidth))
     })
@@ -79,9 +79,8 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
     private val dspReset = ResetSynchronizer(dspClock, !reset.asBool)
     private val phaseMeter = withClockAndReset(dspClock, dspReset) { PhaseMeter(edgeCntWidth, phaseCntWidth) }
 
-    // io.sig 由上级在本域做完使能门控与二选一后送来，这里直接进测量核心的异步采样链
-    phaseMeter.sig.sig1 := io.sig.sig1
-    phaseMeter.sig.sig2 := io.sig.sig2
+    // io.extSig_sig2 由上级在本域做完使能门控与二选一后送来，这里直接进测量核心的异步采样链
+    phaseMeter.sig := io.sig
 
     private val request = CdcToggleHandShake.send(phaseMeter.request)
     private val responseReady = CdcToggleHandShake.send(phaseMeter.response.ready)

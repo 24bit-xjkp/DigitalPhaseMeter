@@ -34,9 +34,9 @@ class EdgeDetector(val n: Int = 3, val edgeType: EdgeType.Type = EdgeType.rising
 }
 
 object EdgeDetector {
-    def apply(sig: Bool, edgeType: EdgeType.Type = EdgeType.rising, async: Boolean = true): Bool = {
+    def apply(extSig_sig2: Bool, edgeType: EdgeType.Type = EdgeType.rising, async: Boolean = true): Bool = {
         val edgeDetector = Module(new EdgeDetector(edgeType = edgeType, async = async))
-        edgeDetector.io.in := sig
+        edgeDetector.io.in := extSig_sig2
         edgeDetector.io.trigger
     }
 }

@@ -4,8 +4,8 @@
 
 仓库目前处于 **信号输入实现阶段**：测量与控制 RTL、PS↔PL 互联（AXI4-Lite 控制/状态与结果寄存器 +
 测量完成中断）、Vivado IP 打包与 block design 均已完成，并分别用 Verilator（测量通路）与 Vivado xsim
-（AXI4 接口与顶层 IP）验证。测量输入有两条来源，由 PL 内的选择寄存器切换：**外部引脚**（`sig1` → W18、
-`sig2` → W19）与**片内信号源**（PL 内 MMCM 的两路输出，**频率与相位差都由 MMCM 的动态重配置在线设定**，
+（AXI4 接口与顶层 IP）验证。测量输入有两条来源，由 PL 内的选择寄存器切换：**外部引脚**（`extSig_sig1` → W18、
+`extSig_sig2` → W19）与**片内信号源**（PL 内 MMCM 的两路输出，**频率与相位差都由 MMCM 的动态重配置在线设定**，
 两路输出直接作为被测信号）。**PS 侧软件与 PC 侧上位机已完成**：PS 侧是 freestanding 裸机 C 串口服务端（读写 AXI 寄存器与
 MMCM 的 DRP 口），PC 侧是 Python 上位机（CLI + PySide6 GUI，相位差 0~360° 与频率显示、单次/连续、
 片内源频率与相位、输入源切换、多频点多相位扫描）。协议见 [`docs/ps-protocol.md`](docs/ps-protocol.md)，
@@ -22,11 +22,11 @@ MMCM 的 DRP 口），PC 侧是 Python 上位机（CLI + PySide6 GUI，相位差
 | 输出       | 含义                                                    | 理论值                                                     |
 | ---------- | ------------------------------------------------------- | ---------------------------------------------------------- |
 | `gateCnt`  | 测量窗口内的低速时钟周期数                              | 由 `in.bits.targetGate` 指定，实际值略大（含停止握手开销） |
-| `edgeCnt`  | 窗口内参考信号 `sig1` 的上升沿数                        | `gateCnt × T_clock / T_sig1`                               |
+| `edgeCnt`  | 窗口内参考信号 `extSig_sig1` 的上升沿数                 | `gateCnt × T_clock / T_sig1`                               |
 | `phaseCnt` | 每个参考周期内「参考沿 → 被测沿」的高速时钟周期数累加值 | `phaseOffset / T_dspClock × edgeCnt`                       |
 
 `phaseCnt` 的分辨率就是一个高速时钟周期，因此高速时钟频率越高、闸门时间越长，测量越精确。
-`phaseCnt / edgeCnt` 量的是从 `sig1` 上升到**下一个** `sig2` 上升沿的**无符号**间隔，因此
+`phaseCnt / edgeCnt` 量的是从 `extSig_sig1` 上升到**下一个** `extSig_sig2` 上升沿的**无符号**间隔，因此
 `0°~360°` 的相位差都与读数一一对应（`>180°` 同样可测，不需要"小于半个周期"；只有按有符号
 偏移解释时才需要 `|δ| < 180°`，且 `0°` 会因"等下一个沿"读成一个整周期）。各观测量的容限与
 精度下界见 [`.agents/skills/dpm-measurement-model`](.agents/skills/dpm-measurement-model/SKILL.md)。
@@ -59,10 +59,10 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
 
 测量核心之前有一个输入选择器（`SignalInputMux`，主时钟域，纯组合），两条候选通路的时基与约束如下：
 
-| 通路       | 来源                                                     | 约束/时基                                                                     |
-| ---------- | -------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| 外部输入   | `sig1` → 引脚 **W18**、`sig2` → 引脚 **W19**（LVCMOS33） | 异步输入，`set_false_path`；在测量域经 `EdgeDetector` 的 ASYNC_REG 采样链同步 |
-| 片内信号源 | PL 内 MMCM（`dpm_mmcm_src`）的两路输出                   | 频率/相位差由 PS 写 MMCM 寄存器镜像（`dpm_src_drp`）设定；同样按异步输入采样  |
+| 通路       | 来源                                                                   | 约束/时基                                                                     |
+| ---------- | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| 外部输入   | `extSig_sig1` → 引脚 **W18**、`extSig_sig2` → 引脚 **W19**（LVCMOS33） | 异步输入，`set_false_path`；在测量域经 `EdgeDetector` 的 ASYNC_REG 采样链同步 |
+| 片内信号源 | PL 内 MMCM（`dpm_mmcm_src`）的两路输出                                 | 频率/相位差由 PS 写 MMCM 寄存器镜像（`dpm_src_drp`）设定；同样按异步输入采样  |
 
 两条通路共用同一条采样链：选择器本身在主时钟域，它的**输出**才进测量域，对测量域是一条异步被测信号
 （与外部引脚同一待遇）。使能与选择位来自同一域的 `SIG_CTRL`，因此不需要任何跨时钟域配置通路。
@@ -70,8 +70,8 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
 ### 片内信号源：MMCM 的两路输出
 
 ```text
-        ┌───────────────────────────────┐   clkOut1（f_sig，相位 φ0）──► dpm_top/srcSig1 ─┐
-        │ dpm_mmcm_src（裸 MMCME2_ADV） │   clkOut2（f_sig，相位 φ1）──► dpm_top/srcSig2 ─┤
+        ┌───────────────────────────────┐   clkOut1（f_sig，相位 φ0）──► dpm_top/intSig_sig1 ─┐
+        │ dpm_mmcm_src（裸 MMCME2_ADV） │   clkOut2（f_sig，相位 φ1）──► dpm_top/intSig_sig2 ─┤
         │  参考时钟 = FCLK_CLK0 (50MHz) │                                                  ├─► SignalInputMux
         │  DRP ◄── dpm_src_drp（AXI 口）┼── PS：写 MMCM 寄存器镜像 → 写 LOAD → 等 locked   │   ↕ 外部引脚
         └───────────────────────────────┘                         │                        │

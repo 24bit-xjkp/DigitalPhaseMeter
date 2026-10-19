@@ -102,7 +102,7 @@ Verilator 与 xsim / Vivado 都能直接编译。
 | `val reset = IO(Input(Bool()))` | `reset` |
 | `val dspClock = IO(Input(Clock()))` | `dspClock` |
 | `val dstReset = IO(Input(Bool()))`（模块显式声明的复位端口，不在 `io` 里） | `dstReset` |
-| `io.sig.sig1`（`Bundle` 嵌套） | `io_sig_sig1` |
+| `io.sig.extSig_sig1`（`Bundle` 嵌套） | `io_sig_sig1` |
 | `io.in` 为 `Flipped(ValidIO(...))` | `io_in_valid`、`io_in_bits_targetGate` |
 | `io.out` 为 `ValidIO(...)` | `io_out_valid`、`io_out_bits_gateCnt` |
 

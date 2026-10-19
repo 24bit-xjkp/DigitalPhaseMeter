@@ -21,10 +21,10 @@
 # 本文件补充五类约束：被测信号、片内信号源时钟、慢↔快时钟域的握手通路、MMCM 锁定、板级引脚。
 
 # ---- 被测信号（外部输入）----
-# sig1/sig2 是外部送入的异步信号：在 PL 内先经 EdgeDetector 的 ASYNC_REG 同步链采样，
+# extSig_sig1/extSig_sig2 是外部送入的异步信号：在 PL 内先经 EdgeDetector 的 ASYNC_REG 同步链采样，
 # 因此作为异步输入处理，不做建立/保持时间检查。片内信号源（dpm_mmcm_src_0 的两路 MMCM
 # 输出）从 BD 里直接进 IP，与外部输入共用同一条采样链，同样按异步输入处理。
-set_false_path -quiet -from [get_ports -quiet {sig1 sig2}]
+set_false_path -quiet -from [get_ports -quiet {extSig_sig1 extSig_sig2}]
 
 # ---- 片内信号源：两路 MMCM 输出 ----
 # 频率与相位差都由 MMCM 的动态重配置设定，软件可以在线改动，因此源时钟与测量时钟之间
@@ -69,7 +69,7 @@ set_max_delay -quiet -datapath_only -from [get_clocks -quiet clkout*_raw] \
 #
 # 配置通路已经不再是跨域通路：片内源使能与输入选择（SIG_CTRL）同寄存器堆一样在主时钟域，
 # 门控与二选一也在主时钟域完成（SignalInputMux），只有它的**输出**作为异步被测信号进
-# 测量域的采样链——与外部引脚 sig1/sig2 同一待遇（见上方「被测信号」一段）。
+# 测量域的采样链——与外部引脚 extSig_sig1/extSig_sig2 同一待遇（见上方「被测信号」一段）。
 #
 # 源寄存器翻转一次后保持一整个源时钟周期（慢域 50MHz → 20ns），目的域（450MHz）在这一整个
 # 周期内有 9 次采样机会，只需要可靠采到这一次跳变，具体落在哪一拍由同步器保证——
@@ -98,5 +98,5 @@ set_max_delay -quiet -datapath_only -from [get_clocks -quiet *clk_out1_dpm_syste
 # （IO_L22P_T3_34 / IO_L22N_T3_34），这里当两路独立的单端输入使用。
 # bank 34 的 VCCO 需要 3.3V 才与 LVCMOS33 匹配：换开发板时按实际供电电压改 IOSTANDARD，
 # 引脚号也一并改成实际使用的引脚。
-set_property -dict {PACKAGE_PIN W18 IOSTANDARD LVCMOS33} [get_ports sig1]
-set_property -dict {PACKAGE_PIN W19 IOSTANDARD LVCMOS33} [get_ports sig2]
+set_property -dict {PACKAGE_PIN W18 IOSTANDARD LVCMOS33} [get_ports extSig_sig1]
+set_property -dict {PACKAGE_PIN W19 IOSTANDARD LVCMOS33} [get_ports extSig_sig2]

@@ -37,7 +37,7 @@
    `RNE` = 半数取偶（整数运算）；由此 `phaseCnt / edgeCnt` 恰好是整数个 DSP 周期，
    即相位量化下界。**不覆盖**：MMCM 抖动/相位噪声、真实布线延迟与边沿检测通路的固定
    延迟差、异步采样链的 CDC 亚稳态、闸门停止握手的额外低速周期（RTL 里 stop 要等
-   `sig2` 下一个上升沿，容限见 dpm-measurement-model）。
+   `extSig_sig2` 下一个上升沿，容限见 dpm-measurement-model）。
 
 3. **假 MMCM**（方案 A）：PL 侧只有「MMCM 的 16 位寄存器镜像 + LOAD」，频率与相位都由
    `dpm_host.sig` 编码成 MMCM 位域（`DELAY_TIME` = 整数 VCO 周期、`PHASE_MUX` = 1/8 VCO
@@ -274,7 +274,7 @@ class SimFpga:
             phaseCnt = dspCycles * edgeCnt
 
         与 `docs/ps-protocol.md` 第 5 节的测量语义一致：`phaseCnt` 是「每个参考周期内
-        sig1 上升沿 → sig2 上升沿」的整数 DSP 周期计数之和，所以 `phaseCnt / edgeCnt`
+        extSig_sig1 上升沿 → extSig_sig2 上升沿」的整数 DSP 周期计数之和，所以 `phaseCnt / edgeCnt`
         恰好是整数个 DSP 周期（相位量化下界 = 1 个 DSP 周期，不是缺陷）。
         这里用精确有理数实现 RNE，和 golden 的「整数 ps + RNE」逐位等价。
         """

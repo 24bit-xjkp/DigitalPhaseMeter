@@ -4,7 +4,7 @@
 
 ## 项目概览
 
-基于 Chisel 的数字相位计：测量两路同频信号的相位差。测量通路在高速时钟域（DSP 域，当前 450MHz，由 PL 内 MMCM 从 50MHz 倍频得到），控制、闸门计数与 AXI4-Lite 接口在低速时钟域（50MHz）。PS↔PL 的数据交换走 AXI4-Lite 寄存器（GPIO 式，一次测量只有 4 个字，不用 BRAM），并用测量完成中断通知 PS。测量输入有两条通路：外部引脚（`sig1`/`sig2`，默认约束到 W18/W19）与片内信号源（MMCM 时基 + 相位累加器，频率与相位差可调），由 PL 内的寄存器在两者之间切换。PL 侧测量与控制 RTL、PS↔PL 互联、Vivado IP 与 block design 已完成；其余阶段的规划见 `README.md` 的路线图。
+基于 Chisel 的数字相位计：测量两路同频信号的相位差。测量通路在高速时钟域（DSP 域，当前 450MHz，由 PL 内 MMCM 从 50MHz 倍频得到），控制、闸门计数与 AXI4-Lite 接口在低速时钟域（50MHz）。PS↔PL 的数据交换走 AXI4-Lite 寄存器（GPIO 式，一次测量只有 4 个字，不用 BRAM），并用测量完成中断通知 PS。测量输入有两条通路：外部引脚（`extSig_sig1`/`extSig_sig2`，默认约束到 W18/W19）与片内信号源（MMCM 时基 + 相位累加器，频率与相位差可调），由 PL 内的寄存器在两者之间切换。PL 侧测量与控制 RTL、PS↔PL 互联、Vivado IP 与 block design 已完成；其余阶段的规划见 `README.md` 的路线图。
 
 ## 目录结构与任务优先级
 
@@ -44,14 +44,14 @@
 
 - **首选 skill**：加载本领域对应的 skill 并按其说明执行。本仓库领域与对应 skill：
 
-| 领域                                                                | 先加载                   |
-| ------------------------------------------------------------------- | ------------------------ |
+| 领域                                                                 | 先加载                   |
+| -------------------------------------------------------------------- | ------------------------ |
 | 编写/修改 Chisel RTL、生成 SystemVerilog（仿真与综合共用同一份产物） | `dpm-chisel-rtl`         |
-| 编写、运行、调试 Verilator C++ 测试                                 | `dpm-verilator-testing`  |
-| 测量语义、理论值、容限与已知精度下界（写验证判据时）                | `dpm-measurement-model`  |
-| 打包 Vivado IP、改 PS↔PL 互联的 BD、写/跑 xsim 的 SV 激励、综合实现 | `dpm-vivado-ip`          |
-| 改上位机/PS 协议、CLI/GUI、无硬件端到端验证                         | `dpm-host-protocol`      |
-| 提交前的格式化、静态检查与全量回归                                  | `dpm-pre-delivery-check` |
+| 编写、运行、调试 Verilator C++ 测试                                  | `dpm-verilator-testing`  |
+| 测量语义、理论值、容限与已知精度下界（写验证判据时）                 | `dpm-measurement-model`  |
+| 打包 Vivado IP、改 PS↔PL 互联的 BD、写/跑 xsim 的 SV 激励、综合实现  | `dpm-vivado-ip`          |
+| 改上位机/PS 协议、CLI/GUI、无硬件端到端验证                          | `dpm-host-protocol`      |
+| 提交前的格式化、静态检查与全量回归                                   | `dpm-pre-delivery-check` |
 
 - **备选一：网络搜索**。skill 未覆盖，或 skill 与项目/环境的实际行为不一致时，先查官方文档与 issue；就地可用的官方帮助（如 `xmake <command> --help`）属于同一类的快速形式。
 - **备选二：读源码**。网络搜索仍不明确时，再阅读实现代码：生成结果查 `build/chisel/`。

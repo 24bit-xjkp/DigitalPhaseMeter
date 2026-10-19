@@ -5,13 +5,12 @@ AXI4 接口与顶层 IP 的验证用 **Vivado 自带 xsim + SystemVerilog 测试
 `ResetSynchronizer` / `MmcmDrpController`）的 Verilator
 单元测试仍然保留在 `test/` 下（`xmake test -v`）。
 
-| 文件                            | 说明                                                             |
-| ------------------------------- | ---------------------------------------------------------------- |
-| `tb_digital_phase_meter_top.sv` | 顶层 IP 的测试激励：AXI4-Lite 主机 BFM、测量激励与结果寄存器校验（**理想信号源**驱动 `srcSig1/srcSig2`） |
-| `run_xsim.sh`                   | 一键脚本：生成 RTL → `xvlog` 编译 → `xelab` 细化 → `xsim` 运行   |
-| `tb_src_handoff.sv`             | **片内源 ↔ 测量通路联调**：真实 `dpm_mmcm_src`（MMCME2_ADV）+ `MmcmDrpController` + `DigitalPhaseMeterTop`；激励按**完整地址**写 MMCM 寄存器镜像，并直接量两路输出的周期与相位差 |
-| `run_handoff_tb.sh`             | 上面那份激励的运行脚本（默认 4 个代表点；xsim 跑 MMCM 行为模型一次锁定约 1~2ms 仿真时间） |
-| `tb_clk_wiz_src_drp.sv`、`run_drp_tb.sh` | **已作废**：旧 `clk_wiz_src` 方案的 DRP 语义探针，依赖的 IP 已删除、跑不起来；保留是为了让 `docs/verify-drp.md` 的结论可追溯 |
+| 文件                                     | 说明                                                                                                                                                                             |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tb_digital_phase_meter_top.sv`          | 顶层 IP 的测试激励：AXI4-Lite 主机 BFM、测量激励与结果寄存器校验（**理想信号源**驱动 `intSig_sig1/intSig_sig2`）                                                                 |
+| `run_xsim.sh`                            | 一键脚本：生成 RTL → `xvlog` 编译 → `xelab` 细化 → `xsim` 运行                                                                                                                   |
+| `tb_src_handoff.sv`                      | **片内源 ↔ 测量通路联调**：真实 `dpm_mmcm_src`（MMCME2_ADV）+ `MmcmDrpController` + `DigitalPhaseMeterTop`；激励按**完整地址**写 MMCM 寄存器镜像，并直接量两路输出的周期与相位差 |
+| `run_handoff_tb.sh`                      | 上面那份激励的运行脚本（默认 4 个代表点；xsim 跑 MMCM 行为模型一次锁定约 1~2ms 仿真时间）                                                                                        |
 
 ## 运行
 

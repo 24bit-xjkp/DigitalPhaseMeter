@@ -13,7 +13,7 @@
 
 1. 闸门窗口：`Controller` 数到 targetGate 后还要等被测信号的下一个上升沿才停，
    因此 `gate_cnt = targetGate + ceil(T_sig / T_slow)`（归一化到低速周期）。
-2. 参考沿数：窗口内 `sig1` 的上升沿数 `edge_cnt = round(gate_cnt * T_slow / T_sig)`
+2. 参考沿数：窗口内 `extSig_sig1` 的上升沿数 `edge_cnt = round(gate_cnt * T_slow / T_sig)`
    （窗口边界不整除时多算/少算一个沿，容限 ±1）。
 3. 相位计数：真实相位差 `phase_ns` **先被 1 个 DSP 周期量化**（测量通路的采样网格），
    再与参考沿数相乘：`phase_cnt = round(phase_ns / T_dsp) * edge_cnt`。

@@ -4,7 +4,7 @@
 # 主进程里 set_property SEVERITY 对 run 内部的 DRC 不生效，必须通过
 # STEPS.WRITE_BITSTREAM.TCL.PRE 指定本文件（见 build_bitstream.tcl）。
 #
-# 本仓库不绑定具体开发板：sig1/sig2 没有 PACKAGE_PIN/IOSTANDARD 约束。
+# 本仓库不绑定具体开发板：sig1/extSig_sig2 没有 PACKAGE_PIN/IOSTANDARD 约束。
 # 使用具体开发板时，请在 vivado/constraints/dpm_top.xdc 中填好引脚，
 # 并去掉这里的降级（以及 build_bitstream.tcl 中的 hook 设置）。
 
