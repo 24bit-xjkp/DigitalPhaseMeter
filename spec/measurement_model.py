@@ -76,7 +76,7 @@ DEFAULT_FREQS_HZ = (
 # < 180° 的前提（见 `predict()` 的说明与 dpm-measurement-model skill）。
 DEFAULT_PHASES_DEG = (0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0)
 
-# 默认输出：不覆盖别的 teammate 生成的 spec/golden/vectors.json（见 docs/verify-drp.md）
+# 默认输出：不覆盖 spec/golden/vectors.json（后者由 spec/gen_golden.py 生成）
 DEFAULT_OUT = os.path.join("spec", "golden", "vectors_model.json")
 
 
@@ -191,7 +191,6 @@ def predict(
         raise ValueError("target_gate 必须为正")
     if not (0.0 <= phase_deg < 360.0):
         # 相位计测的是无符号间隔 (0, 360°]：>180° 也能测；360° 与 0° 同义，满量程不接收。
-        # （旧版本按有符号偏移解释、要求 < 180°，见 docs/verify-plan.md 的说明。）
         raise ValueError("phase_deg 必须在 [0, 360) 内（无符号相位差的口径）")
 
     t_slow = 1.0 / f_slow

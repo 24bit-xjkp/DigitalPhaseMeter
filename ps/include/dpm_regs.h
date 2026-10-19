@@ -22,10 +22,10 @@
 #define DPM_BASE 0x43C00000u
 #endif
 
-/* 片内信号源 MMCM（clk_wiz_src）的动态重配置口（BD：SEG_clk_wiz_src_Reg）。
+/* 片内信号源 MMCM 的寄存器镜像口（BD：dpm_src_drp_0 的 s_axi_lite，地址段 0x43C1_0000，4KB）。
  *
- * 这不是 MMCM 原语的 DRP 地址：AXI 地址的高位由 axi_interconnect 译码，落到
- * clk_wiz 的 s_axi_lite 时低 12 位才是 PG065 的 DRP 偏移，因此这里用 0x200 起的绝对偏移。
+ * 当前方案 A：dpm_src_drp 控制器把 0x08..0x24 的 8 个 16 位寄存器镜像按顺序搬进 MMCM 的
+ * DRP 口，写 0x28 LOAD 触发一次重配置；偏移与编码见下方的 DPM_DRP_OFF_* 与 DPM_MMCM_* 宏。
  */
 #ifndef DPM_DRP_BASE
 #define DPM_DRP_BASE 0x43C10000u
@@ -174,8 +174,8 @@
  * `phase_max = 511 × 45°/D`（D=40 → 574.875°、D=100 → 229.95°、D=125 → 183.96°），
  * 即 D ≤ 63 的频点能覆盖整个 0~360°，D = 64..126 的频点只能覆盖到 184°~360°。
  * 请求的 `m` 超过 511 时，`DPM_MMCM_ENCODE_CLKOUT` 的两个字段都会按位截断，硬件行为是
- * **相位回绕**（旧 bitstream 上实测：8MHz 写 270° 回绕成 86.4°，见 `docs/onboard-ax7010.md`
- * §5），因此协议层必须用 `dpm_mmcm_phase_code_fits` 显式拒绝，而不是把相位一律限制在
+ * **相位回绕**（例如 8MHz 写 270° 会回绕成 86.4°），因此协议层必须用
+ * `dpm_mmcm_phase_code_fits` 显式拒绝，而不是把相位一律限制在
  * `< 180°`（那条旧限制比硬件保守得多，会把 D ≤ 63 的频点的 180°~360° 白扔掉）。
  */
 

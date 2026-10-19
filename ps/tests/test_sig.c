@@ -104,7 +104,7 @@ static void test_snap_and_errors(void)
 
     printf("== 相位网格（1/8 VCO 周期 = 45°/D）与不可达频率\n");
     /* 22.5° 在 25MHz（D=40）下是 20 步（2.5 个 VCO 周期）：精确可表示，
-     * 不再被吸附到 45°（旧固件按 45° 吸附的缺陷，见 docs/onboard-ax7010.md §5）。 */
+     * 不再被吸附到 45° 的整数倍（相位吸附目标是 45°/D 网格）。 */
     dpm_sig_solve(25000000u, 22500u, G_F_SLOW_HZ, &sig, &st);
     CHECK(sig.phase_milli_deg == 22500u, "22.5° 应精确可表示（实际 %u）", sig.phase_milli_deg);
     CHECK(sig.phase_field == 2u, "22.5° 的 DELAY_TIME 应为 2（实际 %u）", sig.phase_field);
@@ -233,7 +233,8 @@ static void test_drp_words(void)
     dpm_sig_drp_words(&sig, &fb1, &fb2, &c01, &c02, &c11, &c12);
 
     /* 权威值：clk_wiz 的 Write DRP 模式在同一工作点（50MHz 参考、M=20、D=40、
-     * 相位 0/90°）生成的值，已在 build/analysis/golden 逐点校验过。
+     * 相位 0/90°）生成的值，已由 host/dpm_host/sig.py 与 ps/include/dpm_regs.h 的
+     * 编码实现逐点对拍。
      *   CLKFBOUT ClkReg1 = 0x128A、ClkReg2 = 0x0000
      *   CLKOUT0  ClkReg1 = 0x1514、ClkReg2 = 0x0000
      *   CLKOUT1  ClkReg1 = 0x1514、ClkReg2 = 0x000A  ← 90° = 10 个 VCO 周期（DELAY_TIME=10）

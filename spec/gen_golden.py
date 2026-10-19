@@ -9,7 +9,7 @@
     python3 spec/gen_golden.py            # 写入 spec/golden/vectors.json
     python3 spec/gen_golden.py --print    # 同时打印摘要
 
-模型（与 `docs/verify-plan.md` 的「期望值模型」一节一致）：
+模型（与 `docs/ps-protocol.md` 第 5 节、`.agents/skills/dpm-measurement-model` 一致）：
 
 1. 闸门窗口：`Controller` 数到 targetGate 后还要等被测信号的下一个上升沿才停，
    因此 `gate_cnt = targetGate + ceil(T_sig / T_slow)`（归一化到低速周期）。

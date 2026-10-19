@@ -194,7 +194,8 @@ namespace
     /// 控制器自己发出的地址/数据序列与 DEN 宽度，因此让 DRDY 常为 1 最简单也最
     /// 确定：状态机在每个 sWait 拍看到 DRDY 就推进，于是 8 笔写恰好各占 2 拍
     /// （1 拍 DEN + 1 拍等 DRDY），DEN 每笔都是 1 拍。
-    /// 真实的 DRDY 往返在 build/analysis/drp_tb（xsim）里用逐拍 DRDY 模型验证过。
+    /// 真实的 DRDY 往返由 `sim/run_handoff_tb.sh`（真实 MMCM 行为模型 + DRP 控制器 + 测量通路）
+    /// 覆盖，本测试只关心控制器自己发出的地址/数据序列与 DEN 宽度。
     task<std::vector<DrpWrite>> run_drp_slave(port_t& port, std::size_t cycles)
     {
         std::vector<DrpWrite> writes{};

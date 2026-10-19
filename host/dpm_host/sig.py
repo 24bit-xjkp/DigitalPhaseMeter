@@ -23,9 +23,8 @@
 因此**可实现的相位网格 = 1/8 VCO 周期 = `45°/D`**（D=40 → 1.125°、D=125 → 0.36°），
 而不是 45°——22.5° 这类请求在 D=40/50/80/100/125 下都能精确表示。
 
-`spec/drp_semantics.json` 是旧 `clk_wiz_src` 方案的实测记录，本模块只从它读两个结论：
-`phase_controllable`（相位是否真的能由 DRP 改写）与 `phase_static_deg_milli`（不可控时的
-固定相位）。**单位模式/相位字偏移那些键属于旧方案，方案 A 不再使用**。
+`spec/drp_semantics.json` 只记录当前 bitstream 的两个结论：`phase_controllable`
+（相位是否能在线改写，方案 A 为 true）与 `phase_static_deg_milli`（不可控时的固定相位）。
 """
 
 from __future__ import annotations
@@ -229,10 +228,10 @@ def mmcm_decode_phase_mdeg(clkreg1: int, clkreg2: int, divide: int) -> int:
 
 @dataclass(frozen=True)
 class DrpSemantics:
-    """相位可控性结论（来自 `spec/drp_semantics.json`，方案 A 只需两个键）。
+    """相位可控性结论（由 `spec/drp_semantics.json` 提供，方案 A 只需两个键）。
 
     方案 A 下相位由 PS 直接编码进 MMCM 的 PHASE_MUX/DELAY_TIME，硬件网格固定是
-    `45°/D`（1/8 VCO 周期），因此不再有「相位字段单位」这个未定稿项。
+    `45°/D`（1/8 VCO 周期）；`phase_controllable` 用于兼容「相位不可控」的旧 bitstream。
     """
 
     #: 当前 bitstream 的 clk_out2 相位是否真的能由 DRP 改写（缺省 True）。
@@ -282,11 +281,10 @@ def _fallback_semantics(note: str = "") -> DrpSemantics:
 def parse_semantics_json(data: dict[str, Any], path: str | None) -> DrpSemantics:
     """解析结论 JSON，只取方案 A 需要的两个结论。
 
-    - `phase_controllable`（缺省 true）：相位能不能由 DRP 改写；
+    - `phase_controllable`（缺省 true）：相位能不能在线改写；
     - `phase_static_deg_milli`（可缺省，默认 90000 = BD 静态配置的 90°）。
 
-    JSON 里其余键（`phase_unit_deg_milli`、`phase_word_index.*` 等）是旧 `clk_wiz_src`
-    方案的实测记录，方案 A 不再使用，这里显式忽略，避免把旧语义带进新路径。
+    其余键（历史方案的相位单位/字索引等记录）显式忽略，避免把旧语义带进新路径。
     """
     scope: dict[str, Any] = dict(data)
     sub = data.get("phase")

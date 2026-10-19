@@ -12,8 +12,8 @@
 # 签核判据（本仓库约定）：
 #   - N 次实现的 WNS 与 WHS **全部为正**、0 个失败端点；
 #   - 报告里写清 N、最小/中位/最大值，单次通过不能作为签核依据。
-#   place/route 有可观的 run-to-run 差异（400MHz 轮次历史实测 WNS 在 +0.006 / -0.202 之间摆），
-#   因此必须多次独立尝试（本脚本每次 reset_run impl_1 后重新 place/route）。
+#   place/route 有可观的 run-to-run 差异，因此必须多次独立尝试（本脚本每次 reset_run impl_1 后
+#   重新 place/route）。
 #
 # 前置条件：
 #   - 工程已建好（vivado/create_bd.tcl），综合网表已完整（先跑 vivado/build_bitstream.tcl，

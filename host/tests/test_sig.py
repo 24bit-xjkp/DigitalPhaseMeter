@@ -514,8 +514,7 @@ def test_semantics_cache_is_reused_until_reset() -> None:
 
 @pytest.mark.skipif(not os.path.exists(SEMANTICS_PATH), reason="spec/drp_semantics.json 不存在")
 def test_real_spec_file() -> None:
-    """仓库里的实测结论：bitstream 打开 PHASE_DUTY_CONFIG 后相位可在线改
-    （上板实测见 docs/onboard-ax7010.md 第 3 节）。"""
+    """仓库里的当前结论：方案 A 下相位可在线改（上板验收已覆盖）。"""
     sem = S.load_semantics(SEMANTICS_PATH, force=True)
     assert sem.phase_controllable is True
     assert sem.phase_static_milli_deg == 90_000

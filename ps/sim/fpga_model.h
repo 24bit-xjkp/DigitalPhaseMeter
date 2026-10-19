@@ -50,14 +50,6 @@
 /** MMCM 重新锁定所需的慢周期数。 */
 #define DPM_MODEL_LOCK_LATENCY_CYCLES 64u
 
-/** 仿真后端里片内源的相位差（毫度）。
- *
- * **固定 90°**，与当前 bitstream 的实测行为一致：DRP 寄存器文件里的相位字没有接到
- * MMCM 重建逻辑，clk_out2 恒为静态 generic 配置的 90.000°（`spec/drp_semantics.json`
- * 的 `phase_controllable: false`）。要变成「按请求相位算」，需等 PHASE_DUTY_CONFIG
- * 补丁重建 IP 后把这里改成从 0x218 相位字读取。 */
-#define DPM_MODEL_SRC_PHASE_MDEG 90000u
-
 /** 仿真的 PL 状态。调用方只需要持有它并把指针作为 `dpm_io_t` 的 ctx。 */
 typedef struct {
     /* ---- 寄存器堆（按字节偏移寻址，低 6 位） ---- */

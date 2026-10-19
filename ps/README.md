@@ -1,70 +1,51 @@
 # PS 侧裸机程序与宿主机验证台（`ps/`）
 
-Zynq-7010（`xc7z010clg400-1`）PS 侧的 **freestanding 裸机 C 串口命令服务端**：
-按 `docs/ps-protocol.md` 解析 PC 上位机的命令帧，读写 PL 的 AXI4-Lite 寄存器与片内
-信号源 MMCM 的 DRP 口，完成单次/连续测量、闸门时间、输入源选择、片内源频率设置与
-结果回传；**同一份命令处理核心**在宿主机（x86-64）上以「寄存器级 PL 仿真后端 + pty
-服务端」的形式运行，用于无硬件时的端到端验证。
+Zynq-7010（`xc7z010clg400-1`）PS 侧的 **freestanding 裸机 C 串口命令服务端**：按
+[`docs/ps-protocol.md`](../docs/ps-protocol.md) 解析 PC 上位机的命令帧，读写 PL 的 AXI4-Lite 寄存器
+与片内源 MMCM 的 DRP 口，完成单次/连续测量、闸门时间、输入源选择、片内源频率与相位设定、结果回传；
+**同一份命令处理核心**（`dpm_cmd.c`）在宿主机（x86-64）上以「寄存器级 PL 仿真后端 + pty 服务端」
+的形式运行，用于无硬件时的端到端验证。工程已完成并通过实测验收（2026-10-19）。
+
+## 1. 目录结构
 
 ```text
 ps/
 ├── include/   dpm_regs.h(冻结) dpm_calc.h(冻结) dpm_proto.h(冻结)
 │              dpm_io.h        # 寄存器 IO vtable（真实 MMIO / 仿真后端共用）
 │              dpm_cmd.h       # 命令核心上下文、PAYLOAD 结构
-│              dpm_board.h     # 板级驱动接口（UART/GIC/时间源）
+│              dpm_board.h     # 板级驱动接口（UART/GIC/时间源、中断号）
 ├── src/       dpm_main.c dpm_cmd.c dpm_proto.c dpm_calc.c dpm_sig.c dpm_div64.c
 │              dpm_regs_io.c dpm_uart.c dpm_irq.c startup.c linker.ld
 ├── sim/       fpga_model.{c,h}（PL 仿真后端） host_main.c（pty/stdio 服务端）
-├── tests/     test_calc.c test_proto.c test_sig.c test_server_selftest.py
-│              e2e_session_record.py gen_golden_table.py
+├── tests/     test_calc.c test_proto.c test_sig.c golden_table.h
+│              test_server_selftest.py e2e_session_record.py gen_golden_table.py find_uart_baud.py
+├── tools/     onboard_accept.py onboard_accept_sim.sh jtag_boot.tcl check_bd_uart.py
 ├── build.sh   CMakeLists.txt
 └── build/     构建产物（不入库）
 ```
 
-## 1. 构建
+## 2. 构建
 
 ```bash
-bash ps/build.sh              # 交叉编译 dpm_ps.elf + 宿主机 host_main
+bash ps/build.sh              # 交叉编译 dpm_ps.elf/.bin + 宿主机 host_main
 bash ps/build.sh --ps-only    # 只交叉编译
 bash ps/build.sh --host-only  # 只构建 host_main
 
-cmake -S ps -B ps/build/cmake && cmake --build ps/build/cmake -j4
+cmake -S ps -B ps/build/cmake && cmake --build ps/build/cmake -j8
 ctest --test-dir ps/build/cmake --output-on-failure     # 4 个用例
 ```
 
-**为什么必须 freestanding**：本机的 `arm-none-eabi-gcc` 只装了 M-profile 的 multilib，
-链接 newlib/libgcc 会报 `conflicting architecture profiles A/M`。因此 PS 侧一律
-`-mcpu=cortex-a9 -marm -ffreestanding -nostdlib -nostartfiles -ffunction-sections
--fdata-sections -Wl,--gc-sections`，自带 `startup.c`（栈/BSS/向量）与 `dpm_div64.c`
-（`__aeabi_uidiv`/`__aeabi_uidivmod`/`__udivdi3`/`__umoddi3`/`__aeabi_uldivmod`），
-不 include 任何 libc 头、不使用浮点与可变参数。构建脚本最后用 `nm -u` 断言
-**没有未定义符号**，这正是"没有偷偷依赖 libgcc/newlib"的证据。
+**为什么必须 freestanding**：本机的 `arm-none-eabi-gcc` 只装了 M-profile 的 multilib，链接
+newlib/libgcc 会报 `conflicting architecture profiles A/M`。因此 PS 侧一律
+`-mcpu=cortex-a9 -marm -ffreestanding -nostdlib -nostartfiles -ffunction-sections -fdata-sections
+-Wl,--gc-sections`，自带 `startup.c`（栈/BSS/向量）与 `dpm_div64.c`
+（`__aeabi_uidiv`/`__aeabi_uidivmod`/`__udivdi3`/`__umoddi3`/`__aeabi_uldivmod`），不 include 任何
+libc 头、不使用浮点与可变参数。构建脚本最后用 `nm -u` 断言**没有未定义符号**（没有偷偷依赖
+libgcc/newlib 的证据），并要求 `-Wall -Wextra -Werror -Wshadow -Wundef -Wpointer-arith -Wcast-align
+-Wstrict-prototypes -Wmissing-prototypes` 下零警告。链接器提示 `has a LOAD segment with RWX
+permissions` 是单段 OCM 镜像的正常提示，可忽略。
 
-### 实测输出（`bash ps/build.sh`，原始日志见 `spec/ps_selftest/build.log`）
-
-```text
-== 交叉编译（arm-none-eabi-gcc, Cortex-A9, freestanding）
-   CC  dpm_main.c / dpm_proto.c / dpm_calc.c / dpm_sig.c / dpm_cmd.c / dpm_div64.c
-   CC  dpm_regs_io.c / dpm_uart.c / dpm_irq.c / startup.c
-   LD  dpm_ps.elf
-== file 校验
-ps/build/dpm_ps.elf: ELF 32-bit LSB executable, ARM, EABI5 version 1 (SYSV),
-  statically linked, with debug_info, not stripped
-== arm-none-eabi-size
-   text	   data	    bss	    dec	    hex	filename
-  10780	      4	  16724	  27508	   6b74	ps/build/dpm_ps.elf
-== 未定义符号检查（必须为空，否则说明还依赖 libgcc/newlib）
-   （无未定义符号）
-== 宿主机构建（clang, x86-64）
-   构建完成：ps/build/host_main
-```
-
-> 链接器会提示 `has a LOAD segment with RWX permissions`：这是单段 OCM 镜像
-> （代码+数据同段）的正常提示，可以用 `-Wl,-z,noexecstack` 之类消掉，但本工程
-> 保持简单。全程序编译**零警告**（`-Wall -Wextra -Werror -Wshadow -Wundef
--Wpointer-arith -Wcast-align -Wstrict-prototypes -Wmissing-prototypes`）。
-
-## 2. 宿主机验证台
+## 3. 宿主机验证台 `host_main`
 
 ```bash
 ps/build/host_main --device /dev/pts/N        # 用已有 pty 从端（验证脚本用这个）
@@ -73,10 +54,10 @@ ps/build/host_main --stdio                    # 协议字节走 stdin/stdout
 
 # 可选参数
 --freq-hz N --phase-mdeg N --gate N           # 片内源初值 / 初始闸门
---slow-hz N --dsp-hz N --seed N --speed N     # 时钟（默认 50MHz / 450MHz）、确定性种子、仿真加速
---ext-present --ext-freq-hz N --ext-phase-mdeg N  # 模拟外部引脚接信号
+--slow-hz N --dsp-hz N --speed N              # 时钟（默认 50MHz / 450MHz）、虚拟时间加速
+--ext-present --ext-freq-hz N --ext-phase-mdeg N  # 模拟外部引脚接信号（默认无信号）
 --unlock                                      # 测试钩子：MMCM 永不锁定
---verbose                                     # 日志走 stderr（不影响协议字节）
+--watch-stdin --verbose                       # stdin EOF 即退出、日志走 stderr
 ```
 
 约定：协议字节只走数据通道，日志只走 stderr；数据通道 EOF、交互式 stdin 的 EOF 或
@@ -86,177 +67,84 @@ ps/build/host_main --stdio                    # 协议字节走 stdin/stdout
 
 | 方面 | 建模 | 简化/假设 |
 | --- | --- | --- |
-| 寄存器语义 | 逐个对齐 `ControlRegs.scala`：start 脉冲（busy 期间忽略）、busy/resultValid/lost/irqPending、结果覆盖即 `lostCount++`、IRQ_STATUS W1C、`CTRL.clear` busy 期间挂起、SIG_CTRL 写后配置快照延迟若干慢周期（期间 DPM 写通道挂起） | — |
-| 测量模型 | `gate = target + ceil(T_sig/T_slow)`；`edge = floor(gate·f_sig/f_slow)`；相位先量化到整数个 DSP 周期（450MHz 下 1 个周期 = 20/9 ns ≈ 2.222ns，整数 RNE）再乘沿数 → `phase_cnt = cycles·edge` | 与 `spec/gen_golden.py` 同口径，逐位一致 |
-| 时间推进 | **每次 AXI 事务**推进 64 个慢周期；主循环每轮再用 `--speed`（默认 4096）额外推进，让虚拟时间与墙钟解耦（宿主机负载高时 `poll(2ms)` 实际节拍会变慢，否则 1ms 流间隔永远等不到） | 真实硬件是自由运行的时钟 |
+| 寄存器语义 | 逐个对齐 `ControlRegs.scala`：start 脉冲（busy 期间忽略）、busy/resultValid/lost/irqPending、结果被覆盖即 `lostCount++`、IRQ_STATUS W1C、`CTRL.clear` busy 期间挂起 | 输入选择/使能的配置快照经固定几个慢周期送达（模型参数，真实实现同域同拍） |
+| 测量模型 | `gate = target + ceil(T_sig/T_slow)`；`edge = floor(gate·f_sig/f_slow)`；相位先量化到整数个 DSP 周期（450MHz 下 1 个周期 = 2.222ns，整数 RNE）再乘沿数 → `phase_cnt = cycles·edge` | 与 `spec/gen_golden.py` 同口径，逐位一致 |
+| 时间推进 | **每次 AXI 事务**推进 64 个慢周期；主循环每轮再用 `--speed`（默认 4096）额外推进，让虚拟时间与墙钟解耦 | 真实硬件是自由运行的时钟；长闸门只花很短墙钟 |
 | 源不可用 | 片内源未使能/未锁定，或外部引脚无信号（默认）→ 两路恒低：`busy` 恒为 1、不产生结果、`RESULT_SEQ` 不自增 | 与真实 PL 的「等参考沿」一致 |
-| 片内源相位 | **固定 90°**（`DPM_MODEL_SRC_PHASE_MDEG`）：与上一版 clk_wiz 方案的实测结论一致（DRP 相位字没接到 MMCM，写它不改变输出相位） | 当前方案（裸 MMCM + 极简 DRP 控制器）下相位就是 MMCM 的相位寄存器，仿真后端可按需改为「跟随请求相位」 |
-| DRP 映射 | `0x200` CLKFBOUT、`0x208`/`0x214` 分频（低字节 = D）、`0x20C`/`0x218` 相位（**毫度**）、`0x25C` Load=0x07、状态寄存器 `0x004`（**上述 clk_wiz 语义映射已作废**：当前方案写的是 MMCM 原始 16 位寄存器，`0x43C1_0000` 段的 `0x08..0x24` + `0x28` LOAD） | `spec/drp_semantics.json`、`dpm_regs.h` 记录的是上一版；当前映射见 `vivado/package_src_ip.tcl` 与 `build/analysis/golden/mmcm_encode.py` |
+| 片内源相位 | 由写入的 MMCM 寄存器镜像（`ClkReg1`/`ClkReg2` 的 `DELAY_TIME` + `PHASE_MUX`）反推实现相位，网格 `45°/D` | 不建模 MMCM 抖动、重配置期间的输出停止细节 |
+| DRP 映射 | MMCM 原始 16 位寄存器镜像：`0x08..0x24` + `0x28` LOAD，ID/STATUS 在 `0x00`/`0x04`（`0x43C1_0000` 段） | 不建模真实 DRP 时序 |
 
-## 3. 测试与实测证据
+## 4. 测试与回归
 
-下列输出都是本机实际运行结果，原始日志在 `spec/ps_selftest/`。
-
-### 3.1 宿主机 C 用例（`spec/ps_selftest/host_tests.log`）
+宿主机 C 用例与 pty 端到端自测（当前结果，`ctest` 4/4 通过）：
 
 ```text
-$ ctest --test-dir ps/build/cmake --output-on-failure
-    Start 1: test_calc            ... Passed
-    Start 2: test_proto           ... Passed
-    Start 3: test_sig             ... Passed
-    Start 4: test_server_selftest ... Passed
-100% tests passed out of 4      （exit=0）
-
-$ ./ps/build/cmake/test_calc
-== test_calc（dpm_calc.c 定点换算）
-== 121 项检查，0 项失败        （exit=0）
-
-$ ./ps/build/cmake/test_proto
-== test_proto（帧层与 PAYLOAD）
-== 120 项检查，0 项失败        （exit=0）
-
-$ ./ps/build/cmake/test_sig
-== test_sig（片内源求解与 DRP 字）
-== 192 项检查，0 项失败        （exit=0）
+test_calc         329 项检查，0 失败   # 金标准定点输出逐位一致、除零/溢出边界
+test_proto        128 项检查，0 失败   # CRC 标准向量、组帧↔收帧、负向帧、等待上限量纲
+test_sig          584 项检查，0 失败   # 冻结频点求解、VCO/MULT/D 约束、方案 A 编码位域
+test_server_selftest  631/631 项通过  # pty 上逐条覆盖命令码、错误路径、流上报、长闸门
 ```
 
-> 上面的数字是 `spec/ps_selftest/host_tests.log`（2026-10-15 那一轮）的存档。随后的几轮扩充了金标准
-> 向量与用例，**当前**（450MHz 轮次，2026-10-19）同一组目标是 `test_calc` 329 / `test_proto` 128 /
-> `test_sig` 584 项检查，全部 0 失败（`test_proto` 新增的 8 项是命令层等待上限的量纲判据，见第 5 节与
-> `docs/verify-report.md` §14）。
+其他入口：
 
-覆盖点：
-- `test_calc`：80 条金标准（450MHz、新冻结频点表）的定点输出逐位一致、`gate/edge = 0` 不除零、
-  32 位大数不溢出、相位归一化与周期换算；
-- `test_proto`：CRC-16/MODBUS 标准向量 `"123456789" → 0x4B37`、组帧↔收帧逐字节往返、
-  CRC 错/LEN=0/LEN=65/噪声后重新同步、全部请求 PAYLOAD 的长度校验与 IDENTIFY 字段布局；
-- `test_sig`：10 个冻结频点的精确解与 VCO/MULT/D 约束、80 条金标准的求解结果、
-  22.5° 吸附到 45° 网格、不可达频率的误差、DRP 字（`0x200 = (20<<8)|1`、分频字 = D 本体、
-  相位字 = 毫度 90000、状态偏移 `0x004`、`DPM_DRP_PHASE_WRITABLE = 0`）。
-
-### 3.2 pty 端到端自测（`spec/ps_selftest/pty_selftest.log`）
-
-```text
-$ python3 ps/tests/test_server_selftest.py
-...
-== 结果: 256/256 项通过 ==        （exit=0）
+```bash
+python3 ps/tests/e2e_session_record.py          # 打印一次完整 pty 会话（帧 hex + 解析字段）
+uv run python spec/validate_sweep.py --server "./ps/build/host_main --device {device}"
+                                                # 独立参考实现 80 点扫描（当前 80/80 通过）
+bash ps/tools/onboard_accept_sim.sh             # 离线验收演练（当前 94/94 项通过，含 80 点扫描）
 ```
 
-> 同样地，`256/256` 是 2026-10-15 存档的数字；**当前**（450MHz 轮次）是 **631/631**（新增的用例含
-> 「长闸门 + 无信号时 `GET_RESULT` 的有界等待」，见第 5 节与 `docs/verify-report.md` §14）。
+`ps/tests/golden_table.h` 由 `ps/tests/gen_golden_table.py` 从 `spec/golden/vectors.json` 生成，
+改金标准后重新生成，不要手改。
 
-631 项覆盖：帧层负向（CRC 错/LEN 越界/噪声重同步/未知命令/方向位）、
-全部命令码 `0x01..0x0E`、通知帧 `0xE1/0xE2`、错误路径（非法 mode/source/freq/相位/
-PAYLOAD 长度 → `0xFE`；测量中 START、片内源未锁定、外部无信号 → `0xFF`）、
-10 个冻结频点 × 逐频点相位点（80 组）与金标准逐位对照、结果覆盖丢失（`lostCount`/`EVENT(1)`）、
-单次/连续模式与流上报、外部源两条路径、`--unlock` 失锁实例、长闸门下的有界等待。
+## 5. 上板
 
-### 3.3 pty 会话记录（450MHz 轮次重跑，节选）
+完整步骤（BD 串口参数、重建 bitstream、BOOT.bin、JTAG 加载、验收）见
+[`docs/bringup.md`](../docs/bringup.md)；本目录相关的入口：
 
-```text
-TX a5 01 01 c1 e0            (PING)          RX 81                → 空响应
-TX a5 01 02 81 e1            (IDENTIFY)      RX 82 00 00 01 00 ...
-      ver=0x00010000 caps=0x00000007 versionReg=0x44504D02 capsReg=0x00030104
-      dsp=450000000 slow=50000000 flags=0x0017
-TX a5 01 03 40 21            (GET_STATUS)    RX 83 ...
-      status=0x00000000 sigStatus=0x0000000F gateTarget=2000 lostCount=0 seq=0
-TX a5 09 0a 40 78 7d 01 90 5f 01 00 09 d0   (SET_SIG 25MHz/90°)
-RX 8A 40 78 7d 01 90 5f 01 00 00 ca 9a 3b 28 00 0a
-      freq=25000000 phase=90000 vco=1000000000 div=40 phaseField=10（MMCM DELAY_TIME = 相位码 >> 3）
-TX a5 05 07 d0 07 00 00 3c 8f (SET_GATE 2000)   RX 87 d0 07 00 00 → gateTarget=2000
-TX a5 01 04 01 e3            (START)         RX 84                → 空响应
-TX a5 01 06 80 22            (GET_MEAS)      RX 86 ...
-      seq=0 gate=2002 edge=1001 phase=4004 freq=25000000Hz phase=80000mdeg
-      金标准（25MHz/90°）: gate=2002 edge=1001 phase=4004 freq=25000000 phase=80000 → 逐位一致
-      （90° 先被 450MHz 的 DSP 采样网格量化：4.5 个周期 → RNE → 4 个 = 80.0°）
-TX a5 02 08 02 56 01         (SET_MODE 2)    RX FE                → ERR_PARAM
-TX a5 09 0a c0 c6 2d 00 00 00 00 00 72 a9   (SET_SIG 3MHz)  → RX FE → ERR_PARAM
-TX a5 04 0d 01 14 00 89 ac   (STREAM on)     RX 8D 01 14 00       → enable=1 interval=20ms
-TX a5 02 08 01 16 00         (SET_MODE 1)    RX 88 01             → mode=1（continuous）
-RX E1 c2 00 00 00 d2 07 00 00 e9 03 00 00 31 23 00 00 40 78 7d 01 20 bf 02 00 00 00
-      → STREAM_DATA seq=194 gate=2002 edge=1001 phase=9009 freq=25000000Hz phase=180000mdeg lostDelta=0
--- 服务端 SIGTERM 退出码: 0
+```bash
+bash ps/build.sh                                    # 生成 ps/build/dpm_ps.elf 与 .bin
+xsdb -quiet ps/tools/jtag_boot.tcl                  # JTAG 冷启动（复位停核 → PL → ps7_init → dow → 运行）
+uv run python ps/tools/onboard_accept.py --port /dev/ttyUSB0            # 含冷启动的完整上板验收
+uv run python ps/tools/onboard_accept.py --port /dev/ttyUSB0 --no-boot  # 板子已在跑，只验收
+python3 ps/tools/check_bd_uart.py build/vivado/dpm_system.xsa           # 复验 BD 的 UART 配置
+python3 ps/tests/find_uart_baud.py /dev/ttyUSB0                         # 换板时重测 UART 参考时钟
 ```
 
-> 这是一次完整会话的节选（`python3 ps/tests/e2e_session_record.py`，2026-10-19 运行）；
-> 400MHz 轮次的旧记录（`phase=90000mdeg`、`phaseField=0`、`dsp=400000000`）保留在
-> `spec/ps_selftest/pty_session.log` 里，属于历史。
+上电横幅示例（收到第一条有效帧前每秒重发）：`DPM-PS ready: uart=UART1 baud=115200
+uart_ref_hz=86400000 cpu_variant=3 proto=1.1`。`uart_ref_hz` 是 SLCR 送给 UART 的参考时钟（AX7010
+实测 86.4MHz），**不是** PL 的 50MHz 慢时钟；换板后按 `find_uart_baud.py` 重测并更新
+`DPM_UART_REF_HZ`。
 
-### 3.4 Lead 的独立回归（`spec/ps_selftest/validate_sweep.log`）
+### 中断路径
 
-用 `spec/validate_sweep.py`（独立参考实现 + 金标准）对我们的 host_main 做全量扫描：
-
-```text
-$ python3 spec/validate_sweep.py --server "./ps/build/host_main --device {device}" --repeat 1
-IDENTIFY：ver=0x00010000 caps=0x00000007 versionReg=0x44504D02 dsp=450MHz slow=50MHz flags=0x17
-相位可控 = True
-   5.0000MHz 请求φ=   0.0° | gate= 2010 edge=  201 phaseCnt=      0 | f=    5.0000MHz (Δ     0Hz≤5000Hz) | φ=   0.000° (Δ0.000≤2.001/实测容限, 期望0.000°) | PASS
-  ...
-  50.0000MHz 请求φ= 315.0° | gate= 2001 edge= 2001 phaseCnt=  16008 | f=   50.0000MHz (Δ     0Hz≤50000Hz) | φ= 320.000° (Δ0.000≤20.001/实测容限, 期望320.000°) | PASS
-
-通过 80 / 失败 0（共 80 点），串口统计 {'sent': 644, 'recv': 644, 'crc_err': 0,
-'dropped': 0, 'timeouts': 0}，服务端退出码 0
-```
-
-## 4. 上板步骤（JTAG + UART）
-
-前提：串口由 `vivado/create_bd.tcl` 直接给出（默认 `-uart uart1`，即 PS UART1 / MIO48-49），
-重建 BD 与 bitstream 后即可用；详细步骤见 `docs/bringup.md` 第 0–1 节。
-
-1. **生成 bitstream 并导出 XSA**（见 `vivado/build_bitstream.tcl`），启动 Vivado/Vitis 的
-   硬件服务器（`hw_server`），或直接用 `xsct`：
-   ```tcl
-   connect
-   targets -set -filter {name =~ "APU*"}
-   rst -processor
-   dow build/vivado/<...>/dpm_system_wrapper.bit   ;# 先下 PL
-   fpga -f ...
-   ```
-2. **下载 PS 程序**（`ps/build/dpm_ps.elf`，链接在 OCM `0x00000000`）：
-   ```tcl
-   targets -set -filter {name =~ "ARM*#0"}
-   dow ps/build/dpm_ps.elf
-   con
-   ```
-   > 时钟/MIO/DDR 由 FSBL（`ps7_init`）负责：用 JTAG 直接 `dow` 时建议先跑 FSBL，
-   > 或确认 `ps7_init.tcl` 已执行。程序本身只初始化 UART/全局定时器/GIC 与 PL 寄存器。
-3. **接串口**：PC 侧 `/dev/ttyUSB*`，115200 8N1，用 `ps/tests/e2e_session_record.py`
-   同款的帧格式手测，或直接跑上位机（`host/`）：
-   ```bash
-   python3 -m dpm_host.cli --port /dev/ttyUSB0        # 走 host/ 的 CLI
-   python3 spec/validate_sweep.py --server "python3 -m dpm_host.cli --port /dev/ttyUSB0"
-   ```
-4. **复位**：`rst -processor` 后重新 `dow`/`con`；`CTRL.clear`（协议 `CLEAR`）只清结果与
-   标志，不复位 PL 的测量状态机。
-
-### 中断路径的状态
-
-`DPM_USE_IRQ=1`（`build.sh` 默认）编译了 `dpm_irq.c` 的向量表 + GIC 使能 + 测量完成中断
-（`DPM_IRQ_ID` 默认 61，UART0 = 59），中断里只置标志 + 清 `IRQ_STATUS`，主循环做读取。
-**该路径未上板实测**：主循环始终同时轮询 `STATUS.busy`，所以即使中断号配错，
-测量功能仍然可用（只是延迟由中断决定 vs 由轮询决定）。要退回纯轮询：
-`bash ps/build.sh` 前修改 `DEFS_ARM` 里的 `-DDPM_USE_IRQ=0`。
-
-## 5. 已知限制与实测结论（必须区分"已验证"与"未验证"）
-
-| 项 | 状态 |
-| --- | --- |
-| 交叉编译 + 链接 + `nm -u` 无未定义符号 | **已验证**（本机，见 1 节输出） |
-| 宿主机单元测试 1041 项（329+128+584）+ pty 端到端 631 项 | **已验证**（450MHz 轮次，2026-10-19，见 3.1/3.2） |
-| 与独立参考实现（`spec/validate_sweep.py`）80/80 一致 | **已验证**（450MHz 轮次，见 3.4，本轮复跑 80 点全 PASS） |
-| 片内源相位在线可改 | **未上板验证**：上一版 clk_wiz 方案的实测结论是「相位字没接到 MMCM，`clk_out2` 恒为静态 90.000°」（`spec/drp_semantics.json`、`docs/verify-drp.md`）；当前方案（裸 MMCM + 极简 DRP 控制器）改由 PS 直接写 MMCM 相位寄存器，但这条通路仍只有 DRP 从端模型与 `validate_bd_design` 的证据，上板前不要当成已生效 |
-| 真实 PL 上的 DRP 重配置时序（等 `locked` 0→1、Safe Clock Startup） | **未上板验证**：旧方案的逻辑按当时的实测结论实现（`0x004` 状态位 + `0x25C` Load=0x07）；当前方案见 `vivado/package_src_ip.tcl` |
-| UART 中断路径、GIC 中断号 61/59 | **未上板验证**（轮询路径已通过 pty 验证） |
-| PS 时钟配置（`DPM_GTIMER_HZ` 默认 333.333MHz） | **未上板验证**：数值只影响超时判定的松紧，不影响协议与数值 |
-| 外部引脚输入路径 | 宿主机侧用 `--ext-present` 模拟并对照金标准通过；真实引脚未测 |
+`bash ps/build.sh` 默认以 `-DDPM_USE_IRQ=1` 构建：向量表 + GIC（优先级/目标 CPU0）+ 测量完成中断
+（`DPM_IRQ_ID` 默认 61）+ UART RX 中断；中断里只置标志并清 `IRQ_STATUS`，主循环负责读取。主循环
+**始终同时轮询** `STATUS.busy`，因此中断配置异常也不会卡死测量。要退回纯轮询：把 `build.sh` 的
+`DEFS_ARM` 改为 `-DDPM_USE_IRQ=0` 后重建。
 
 ## 6. 与冻结接口的关系
 
-- `ps/include/dpm_regs.h`、`dpm_calc.h`、`dpm_proto.h` 由 Lead 冻结，本目录只读使用；
-- DRP 映射与相位可写性以 `dpm_regs.h` + `spec/drp_semantics.json` 的记录为准——注意它们记录的是
-  **上一版 clk_wiz_src 方案**（分频字低字节 = D 本体、相位是独立 32 位毫度字 `0x20C`/`0x218`、
-  状态寄存器在 `0x004`）；当前方案写的是 MMCM 原始 16 位寄存器（`0x08..0x24` + `0x28` LOAD），
-  映射见 `vivado/package_src_ip.tcl` 与 `build/analysis/golden/mmcm_encode.py`；
-- 频率字段 `freqMilliHz` 的**单位是 Hz**（历史命名），公式用不溢出的等价形式
-  （见 `dpm_calc.h` 与 `docs/ps-protocol.md` §5）；
-- 通知帧是 `0xE1`（STREAM_DATA）/ `0xE2`（EVENT），响应是 `请求|0x80`，错误 `0xFE/0xFF`。
+- `ps/include/dpm_regs.h`、`dpm_calc.h`、`dpm_proto.h` 是冻结接口，本目录只读使用；
+  命令核心通过 `dpm_io.h` 的 vtable 访问寄存器，真实 MMIO 与仿真后端共用同一份 `dpm_cmd.c`。
+- 片内源（方案 A）寄存器镜像在 `0x43C1_0000` 段：`0x00` ID（`0x44504D03`）、`0x04` STATUS
+  （bit0 = locked、bit1/bit2 = busy）、`0x08..0x24` 八个 MMCM 16 位寄存器镜像、`0x28` LOAD（写 1
+  整批生效）；分频/相位编码见 `dpm_regs.h` 的 `DPM_MMCM_ENCODE_CLKOUT`，与 `host/dpm_host/sig.py`
+  逐位一致，由两侧单测对拍。
+- `freqMilliHz` 的**单位是 Hz**（历史命名），`phaseMilliDeg` 是毫度，公式用不溢出的等价形式
+  （见 `dpm_calc.h` 与 `docs/ps-protocol.md` §5）。
+- 通知帧是 `0xE1`（`STREAM_DATA`）/ `0xE2`（`EVENT`），响应是 `请求码 | 0x80`，错误 `0xFE/0xFF`；
+  `flags.b4` 表示片内源相位在线可控（当前为 1），与 `DPM_DRP_PHASE_WRITABLE` 一致。
+
+## 7. 维护者须知
+
+- **freestanding 是硬约束**：新增源文件不得 include libc 头、不得使用浮点/可变参数；`build.sh`
+  的 `nm -u` 断言必须保持为空。
+- **等待预算**：闸门目标最大 28 位（50MHz 下 ≈5.37s）。固件在 `GET_RESULT`/`GET_MEAS` 内部做
+  有界等待，上限 `DPM_WAIT_TIMEOUT_MS = 50ms + 4 × 闸门时间（秒）`（**毫秒界**，不是慢周期）；
+  无时间源时用 `DPM_WAIT_POLL_LIMIT`（**慢时钟周期**界）。两者不要混用。
+- **验证台虚拟时间**：`host_main` 的模型时间由 AXI 事务与 `--speed` 推进，与墙钟解耦，长闸门
+  只花很短墙钟；跨协议/固件的超时行为由 `host/tests/test_gate_timeout.py` 与
+  `host/tests/test_client_over_pty.py` 覆盖。
+- **UART 中断号**：测量完成中断 `DPM_IRQ_ID` 默认 61、UART0 = 59、UART1 = 82；BD 里
+  `IRQ_F2P[0]` 的接线决定 PL 中断号，改 BD 后核对。

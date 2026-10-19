@@ -12,8 +12,8 @@ import chisel3.util._
   * clk_wiz 的重配置参考设计在硬件里放了 `mmcm_pll_count_calc` / `mmcm_pll_divider` / `mmcm_pll_phase` 三组定点函数， 把「毫度 / 百分比 / MHz」实时换算成
   * MMCM 的计数器位域——实测在 `xc7z010clg400-1` 上占 13,287 个物理 LUT site 与 38 个 DSP48E1。
   *
-  * 但那套换算是**纯整数算术**，PS 侧软件完全算得出来（参考实现与权威校验见 `build/analysis/golden/mmcm_encode.py`）。把它搬到软件后，PL 侧只需要 「把软件给的 16 位值按顺序写进
-  * MMCM 的 DRP 口」，也就是本模块。
+  * 但那套换算是**纯整数算术**，PS 侧软件完全算得出来（参考实现与权威校验见 `host/dpm_host/sig.py` 与 `ps/include/dpm_regs.h`，两侧逐位一致）。把它搬到软件后，PL 侧只需要
+  * 「把软件给的 16 位值按顺序写进 MMCM 的 DRP 口」，也就是本模块。
   *
   * ==寄存器映射（AXI4-Lite，字节偏移）==
   *

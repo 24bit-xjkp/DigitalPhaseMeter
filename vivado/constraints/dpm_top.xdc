@@ -78,8 +78,8 @@ set_max_delay -quiet -datapath_only -from [get_clocks -quiet clkout*_raw] \
 # 为什么不能按默认的「逐沿跨时钟检查」约束：dspClock 由 MMCM 从 FCLK_CLK0 倍频而来，
 # clk_wiz 为了让 MMCM 输出对齐到 FCLK_CLK0，把 CLKOUT0 的相位设成 -T_dsp（相位补偿），
 # 于是工具把慢时钟的发射沿与「逻辑上同一时刻」的 dspClock 捕获沿放在一起比，只留给数据路径
-# ~2.1ns（≈1 个 DSP 周期 2.222ns 减去时钟不确定性）——比这两条通路在 400MHz 轮次实测的
-# 约 1.7ns 布线延迟还紧，450MHz 下按逐沿跨时钟检查必然报违例。
+# ~2.1ns（≈1 个 DSP 周期 2.222ns 减去时钟不确定性）——比这两条通路的实际布线延迟还紧，
+# 450MHz 下按逐沿跨时钟检查必然报违例。
 #
 # 处理方式用有界的 max_delay（而不是 set_false_path），保留对布线延迟的检查：
 #   -datapath_only 只量数据路径本身（去掉工具算错的跨时钟相位余量），上限取一个慢时钟

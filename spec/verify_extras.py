@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""补充用例验证（docs/verify-plan.md 第 3 节的 2~6 项），在真实串口（pty）上跑。
+"""补充用例验证（`dpm-measurement-model` 与 `docs/ps-protocol.md` 覆盖的边界情形），在真实串口（pty）上跑。
 
 覆盖：
   1. 闸门独立性：25MHz/90° 下把闸门从 2000 换到 20000，`phaseCnt/edgeCnt` 必须保持同一个整数
@@ -215,7 +215,7 @@ def case_external_no_signal(link) -> None:
                 record(
                     "外部无信号：仿真后端仍给出结果（已知差异，非协议错误）",
                     True,
-                    f"edge_cnt={m['edge_cnt']}、f={m['freq_hz']}Hz —— 真实 PL 应停在 busy；" "已在 docs/verify-report.md 记录该差异",
+                    f"edge_cnt={m['edge_cnt']}、f={m['freq_hz']}Hz —— 真实 PL 应停在 busy；" "该差异属于仿真后端的建模范围，不是协议错误",
                 )
                 return _recover_source(link)
             break

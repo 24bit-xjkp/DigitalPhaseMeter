@@ -5,7 +5,7 @@
  * 两条路径都实现：
  *   - **轮询（默认，上板首选）**：`dpm_uart_rx_ready/getc` + `dpm_uart_putc`；
  *   - **中断**：`dpm_uart_irq_enable(1)` 后 ISR 把 FIFO 搬进软件环形缓冲，
- *     主循环用 `dpm_uart_irq_getc` 取。中断路径未上板实测（见 `ps/README.md`）。
+ *     主循环用 `dpm_uart_irq_getc` 取。中断路径的配置与上板验证见 `docs/bringup.md`。
  *
  * 波特率（Zynq 的公式 `baud = f_ref / (BAUDDIV × (BAUDGEN + 1))`，不引入浮点）：
  *   先取 8 倍过采样的整数近似 `baudgen = round(f_ref/(baud×8)) - 1`，

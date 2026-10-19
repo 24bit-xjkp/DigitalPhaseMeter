@@ -18,10 +18,10 @@ argument-hint: '要改的上位机/协议功能，或要复现的端到端验证
 | --- | --- |
 | 协议定稿（帧、命令表、字段单位、错误码） | `docs/ps-protocol.md` |
 | 片内源换算与写入流程 | `docs/ps-protocol.md` §6；`ps/include/dpm_regs.h` |
-| 验证判据与期望值模型 | `docs/verify-plan.md`、`spec/gen_golden.py` |
-| 实际运行记录（最新一轮） | `docs/verify-report.md`（§10 是方案 A 的上板复验） |
-| 上位机用法与验收输出 | `host/README.md` |
-| PS 侧构建与自测 | `ps/README.md` |
+| 验证判据与期望值模型 | `spec/gen_golden.py`、`spec/golden/vectors.json` |
+| 相位可控性与网格结论 | `spec/drp_semantics.json`（当前方案 A 为可控） |
+| 上位机用法与已知限制 | `host/README.md` |
+| PS 侧构建、测试与上板 | `ps/README.md`、`docs/bringup.md` |
 
 **三处实现必须逐位一致**：C（`ps/src/dpm_calc.c`、`dpm_sig.c`、`dpm_cmd.c`）、
 Python（`host/dpm_host/mathx.py`、`sig.py`、`protocol.py`）、金标准（`spec/gen_golden.py`），
@@ -43,8 +43,8 @@ Python（`host/dpm_host/mathx.py`、`sig.py`、`protocol.py`）、金标准（`s
    `>180°` 的请求是合法的（相位计测无符号间隔），不要按老规则拒掉。两侧判据：
    C `dpm_mmcm_phase_code_fits` / Python `sig.phase_code_fits`；仿真后端必须用同一条
    （否则会出现「仿真接受、真机拒绝」的假象）；`DpmClient.scan` 遇到被拒的点会跳过并记日志。
-4. **通知码**用 `0xE1/0xE2`（协议 v1.1）。早期用 `0x81/0x82` 与 `PING/IDENTIFY` 的响应撞码，
-   第三方客户端只能靠长度猜。新增响应码时先检查「请求码 | 0x80」是否与通知码冲突。
+4. **通知码**用 `0xE1/0xE2`：`0x81..0x8E` 是响应区间（值 = 请求码 `| 0x80`），`0xE0..0xEF`
+   保留给 PS 主动上报，两者不重叠。新增响应码时先检查是否与通知码撞码。
 5. **GUI 线程模型**：所有串口操作都在后台线程里串行执行，结果用 **Qt 信号**（PySide6）回主线程刷新；
    不要在工作线程里碰控件，也不要在主线程里做阻塞请求。
 6. **CLI/GUI 的 DRP 字只是「预演」**：真正的换算在 PS 固件里做（`SET_SIG(freq, phase)`），
@@ -74,17 +74,18 @@ uv run python -m dpm_host --port /tmp/dpm_pty gui
 
 - 仿真后端 `host/dpm_host/sim_fpga.py` 建模「寄存器语义 + 测量模型 + 假 MMCM」；
   DRP 段在模型里是平坦偏移 **`0x100 + off`**（对应真实的另一段 AXI 基地址 `0x43C1_0000`）。
-- `--phase-model static` 用来复现旧 bitstream 的「相位不可控」行为，验证上位机的提示路径。
+- `--phase-model static` 用于模拟「相位不可控」的旧 bitstream，验证上位机的提示路径；
+  当前方案 A 下用默认 `auto` 即可。
 - GUI 改动后跑 `uv run python host/tools/gui_smoke.py [--scan]`：自动起 pty、跑连接/测量/切源/扫描，
   并用 `QWidget.grab()` 截真实窗口（无显示环境加 `QT_QPA_PLATFORM=offscreen`）。
 
 ## 端到端验证入口（真串口）
 
 ```bash
-# C 服务端（与固件同一份 dpm_cmd.c）经 pty：28 点扫描 + 补充用例
+# C 服务端（与固件同一份 dpm_cmd.c）经 pty：80 点扫描 + 补充用例
 uv run python spec/validate_sweep.py --server "./ps/build/host_main --device {device}"
 uv run python spec/verify_extras.py  --server "./ps/build/host_main --device {device}"
-# 离线验收演练（93 项，含流上报与长闸门有界等待）
+# 离线验收演练（80 点扫描，含流上报与长闸门有界等待）
 bash ps/tools/onboard_accept_sim.sh
 # 上板（JTAG 冷启动 + 验收 + 扫描）
 xsdb -quiet ps/tools/jtag_boot.tcl

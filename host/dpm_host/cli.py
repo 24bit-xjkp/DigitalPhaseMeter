@@ -462,8 +462,9 @@ def cmd_sig(args: argparse.Namespace, client: DpmClient) -> int:
     else:
         print(
             f"SET_SIG → f={info.freq_hz / 1e6:g} MHz 相位差={info.phase_deg:g}° "
-            f"VCO={info.vco_hz / 1e6:g} MHz D={info.div} 相位字(0x218)={phase_mdeg} 毫度"
-            f"（phaseField={info.phase_field} 是历史字段，恒 0）"
+            f"VCO={info.vco_hz / 1e6:g} MHz D={info.div} "
+            f"（phaseField={info.phase_field} = DELAY_TIME，请求 {phase_mdeg} 毫度，"
+            f"按 45°/D 网格回显 {info.phase_milli_deg} 毫度）"
         )
         print(f"GET_SIG → f={echo.freq_hz / 1e6:g} MHz 相位差={echo.phase_deg:g}° " f"VCO={echo.vco_hz / 1e6:g} MHz D={echo.div}")
         if info.phase_milli_deg != phase_mdeg:
@@ -688,15 +689,15 @@ def cmd_scan(args: argparse.Namespace, client: DpmClient) -> int:
         n_bad = sum(1 for row in rows if not row.get("phase_honored", True))
         if n_bad:
             print(
-                f"⚠ 当前 bitstream 相位不可在线改（spec/drp_semantics.json: phase_controllable=false）："
+                f"⚠ 当前设备相位不可在线改（spec/drp_semantics.json: phase_controllable=false）："
                 f"实现相位恒为静态 90°，{n_bad}/{len(rows)} 行的相位与请求值不符（err_deg 已如实反映）"
             )
-            print("  要在线扫描相位需按 docs/ps-protocol.md 6.2 给 clk_wiz_src 加 CONFIG.PHASE_DUTY_CONFIG 并重建 IP/BD")
+            print("  当前方案 A 的 bitstream 支持在线相位设定；若设备返回不可控，请确认加载的是方案 A 的 bitstream/IP")
         else:
             print(
-                "说明：spec/drp_semantics.json 记录当前 bitstream 相位不可在线改（phase_controllable=false），"
-                "但本次扫描的设备接受了相位设置（仿真后端 --phase-model controllable 模拟的「补丁后」行为）；"
-                "真实硬件上相位仍恒为 90°，需重建 IP/BD 后才生效"
+                "说明：spec/drp_semantics.json 记录当前设备相位不可在线改（phase_controllable=false），"
+                "但本次扫描的设备接受了相位设置（仿真后端 --phase-model controllable 模拟的可控行为）；"
+                "真实硬件上以实际 bitstream 为准"
             )
     if args.out:
         print(f"CSV 已写入 {args.out}")

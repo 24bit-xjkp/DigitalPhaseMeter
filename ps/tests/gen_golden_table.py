@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """从 `spec/golden/vectors.json` 生成 C 侧金标准表（`ps/tests/golden_table.h`）。
 
-C 代码不解析 JSON：把 28 条向量转成静态数组，由 `ps/tests/test_calc.c` 与
+C 代码不解析 JSON：把 `vectors.json` 里的全部向量转成静态数组，由 `ps/tests/test_calc.c` 与
 `ps/tests/test_sig.c` 使用。改金标准后重新跑本脚本即可。
 
 用法：

@@ -50,9 +50,9 @@ xmake run Controller "-ts=Controller" "-tc=*gate count matches*"  # 一个用例
 dut_context_t ctx{{.coverage = true, .time_precision = verilator_time_unit::ps_10}};
 ```
 
-框架的 `register_wait` 把等待时长换算成时间精度单位时做的是**整数除法**（`~/verilator_utils/src/scheduler.cppm` 的 `register_wait`：`time_to_wait.rep / time_precision_fs_`）。于是任何不能整除等待时长的精度都会**静默截断**。以本项目的高速时钟为例：`.time_precision = ns` 时，`generate_clock(port.dsp_clock, 5_ns)` 内部按 2.5ns 半周期等待，2.5ns 被截断为 2ns，实际时钟是 **4ns / 250MHz**，而不是期望的 5ns / 200MHz。
+框架的 `register_wait` 把等待时长换算成时间精度单位时做的是**整数除法**（`~/verilator_utils/src/scheduler.cppm` 的 `register_wait`：`time_to_wait.rep / time_precision_fs_`）。于是任何不能整除等待时长的精度都会**静默截断**。例如 `.time_precision = ns` 时，`generate_clock(port.dsp_clock, 5_ns)` 内部按 2.5ns 半周期等待，2.5ns 被截断为 2ns，实际时钟是 **4ns / 250MHz**，而不是期望的 5ns / 200MHz。
 
-危险之处在于它不报错，只会让所有"理论值 vs 实测值"的对比悄悄偏掉（曾表现为相位计数需要一个 1.25 的补偿系数才能对上）。
+危险之处在于它不报错，只会让所有"理论值 vs 实测值"的对比悄悄偏掉。
 
 选择原则是"精度能整除所有等待时长"：`ps`、`ps_10` 都能精确表示 2.5ns，本项目沿用 `test/EdgeDetector.cpp` 的 `.time_precision = ps_10`（10ps）。换算到飞秒要乘 `10000zu`，且 `time_in_time_precision()` 是协程 awaiter，必须 `co_await`：
 
@@ -91,9 +91,8 @@ ctx.set_base_name(std::format("Controller.gate.{}_{}", sig1_period_ns, sig2_peri
 ### 5. 窄脉冲激励要跨过一个上升沿再撤销
 
 在下降沿驱动、上升沿采样之后，`co_await wait_stimulate(port.clock)` 会一直停在**下降沿**。若写成
-「置 1 → 等一个下降沿 → 清零」，脉冲只存在半个时钟周期，正好落在两个上升沿之间，**永远采不到**：
-本仓库给 `SignalSource` 送 `reload` 脉冲时就这么错过过一次，表现为「改了相位字但输出没变」。
-正确写法是让脉冲跨过一个上升沿：
+「置 1 → 等一个下降沿 → 清零」，脉冲只存在半个时钟周期，正好落在两个上升沿之间，**永远采不到**
+（本仓库在验证相位字写入时踩过：改了相位字但输出没变）。正确写法是让脉冲跨过一个上升沿：
 
 ```cpp
 port.io_reload = 1;

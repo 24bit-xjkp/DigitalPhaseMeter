@@ -10,7 +10,7 @@
 #   build/vivado/ip/dpm_src_drp/   IP 目录（component.xml + 导入的 RTL 源码）
 #   build/vivado/src_ip_proj/      打包过程使用的临时工程
 #
-# 背景（见 build/analysis/RESOURCE_ANALYSIS.md）：
+# 背景（方案 A）：
 #   原来片内信号源用 clk_wiz 的 `USE_DYN_RECONFIG + PHASE_DUTY_CONFIG`，它会把
 #   「毫度/百分比/MHz → MMCM 计数器位域」的定点换算综合成硬件，实测占
 #   13,287 个物理 LUT site 与 38 个 DSP48E1。本 IP 把换算搬到 PS 软件，

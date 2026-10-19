@@ -114,7 +114,7 @@ uint32_t dpm_cmd_sig_status(const dpm_cmd_ctx_t* c) { return dpm_reg_rd(c->io, c
 uint32_t dpm_cmd_drp_status(const dpm_cmd_ctx_t* c)
 {
     /* 状态寄存器在 DRP 基址 + 0x004（不是「字 31 / 0x27C」，那里恒为 0）。
-     * 见 `dpm_regs.h` 的 DPM_DRP_STATUS_OFF 与 docs/verify-drp.md §4.2。 */
+     * 见 `dpm_regs.h` 的 DPM_DRP_STATUS_OFF。 */
     return dpm_drp_rd(c->io, c->io_ctx, DPM_DRP_STATUS_OFF);
 }
 

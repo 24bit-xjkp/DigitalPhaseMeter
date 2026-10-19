@@ -14,7 +14,7 @@
 #
 # 产物：
 #   build/xsim_handoff/xsim_handoff.log     完整原始日志
-#   spec/golden/handoff_meas.txt            留档副本（用 .txt：仓库 .gitignore 有 *.log）
+
 #
 # 用法：
 #   sim/run_handoff_tb.sh                # 跑点表里的全部点（10 个频点 × 逐频点相位点 = 80 个点）
@@ -35,7 +35,6 @@ readonly DRP_RTL_DIR="${ROOT_DIR}/build/chisel/MmcmDrpController"
 readonly MMCM_RTL="${ROOT_DIR}/vivado/rtl/dpm_mmcm_src.v"
 readonly TB_NAME="tb_src_handoff"
 readonly SIM_ROOT="${ROOT_DIR}/build/xsim_handoff"
-readonly RAW_LOG_DIR="${ROOT_DIR}/spec/golden"
 
 readonly XVLOG="${VIVADO_ROOT}/bin/xvlog"
 readonly XELAB="${VIVADO_ROOT}/bin/xelab"
@@ -121,8 +120,7 @@ set +e
 xsim_status=${PIPESTATUS[0]}
 set -e
 
-mkdir -p "${RAW_LOG_DIR}"
-cp "${LOG}" "${RAW_LOG_DIR}/handoff_meas.txt"
+mkdir -p "$(dirname "${LOG}")"
 
 meas_lines=$(grep -c '^HANDOFF_MEAS ' "${LOG}" || true)
 summary=$(grep -m1 '^HANDOFF_SUMMARY ' "${LOG}" || true)
@@ -133,7 +131,7 @@ fails=$(sed -n 's/.*fails=\([0-9]*\).*/\1/p' <<<"${summary}")
 # 再要求 SUMMARY 明确 fails=0 —— 只数「有没有输出」会把中途 $fatal 当成成功。
 if grep -q '^HANDOFF_DONE ' "${LOG}" && [[ -n "${points}" ]] && [[ "${fails}" == "0" ]] &&
     [[ "${meas_lines}" -eq $((2 * points)) ]] && ! grep -q '^HANDOFF_FAIL' "${LOG}"; then
-    echo "== 联调完成：${points} 个点（≥180° 的 ${over180} 个）、HANDOFF_MEAS ${meas_lines} 行；原始日志 ${LOG}；留档 ${RAW_LOG_DIR}/handoff_meas.txt =="
+    echo "== 联调完成：${points} 个点（≥180° 的 ${over180} 个）、HANDOFF_MEAS ${meas_lines} 行；原始日志 ${LOG} =="
     grep -E '^HANDOFF_(INFO|SUMMARY|DONE)' "${LOG}"
     grep -c '^HANDOFF_MEAS ' "${LOG}" >/dev/null
 else

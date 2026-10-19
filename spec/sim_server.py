@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """最小串口协议代理：把真实串口接到 `spec/` 的独立后端上，供验证脚本使用。
 
-用途（`docs/verify-plan.md` 的验证链路 C）：
+用途（与 `ps/`、`host/` 构成三方独立实现，用于交叉校验）：
     - 当被测对象是 **PC 侧上位机**（`host/dpm_host`）时，用它冒充 PS 侧服务端，
       在 pty 上跑真实串口协议，验证上位机的帧编解码、超时、错误处理与流程；
     - 后端是一个**独立的**寄存器级 + 测量级 PL 模型（本文件自带，不 import `host/`），
@@ -232,7 +232,7 @@ class SimBackend:
     FIXED_PHASE_MDEG = 90_000
 
     def measure_model(self) -> tuple[int, int, int]:
-        """按 docs/verify-plan.md 的模型算 (gate, edge, phase)。
+        """按测量模型算 (gate, edge, phase)。
 
         片内源：相位先被 DSP 采样网格量化成整数个高速周期再乘参考沿数。450MHz 的 DSP 周期
         不是整数 ps，因此用 `相位 × f_dsp /(360000 × f_sig)` 的有理数形式做 RNE
@@ -256,7 +256,7 @@ class SimBackend:
             return  # 源恒低：测量挂在「等参考沿」，永不完成
         if not self.src_select:
             # 外部引脚输入：没有信号源，PL 会一直等参考沿（busy 永远为 1）。
-            # 这个状态正是「docs/verify-plan.md 用例 5」要验证的容错路径。
+            # 这个状态是「源无信号」的容错路径：GET_RESULT 必须回 valid=0 而不是 ERR_BUSY。
             self.busy = 1
             self.finish_at = None
             self.pending_result = None

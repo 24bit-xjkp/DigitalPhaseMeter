@@ -43,7 +43,7 @@
 #   - 两路输出送给 dpm_top_0，由 IP 当成异步被测信号采样成边沿（已不在 IP 内做数字分频，
 #     见 vivado/README.md「Block design 结构」的「片内信号源」要点）；
 #   - 地址段 0x43C1_0000，寄存器映射见 vivado/package_src_ip.tcl 的说明与
-#     build/analysis/golden/mmcm_encode.py（编码参考实现）。
+#     host/dpm_host/sig.py、ps/include/dpm_regs.h（编码参考实现）。
 #
 # 不再使用 clk_wiz 的 `USE_DYN_RECONFIG + PHASE_DUTY_CONFIG`：那套配置会把
 # 「毫度/百分比/MHz → MMCM 计数器位域」的定点换算综合成硬件，实测占 13,287 个
@@ -318,7 +318,7 @@ if {$use_mmcm} {
 #   那套换算是纯整数算术，PS 侧软件完全算得出来。方案 A 把换算搬到软件，
 #   PL 侧只留「把软件给的 16 位寄存器值按顺序写进 MMCM DRP 口」的状态机
 #   （dpm_src_drp，实测 114 LUT / 182 FF / 0 DSP）。
-#   寄存器位域与编码规则见 build/analysis/golden/mmcm_encode.py（已对 clk_wiz 的
+#   寄存器位域与编码规则见 host/dpm_host/sig.py 与 ps/include/dpm_regs.h（已对 clk_wiz 的
 #   Write DRP 生成值逐点验证）。
 #
 # 结构：

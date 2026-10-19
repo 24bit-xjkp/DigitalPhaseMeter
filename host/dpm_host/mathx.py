@@ -25,11 +25,8 @@
 
 本模块的 :func:`freq_hz` 与 :func:`phase_milli_deg` 就是这两条，与
 `spec/gen_golden.py::fixed_point` 逐位一致（`host/tests/test_mathx.py` 用
-`spec/golden/vectors.json` 逐位校验）。
-
-> 记录：`spec/golden/vectors.json` 与 `spec/sim_server.py` 之前多除了一次 1000
-> （5MHz 存成 5000），与文档第 5 节的字段单位表（Hz）不符；已上报 Lead 等待重新生成，
-> 见 `host/README.md` 的「协议问题记录」。本模块按**文档字段单位表**实现 Hz。
+`spec/golden/vectors.json` 逐位校验）。字段单位以 `docs/ps-protocol.md` 第 5 节为准
+（`freqMilliHz` 承载的是整数 Hz，`phaseMilliDeg` 是毫度）。
 
 除整数换算外，本模块还提供判据用辅助量：
 

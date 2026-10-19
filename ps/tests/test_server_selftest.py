@@ -476,8 +476,8 @@ def test_sig_and_golden(sv: Server, golden: dict, verbose: bool) -> None:
     sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(25_000_000) + u32(360_000))  # 满量程（= 0°）
     sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(25_000_000) + u32(0)[:3])
     sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(0) + u32(0))
-    # 22.5° 在 25MHz（D=40）下正好是 20 个 1/8 VCO 周期步：精确可表示（旧固件按 45°
-    # 吸附的缺陷已修，见 docs/onboard-ax7010.md §5）
+    # 22.5° 在 25MHz（D=40）下正好是 20 个 1/8 VCO 周期步：精确可表示
+    # （相位吸附到 45°/D 网格，而不是 45° 的整数倍）
     pl = sv.expect_ok(CMD_SET_SIG, u32(25_000_000) + u32(22_500))
     check("SET_SIG(22.5°) 精确落在 45°/D 网格上并回显 22500", rd_u32(pl, 4) == 22_500 and pl[14] == 2, pl.hex())
     # D=125（6MHz）的网格是 0.36°：22.5° 吸附到最近的格点 22.680°
@@ -681,12 +681,12 @@ def test_external_source(host_main: str, golden: dict) -> None:
 def test_long_gate_bounded_wait(host_main: str) -> None:
     """长闸门 + 源没有边沿：命令内部的等待必须有界（与闸门同量级，不是几小时）。
 
-    背景（`docs/verify-report.md` §14）：`DPM_WAIT_TIMEOUT_MS` 曾把闸门时间的**微秒数值**当毫秒用，
-    于是等待上限随闸门放大 1000 倍——5.37s 闸门（28 位上界）下 `GET_RESULT` 会在命令内部等 5.96 小时。
+    背景：`DPM_WAIT_TIMEOUT_MS` 必须把闸门时间按**秒**代入，不能把微秒数值当毫秒用，
+    否则等待上限随闸门放大 1000 倍——5.37s 闸门（28 位上界）下 `GET_RESULT` 会在命令内部等数小时。
     这里用 28 位上界闸门（`0x0FFFFFFF` 周期 @50MHz = 5.37s）验证：
 
-    * 修复后上限 = `50ms + 4 × 5.37s ≈ 21.5s` 的**虚拟时间**（模型按事务推进，实测墙钟 ≈0.08s）；
-    * 修复前上限是 5.96 小时，模型里被兜底轮询上限拖着跑完 ≈2.15e9 次事务，实测墙钟 ≈10s；
+    * 上限 = `50ms + 4 × 5.37s ≈ 21.5s` 的**虚拟时间**（模型按事务推进，实测墙钟 ≈0.08s）；
+    * 量纲写错时上限放大 1000 倍，模型里被兜底轮询上限拖着跑完 ≈2.15e9 次事务，实测墙钟 ≈10s；
     * 精确的数值判据在 `ps/tests/test_proto.c` 的 `test_wait_budget`（与机器速度无关），
       这里只钉住端到端的「有界」性质，阈值留了 30 倍余量，避免换机器就抖。
     """

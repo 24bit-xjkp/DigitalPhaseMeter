@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """端到端扫描验证：PS 侧 C 服务端（ps/build/host_main）+ 仿真 PL 后端 + 本脚本的独立协议客户端。
 
-设计要点（见 `docs/verify-plan.md`）：
+设计要点：
 
-- **不 import host/ 的代码**：本脚本自带最小的协议实现（`spec/lib/ptl.py`），
+- **不 import host/ 的代码**：本脚本自带最小的协议实现，
   与 `host/dpm_host/protocol.py`、`ps/src/dpm_proto.c` 构成三方独立实现，
   三方一致才算协议正确（`--use-host-client` 可额外用上位机客户端复跑一遍）。
 - 串口是**真正的 pty**：脚本 `pty.openpty()` 建一对，slave 路径交给 C 服务端，
@@ -385,9 +385,9 @@ def measure_once(link: SerialLink, gate: int, timeout: float = 5.0) -> dict:
 def run_point(link: SerialLink, vec: dict, gate: int, repeat: int, timeout: float, phase_controllable: bool, fixed_phase_mdeg: int) -> dict:
     """跑一个测量点：设源 → 确认就绪 → 重复测量 → 汇总。
 
-    相位判据分两种（见 docs/verify-plan.md 第 3 节）：
-      - `phase_controllable=True`：与金标准的 DSP 量化期望值比，容限 = 半个量化步长 + 1 毫度；
-      - `phase_controllable=False`（当前 bitstream 实测）：相位固定为 `fixed_phase_mdeg`（90°），
+    相位判据分两种：
+      - `phase_controllable=True`（当前方案 A）：与金标准的 DSP 量化期望值比，容限 = 半个量化步长 + 1 毫度；
+      - `phase_controllable=False`（旧 bitstream，仅用于回归兼容）：相位固定为 `fixed_phase_mdeg`（90°），
         因此只断言「读数落在固定相位 ±1 个 DSP 周期内」，并把请求相位与实测的差异记为
         `phase_not_controllable=True`（这是预期行为，不算失败）。
     """

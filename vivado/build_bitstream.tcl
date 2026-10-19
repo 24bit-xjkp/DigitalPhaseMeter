@@ -130,7 +130,7 @@ if {[get_property target_language [current_project]] ne "Verilog"} {
     set_property target_language Verilog [current_project]
 }
 
-# ---- 综合/实现策略（run 参数，必须在本轮 launch_runs 之前写）----
+# ---- 综合/实现策略（run 参数，必须在本次 launch_runs 之前写）----
 # 【策略作用在哪个 run 上】本工程是 BD 工程：BD 顶层 wrapper 由 synth_1 综合，而 BD 里的 IP
 #   默认各自做 out-of-context 综合（run 名 <ip>_synth_1）。**IP 的 OOC run 不继承 synth_1 的
 #   STEPS.SYNTH_DESIGN.ARGS**：实测 dpm_top 的 OOC run 在写策略前是
@@ -170,21 +170,11 @@ puts "CUSTOM_IP_SYNTH_RUNS: $custom_ip_synth_runs"
 # 实现选 Performance_Retiming 而不是 Performance_ExplorePostRoutePhysOpt：前者的 phys_opt 用
 #   AlternateFlowWithRetiming（官方描述：更激进的复制 + **DSP/BRAM 优化** + 开启重定时），正是本设计
 #   需要的——关键路径终点是 DSP48 的控制脚。
-# 【400MHz 轮次的历史实测】慢域 50MHz 参考 + DSP 400MHz 下（同一份综合网表、逐个内置策略跑
-#   布局布线）；数字是历史记录，当前设计已是 450MHz（见下面「450MHz 轮次」）：
-#     Performance_Retiming        WNS +0.270ns / WHS +0.095ns   ← 本仓库采用（策略沿用至今）
-#     Performance_RefinePlacement WNS +0.109ns / WHS +0.053ns
-#     Performance_ExplorePostRoutePhysOpt（本仓库早期采用） WNS +0.077ns
-#     Performance_Auto_1/2/3      WNS +0.061ns
-#     Performance_ExtraTimingOpt / Performance_ExploreWithRemap（跑到 write_bitstream 失败，未采用）
-# 【450MHz 轮次（当前设计）】沿用同一套策略，2026-10-18 的完整综合/实现（Design State: Routed，
-#   本轮未重跑 impl_multi.tcl）：
-#   全设计 WNS +0.291ns / WHS +0.032ns / WPWS +0.067ns，TNS = THS = 0、0 个失败端点；
-#   DSP 域内（clk_out1_dpm_system_clk_wiz_0_0，周期 2.222ns）WNS +0.291ns / WHS +0.163ns、0 失败端点。
-#   来源 build/vivado/timing_summary.rpt，XSA 已生成。
+# 当前 450MHz 签核（2026-10-19，Design State: Routed）：全设计 WNS +0.291ns / WHS +0.052ns /
+#   WPWS +0.067ns，TNS = THS = 0、0 个失败端点；同一策略用 impl_stability.tcl 做 6 次独立实现，
+#   结果一致。策略对比调优用 impl_multi.tcl，签核以本脚本 + impl_stability 为准。
 # 有意**不**覆盖 Performance_Retiming 自带的步骤 directive：该策略的关键正是 phys_opt 的
-#   AlternateFlowWithRetiming（DSP 优化 + 重定时），覆盖成 AggressiveExplore 会把它换掉，
-#   实测（400MHz 轮次）WNS 从 +0.270ns 掉到 +0.077ns 一档。需要临时对比其它 directive 组合时，
+#   AlternateFlowWithRetiming，覆盖掉会明显损失余量。需要临时对比其它 directive 组合时，
 #   用 query_runs.tcl 看当前取值再改。
 set strategy_targets [list \
     [list synth_1 STEPS.SYNTH_DESIGN.ARGS.GLOBAL_RETIMING [expr {$retiming ? "on" : "off"}]] \

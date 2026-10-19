@@ -13,7 +13,7 @@
 //   2. 频率 = VCO / D；
 //   3. 测量通路测出来的相位差与「直接量出来的输出相位差」一致（1 个 DSP 周期内）。
 //
-// 判据（与 `docs/verify-plan.md` 第 4 节一致）：
+// 判据（与 `.agents/skills/dpm-measurement-model` 一致）：
 //   - 直接测得的相位差与请求值之差 ≤ 半个硬件网格（45°/D，四舍五入）；
 //   - 测量通路的相位差与直接测得值之差 ≤ 1 个 DSP 周期 + 1 毫度（采样量化下界）。
 //
@@ -439,7 +439,7 @@ module tb_src_handoff;
     // MULT 12/15/18/20/21 与 D = 20/35/40/50/70/100/120/125。
     // 450MHz 轮次的选点要求：频点整除 450MHz（`f_dsp / f_sig` 为整数，等价于信号周期是
     // DSP 周期的整数倍），否则每个周期的相位计数窗口在 k 与 k+1 之间交替、
-    // `phaseCnt % edgeCnt == 0` 不成立（400MHz 轮次的 6.4MHz 点实测余数 129，作历史记录）。
+    // `phaseCnt % edgeCnt == 0` 不成立。
     localparam int unsigned N_FREQS = 10;
     localparam int unsigned MAX_PHASES = 12;             // 单频点最多 5+1+3 = 9 个点
     localparam int unsigned MAX_POINTS = N_FREQS * MAX_PHASES;

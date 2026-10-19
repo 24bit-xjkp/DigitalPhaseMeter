@@ -70,11 +70,8 @@ sim/run_xsim.sh        # xsim：AXI4 接口与顶层 IP（SystemVerilog 激励�
 
 - **每个模块只有一份产物**：`build/chisel/<Name>/`（见 `dpm-chisel-rtl`）。Verilator、xsim 与
   Vivado 消费的是同一份 RTL（复位同步是纯 RTL 的 `ResetSynchronizer`，没有 XPM 原语），因此各
-  流水线可以按任意顺序交替跑。历史上曾经按 `--type=sim|syn` 生成两套产物，共用目录时先跑综合
-  再跑 `xmake test` 会让 Verilator 读到综合产物并报
-  `Cannot find file containing module: 'xpm_cdc_sync_rst'`，看起来像 RTL 坏了——**新增厂商原语前
-  先确认两侧都有它的仿真模型**，否则要重新引入双产物。注意 `xmake test` **不会**替你生成产物：
-  改了 RTL 仍要先跑生成入口。
+  流水线可以按任意顺序交替跑。**新增厂商原语前先确认 Verilator 与 xsim 两侧都有它的仿真模型**，
+  否则「一份产物」的前提就不成立。注意 `xmake test` **不会**替你生成产物：改了 RTL 仍要先跑生成入口。
 
 - 必须是**全量**：只跑单个目标或用例（`xmake run <Name> ...`）不能作为回归证据，它只用于定位问题。
 - 运行参数是用例级配置（`test/xmake.lua` 中 `add_tests` 的 `runargs`，本项目为 `+verilator+rand+reset+2` 与 `-fc`），只有 `xmake test` 会应用：`xmake run` 走的是 target 级 `runargs`，本项目没有设置。因此"寄存器初值随机"这类只在带 plusargs 时出现的行为，在 `xmake run` 下可能被掩盖——两个入口结果不一致时以 `xmake test` 为准。
@@ -97,8 +94,7 @@ uv run python host/tools/gui_smoke.py  # 改了 GUI 时跑：连接/测量/扫�
 
 - 格式化的范围是**整个 Python 脚本树**（`host/`、`spec/`、`ps/tests`、`ps/tools`），不是只格式化改动
   的文件：`pyproject.toml` 里已配好 `[tool.black] line-length = 140` 与 `[tool.isort] profile = "black"`，
-  两条命令不必带额外参数。2026-10-16 起这棵树是干净的（此前 18 个文件不合 black、5 个不合 isort），
-  提交前保持干净，并尽量把纯格式化改动与功能改动分开。
+  两条命令不必带额外参数。这棵树应始终保持干净；提交前尽量把纯格式化改动与功能改动分开。
 - **C 源码不做整体格式化**：`ps/**/*.c|h` 的风格与仓库根 `.clang-format` 并不完全一致，整体重排会
   淹没功能改动；只要求新增/改动处与周围风格一致，且交叉编译在 `-Wall -Wextra -Werror` 下零警告。
 
@@ -107,11 +103,11 @@ uv run python host/tools/gui_smoke.py  # 改了 GUI 时跑：连接/测量/扫�
 ```bash
 bash ps/build.sh && cmake --build ps/build/cmake -j8
 ctest --test-dir ps/build/cmake --output-on-failure
-bash ps/tools/onboard_accept_sim.sh                # 离线验收演练（C 验证台，93 项）
+bash ps/tools/onboard_accept_sim.sh                # 离线验收演练（C 验证台，80 点扫描）
 ```
 
 改了固件命令处理的时间/超时口径时，另外确认：`DPM_WAIT_TIMEOUT_MS` 是**毫秒**界
-（`50ms + 4 × 闸门时间（秒）`，量纲见 `docs/verify-report.md` §14），`DPM_WAIT_POLL_LIMIT`
+（`50ms + 4 × 闸门时间（秒）`，协议约定见 `docs/ps-protocol.md` §3.0），`DPM_WAIT_POLL_LIMIT`
 是**慢时钟周期**界，两者不要混用；`ps/tests/test_proto.c::test_wait_budget` 与
 `ps/tests/test_server_selftest.py::test_long_gate_bounded_wait` 钉住这两条。
 

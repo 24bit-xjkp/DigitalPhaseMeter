@@ -38,13 +38,13 @@
 #define DPM_CAPS_PS_IRQ (1u << 3)        /**< 编译了中断路径 */
 #define DPM_CAPS_PS_DIV64 (1u << 4)      /**< 自带 64 位除法（freestanding） */
 #define DPM_CAPS_PS_SELFTEST (1u << 5)   /**< 由宿主机验证台构建（仿真后端） */
-#define DPM_CAPS_PS_PHASE_CTRL (1u << 6) /**< 片内源相位可在线改变（当前 bitstream 为 0） */
+#define DPM_CAPS_PS_PHASE_CTRL (1u << 6) /**< 片内源相位可在线改变（方案 A 下为 1） */
 
 /** IDENTIFY 的 flags 的 b4：片内源相位是否可控。
  *
- * 实测结论（`spec/drp_semantics.json` + `docs/verify-drp.md`）：当前 bitstream 下
- * clk_out2 的相位恒为静态配置的 90.000°，写相位字 0x218 不生效，因此 b4 = 0。
- * 与 `dpm_regs.h` 的 `DPM_DRP_PHASE_WRITABLE` 保持一致（该宏为 0 时本位不置位）。 */
+ * 当前实现（方案 A）：PS 直接写 MMCM 的 16 位寄存器镜像（PHASE_MUX/DELAY_TIME），
+ * 相位在线可改写，因此 b4 = 1。与 `dpm_regs.h` 的 `DPM_DRP_PHASE_WRITABLE` 保持一致
+ * （该宏为 1 时本位置位）。 */
 #define DPM_FLAG_PHASE_CTRL (1u << 4)
 
 /** IDENTIFY 的 flags（协议 §3.1 的 b0..b3，必须与实际能力一致）。 */
@@ -64,10 +64,8 @@
  * 闸门窗口 `T_gate = gateTarget / slow_hz`（协议第 5 节）就是一次测量的时长；RTL 的闸门计数器
  * 是 28 位，50MHz 下最长 ≈5.37s，因此这条上限最多 ≈21.5s——与闸门同量级、有界。
  *
- * **量纲修复（docs/verify-report.md §14）**：旧实现写成 `50 + 4 × 闸门时间的微秒数值`，
- * 把 µs 当 ms 用。默认闸门（2000 周期 = 40µs）下算出的 210ms 看着正常，闸门一长就放大 1000 倍：
- * 2.4s 闸门下 `GET_RESULT` 会在命令内部等 ≈9600s（2.7 小时），「长闸门 + 源没有边沿」时固件
- * 长时间占着命令处理，上位机只能按自己的预算超时退出，连诊断用的 `GET_STATUS` 都读不到。
+ * **量纲约定**：上限 = `50ms + 4 × 闸门时间（秒）`。闸门时间的微秒数值不能当毫秒用，
+ * 否则长闸门下等待上限会放大 1000 倍（协议 §3.0 的有界等待约定）。
  *
  * 中间量用 u64（`4000 × gateTarget` 最大 ≈1.07e12），结果必然落在 u32 内。
  * `slow_hz == 0` 时按 1 处理，避免除零（那种配置本身非法，只需不崩）。

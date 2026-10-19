@@ -4,15 +4,21 @@
 
 ## 项目概览
 
-基于 Chisel 的数字相位计：测量两路同频信号的相位差。测量通路在高速时钟域（DSP 域，当前 450MHz，由 PL 内 MMCM 从 50MHz 倍频得到），控制、闸门计数与 AXI4-Lite 接口在低速时钟域（50MHz）。PS↔PL 的数据交换走 AXI4-Lite 寄存器（GPIO 式，一次测量只有 4 个字，不用 BRAM），并用测量完成中断通知 PS。测量输入有两条通路：外部引脚（`extSig_sig1`/`extSig_sig2`，默认约束到 W18/W19）与片内信号源（MMCM 时基 + 相位累加器，频率与相位差可调），由 PL 内的寄存器在两者之间切换。PL 侧测量与控制 RTL、PS↔PL 互联、Vivado IP 与 block design 已完成；其余阶段的规划见 `README.md` 的路线图。
+基于 Chisel 的数字相位计：测量两路同频信号的相位差。测量通路在高速时钟域（DSP 域，当前 450MHz，由 PL 内 MMCM 从 50MHz 倍频得到），控制、闸门计数与 AXI4-Lite 接口在低速时钟域（50MHz）。PS↔PL 的数据交换走 AXI4-Lite 寄存器（GPIO 式，一次测量只有 4 个字，不用 BRAM），并用测量完成中断通知 PS。测量输入有两条通路：外部引脚（`extSig_sig1`/`extSig_sig2`，默认约束到 W18/W19）与片内信号源（裸 MMCM 时基，频率与相位差由 PS 写 MMCM 寄存器镜像设定），由 PL 内的寄存器在两者之间切换。
+
+**工程已完成并通过实测验收（2026-10-19）**：PL 侧测量与控制 RTL、PS↔PL 互联、Vivado IP 与 block design、PS 侧裸机软件、PC 侧上位机均已实现，Verilator / xsim / 综合实现 / 上板验收均已跑通。当前工作以维护（缺陷修复、补充测试、文档更新）为主。
 
 ## 目录结构与任务优先级
 
 ```text
 ├── src/main/scala/DigitalPhaseMeter/   # Chisel RTL：每个模块一个 .scala，附 Emit<Name> 生成主类
 ├── test/                               # Verilator C++ 测试：每个 <Name>.cpp 自动注册一个测试目标
-├── sim/                                # xsim 的 SystemVerilog 测试激励与运行脚本（AXI4 接口/顶层 IP）
+├── sim/                                # xsim 的 SystemVerilog 测试激励与运行脚本（AXI4 接口/顶层 IP/MMCM 联调）
 ├── vivado/                             # IP 打包、block design、综合实现脚本与顶层约束
+├── ps/                                 # PS 侧裸机 C 服务端（串口协议、AXI/DRP 驱动、startup/linker）
+├── host/                               # PC 侧 Python 上位机（协议、CLI、PySide6 GUI、仿真后端）
+├── docs/                               # 串口协议（ps-protocol.md）与上板指南（bringup.md）
+├── spec/                               # 金标准向量、独立仿真服务端、规格自检与验证脚本
 ├── script/                             # xmake 包定义（Lua）
 ├── build/chisel/<Name>/                # 由 Chisel 生成的 SystemVerilog 与 filelist.f（构建产物，不入库）
 ├── build/vivado/                       # 打包出的 IP、BD 工程与综合实现产物（构建产物，不入库）
@@ -20,7 +26,7 @@
 └── xmake.lua                           # 顶层构建脚本
 ```
 
-**任务优先级**：以 RTL 功能实现、缺陷修复、补充测试为主；未明确指定时，优先修改 `src/`、`test/` 与 `sim/`，必要时更新 `vivado/` 脚本与 `.agents/skills/` 中对应的 skill。
+**任务优先级**：以 RTL 功能实现、缺陷修复、补充测试为主；未明确指定时，优先修改 `src/`、`test/` 与 `sim/`，必要时更新 `vivado/`、`ps/`、`host/` 中对应实现、`.agents/skills/` 中的 skill 及相关文档。
 
 ## 环境与构建入口
 
@@ -33,9 +39,10 @@
 | Verilator          | 由 xmake 的目标规则调用，编译生成的 SystemVerilog                      |
 | `sim/run_xsim.sh`  | 用 Vivado xsim 跑 `sim/` 下的 SystemVerilog 激励（AXI4 接口与顶层 IP） |
 | `vivado/` 下的 tcl | 打包 IP、创建 block design、综合实现与导出 XSA                         |
+| `bash ps/build.sh` | 交叉编译 PS 侧裸机程序，并构建宿主机验证台                             |
 | `uv run pytest`    | PC 侧 Python 测试（`host/tests`，pytest 原生写法）与 GUI 冒烟测试入口  |
 
-- 本项目使用 clang 工具链。gcc 在编译带 C++20 模块的测试代码时会产生编译器内部错误（ICE）——该结论沿用 `verilator_utils` 系列项目的记录，未在本仓库单独复现：不要用 gcc 配置、构建或做"可移植性验证"。
+- 本项目使用 clang 工具链。gcc 在编译带 C++20 模块的测试代码时会产生编译器内部错误（ICE）——该结论沿用 `verilator_utils` 系列项目的记录：不要用 gcc 配置、构建或做"可移植性验证"。
 - 各入口的具体命令、选项与已知陷阱写在对应 skill 中（见下表），本文件不重复。
 
 ## skill 优先：工具用法以 skill 为准
@@ -77,6 +84,7 @@
 - 规则按**场景类别**陈述（构建系统入口、代码生成、测试框架、静态检查……），当前使用的具体工具与命令只作为该类别的**示例 / 当前实现**，不要把某一条命令写成规则本身。
 - 目标是"换一个同类工具后规则仍然成立"：写"通过构建系统的运行入口运行目标（本项目当前为 `xmake run` / `xmake test`）"，而不是"运行目标必须用 `xmake run`"。
 - 只有当规则确实只对该工具成立时（例如某条命令的实测陷阱），才把工具名写进规则，并说明这是该工具的专属约定。
+- 文档与 skill 面向**当前已完成的设计**：只写当前有效的实现、用法与约束；迭代过程、历史轮次与已完成/作废的方案不留在仓库文档里。
 
 ## 基本约定
 

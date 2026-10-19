@@ -9,8 +9,8 @@
 1. `spec/golden/vectors.json` 与 `spec/gen_golden.py` 重新生成的结果一致（防止手改向量）；
 2. 金标准向量的自洽性：`phase_cnt % edge_cnt == 0`、`freq`/`phase` 定点公式可复算、
    `div` 与 `vco_hz` 满足约束、`div` 等于分频字段可表示范围；
-3. C 头文件 `ps/include/dpm_regs.h` 的关键宏值与文档一致（分频字段 = D 本体、相位字段在 bit[15:8]、
-   DRP 偏移、寄存器偏移）；
+3. C 头文件 `ps/include/dpm_regs.h` 的关键宏值与文档一致（测量寄存器偏移、方案 A 的 DRP 镜像偏移、
+   MMCM 编码、分频上限 D ≤ 126）；
 4. C 头文件 `ps/include/dpm_proto.h` 的命令码与 `docs/ps-protocol.md` 第 3 节的命令表一致；
 5. 协议文档里的冻结频点表与 `spec/gen_golden.py` 的频点表一致。
 """

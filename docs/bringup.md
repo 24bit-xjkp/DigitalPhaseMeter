@@ -1,16 +1,24 @@
-# 上板与 bring-up（PS 侧软件）
+# 上板指南：ALINX AX7010（xc7z010clg400-1）
 
-本文件说明「把 `ps/` 里的裸机程序跑到 Zynq PS 上、并让 PC 上位机能通过串口连上」需要做的事，
-以及当前仓库**还缺什么**。内容分三步：重建 bitstream（串口是 `create_bd.tcl` 的参数）→
-生成 BOOT.bin → 连上位机。
+本文说明把本仓库的 PL 设计与 PS 侧裸机程序跑到开发板上、并让 PC 上位机通过串口连上所需的步骤。
+当前设计已完成上板实测验收；下面是从零重建并复验的流程。
 
-> **当前状态**：串口已在 AX7010 实板上跑通（`uart=UART1 baud=115200`，见
-> [`onboard-ax7010.md`](onboard-ax7010.md)）；`vivado/create_bd.tcl` 默认就带 UART1（MIO48/49），
-> 重建 BD 即生效。上位机侧另有仿真后端在 pty 上做的一套验证（见 `docs/verify-plan.md`）。
+## 0. 硬件与连接
 
-## 0. PS 串口：`create_bd.tcl` 的 `-uart` 参数
+| 项            | 值                                                                 |
+| ------------- | ------------------------------------------------------------------ |
+| 板卡          | ALINX AX7010，芯片 `xc7z010clg400-1`（JTAG IDCODE `0x03727093`）   |
+| JTAG          | Digilent FT232H，`hw_server` 经 `xsdb` 访问                        |
+| 板载 USB-UART | CP2102N → `/dev/ttyUSB0`，接 PS **UART1 / MIO48(tx) / MIO49(rx)**  |
+| MIO 供电      | Bank0 = 3.3V、Bank1 = 1.8V（MIO48/49 在 Bank1）                    |
+| 串口参数      | 115200 8N1，无流控                                                 |
 
-PS 的调试串口不再是「事后补丁」，而是建 BD 时的参数：
+JTAG 电缆首次使用需要 root 安装 udev 规则（Vivado 安装目录下
+`data/xicom/cable_drivers/lin64/install_script/install_drivers/install_drivers`）。
+
+## 1. PS 串口：`create_bd.tcl` 的 `-uart` 参数
+
+PS 调试串口是建 BD 时的参数，不是事后补丁：
 
 | 选择 | MIO | 说明 |
 | ---- | --- | ---- |
@@ -20,78 +28,38 @@ PS 的调试串口不再是「事后补丁」，而是建 BD 时的参数：
 
 ```bash
 vivado -mode batch -source vivado/create_bd.tcl                    # 默认 uart1 + 115200
-vivado -mode batch -source vivado/create_bd.tcl -uart uart0         # 换成 MIO14/15
 vivado -mode batch -source vivado/create_bd.tcl -uart uart1 -baud 921600
-vivado -mode batch -source vivado/create_bd.tcl -uart none          # 不要串口
 ```
 
-脚本设完属性后会回读校验并打印，校验不过直接报错（原来的 `patch_enable_ps_uart.tcl` 做的就是
-这件事，其语句已并入 `create_bd.tcl` 并删除该补丁脚本）：
+脚本设完属性后会回读校验并打印，校验不过直接报错：
 
 ```text
 PS7_UART_CHECK: EN_UART1=1 IO='MIO 48 .. 49' BAUD=115200
-PS7_UART_CHECK: MIO48=UART 1/uart1_tx
-PS7_UART_CHECK: MIO49=UART 1/uart1_rx
 ```
 
-自检脚本（不需要跑 Vivado，直接读 XCI 或 XSA）：
+**MIO 号与 bank 电压是板级信息**，请对照板卡原理图确认；若串口接在 MIO14/15（bank 0）就选 `uart0`。
+
+## 2. 重建 bitstream 与 XSA
+
+改了 PS 配置或 RTL 必须按顺序重跑（不能只跑最后一步）：
 
 ```bash
-python3 ps/tools/check_bd_uart.py build/vivado/bd_proj/dpm_bd.srcs/sources_1/bd/dpm_system/ip/dpm_system_processing_system7_0_0/dpm_system_processing_system7_0_0.xci
-# 期望：UART1: EN=1 PERIPHERAL_ENABLE=1 IO=MIO 48 .. 49 BAUD=115200 → 使能
-python3 ps/tools/check_bd_uart.py build/vivado/dpm_system.xsa   # 也可以直接查 XSA 里的 .hwh
+vivado -mode batch -source vivado/package_ip.tcl        # 测量 IP
+vivado -mode batch -source vivado/package_src_ip.tcl   # 片内源 DRP 控制器 IP
+vivado -mode batch -source vivado/create_bd.tcl         # BD + wrapper（含 UART 配置）
+vivado -mode batch -source vivado/build_bitstream.tcl   # 策略 → 综合/实现/bitstream/XSA
+python3 ps/tools/check_bd_uart.py build/vivado/dpm_system.xsa   # 复验串口配置
 ```
 
-设置的关键属性（Zynq PS7，Vivado 2025.2；`create_bd.tcl` 按 `-uart` / `-baud` 生成）：
+产物：`build/vivado/dpm_system.xsa`、`build/vivado/bd_proj/dpm_bd.runs/impl_1/dpm_system_wrapper.bit`。
+详细流程与注意事项见 [`../vivado/README.md`](../vivado/README.md)。
 
-```tcl
-set_property -dict [list \
-  CONFIG.PCW_UART1_PERIPHERAL_ENABLE {1} \
-  CONFIG.PCW_UART1_UART1_IO {MIO 48 .. 49} \
-  CONFIG.PCW_UART1_BAUD_RATE {115200} \
-  CONFIG.PCW_EN_UART1 {1} \
-  CONFIG.PCW_MIO_48_PULLUP {enabled} \
-  CONFIG.PCW_MIO_48_DIRECTION {out} \
-  CONFIG.PCW_MIO_48_SLEW {slow} \
-  CONFIG.PCW_MIO_49_PULLUP {enabled} \
-  CONFIG.PCW_MIO_49_DIRECTION {in} \
-  CONFIG.PCW_MIO_49_SLEW {slow} \
-  CONFIG.PCW_MIO_TREE_PERIPHERALS {...  UART 1#UART 1# ...} \
-  CONFIG.PCW_MIO_TREE_SIGNALS     {...  uart1_tx#uart1_rx# ...} \
-] [get_bd_cells processing_system7_0]
-```
+## 3. 生成 BOOT.bin（本仓库不提供 FSBL）
 
-**MIO 号与 bank 电压是板级信息**，请对照你的板卡原理图确认：
-Zynq-7010 CLG400 的 MIO bank 1 一般是 1.8V（USB-UART 常见接法），
-若你的板子接在 MIO14/15（bank 0，多为 3.3V）就选 `uart0`；
-`MIO_TREE_PERIPHERALS`/`MIO_TREE_SIGNALS` 是 54 项的 `#` 分隔串，脚本会自动改对应位置。
+Zynq-7000 上电先跑 BootROM，再跑 **FSBL**（First Stage Boot Loader），由 FSBL 加载应用。
+**FSBL 通常由 Vitis 从 XSA 生成**；本仓库不包含 FSBL 与 BOOT.bin 生成步骤，没装完整 Vitis 时用下面的 JTAG 方式运行。
 
-## 1. 重建 bitstream 与 XSA
-
-改了 PS 配置必须重跑（顺序不能颠倒，见 `.agents/skills/dpm-vivado-ip`）：
-
-```bash
-vivado -mode batch -source vivado/create_bd.tcl          # 重建 BD + wrapper（含上面的 UART 配置）
-vivado -mode batch -source vivado/build_bitstream.tcl    # 写策略 → 综合/实现/bitstream/XSA
-python3 ps/tools/check_bd_uart.py build/vivado/dpm_system.xsa    # 复验
-```
-
-> `create_bd.tcl` 会**重新生成** BD，所以串口配置必须写在它里面（或用它自己的 `-uart` 参数）——
-> 这正是原来那种「在已有 BD 上打补丁」的脚本会失效的原因，也是把补丁并进流水线的原因。
-
-## 2. 生成 BOOT.bin（本仓库不提供 FSBL）
-
-Zynq-7000 上电后先跑 BootROM，再跑 **FSBL**（First Stage Boot Loader），最后由 FSBL 加载
-我们的应用。**FSBL 通常由 Vitis 从 XSA 生成**；本机装的 Vitis 2025.2 缺少 ARM 裸机编译器
-（`gnu/aarch32` 不存在）与 `xsct`，因此仓库里**不包含** FSBL 与 BOOT.bin 生成步骤。
-在装有完整 Vitis 的机器上：
-
-```bash
-# 1) 从 XSA 建 platform 与 FSBL（Vitis GUI 或 vitis -s 脚本）
-# 2) 把 ps/build/dpm_ps.elf 作为 application 加入，或手工组 BOOT.bin：
-```
-
-手工组 BOOT.bin 的 `.bif`（bootgen 在 `$XILINX_VIVADO/bin/bootgen`，本机存在）：
+在装有 Vitis 的机器上手工组 BOOT.bin：
 
 ```text
 // ps/boot/dpm_ps.bif
@@ -107,36 +75,74 @@ the_1:
 bootgen -image ps/boot/dpm_ps.bif -arch zynq -o BOOT.bin -w on
 ```
 
-把 `BOOT.bin` 放到 SD 卡（FAT 分区）并设置启动模式为 SD，或用 JTAG 下载（需要能连上
-`hw_server`，本机当前 `jtag targets` 为空）。串口参数：**115200 8N1，无流控**。
+把 `BOOT.bin` 放到 SD 卡（FAT 分区）并把启动模式设为 SD。若板上已有 Linux（PYNQ 等），也可以不写
+BOOT.bin：用 `devmem`/`uio` 直接操作寄存器，把 `ps/` 下的 C 程序当作协议参考实现（该路径本仓库未提供访问层）。
 
-> 若你的板子已有可用的 Linux（PYNQ 等），也可以不写 BOOT.bin：
-> 在 Linux 下用 `devmem`/`uio` 直接操作寄存器，把本仓库的 C 程序当作协议参考实现；
-> 但那条路径要自己写 `/dev/mem` 访问层，本仓库未提供。
-
-## 3. 连上位机
+## 4. 用 JTAG 加载运行
 
 ```bash
-# 板上跑起来后，PC 侧：
-python3 -m dpm_host --port /dev/ttyUSB1 ping
-python3 -m dpm_host --port /dev/ttyUSB1 identify
-python3 -m dpm_host --port /dev/ttyUSB1 source int
-python3 -m dpm_host --port /dev/ttyUSB1 sig --freq 25e6 --phase 90
-python3 -m dpm_host --port /dev/ttyUSB1 gate 2000
-python3 -m dpm_host --port /dev/ttyUSB1 meas
-python3 -m dpm_host --port /dev/ttyUSB1 scan --out scan.csv     # 多频点多相位扫描
-python3 -m dpm_host --port /dev/ttyUSB1 gui                     # 图形界面
+bash ps/build.sh                                 # 生成 ps/build/dpm_ps.elf 与 .bin（以及宿主机验证台）
+xsdb -quiet ps/tools/jtag_boot.tcl               # rst -system -stop → fpga -f → ps7_init → dow -data → PC=0 → con
 ```
 
-`/dev/ttyUSB1` 在本次侦察里是 `Digilent USB Device`（FT232H，很可能是板载 USB-UART），
-`/dev/ttyUSB0` 是外接 CP2102N；插拔后请用 `python3 -m serial.tools.list_ports -v` 确认。
+`jtag_boot.tcl` 里已规避三个实测坑：
 
-## 4. 上板后要先确认的三件事
+1. 不能用「`rst -system` 后等待再 stop」：SD 卡的 FSBL/U-Boot 会先跑起来打开 MMU，之后 PC=0 走虚拟地址，程序一个字节都不会执行。必须 `rst -system -stop` 一步到位。
+2. `dow`（ELF 形式）在 MMU 开着时会写虚拟地址；改用 `dow -data ps/build/dpm_ps.bin 0x0` 经 APU 物理通路写入。
+3. **运行中不要在 Cortex-A9 目标上读内存/寄存器**：APB-AP 会进入粘滞错误态，之后 `rst -dap/-system/-cores` 全部失效。要看程序状态就读 UART/PL 寄存器。
 
-1. **MMCM 寄存器镜像真的生效**：写 `0x43C1_0000` 段的 MMCM 寄存器（`0x08..0x24`）+ `0x28` LOAD
-   后，两路输出频率/相位差是否按写入值变化（旧的 clk_wiz DRP 语义与
-   `spec/drp_semantics.json` 的 `phase_controllable` 是上一版方案的结论，仅供参考）；
-2. **中断真的被 PS 收到**：`DPM_USE_IRQ=1` 编译时看 `IRQ_STATUS` 的 irqPending 是否由中断路径清除；
-   若中断不通，退回轮询路径（默认行为）；
-3. **测量值与仿真后端的一致性**：按 `docs/verify-plan.md` 第 6 节的清单跑同一套 28 个点，
-   容限不变；差异要归因到 MMCM 抖动 / 真实布线延迟 / 外部干扰，而不是直接放宽判据。
+上电横幅示例（收到首帧后停止重发）：
+
+```text
+DPM-PS ready: uart=UART1 baud=115200 uart_ref_hz=86400000 cpu_variant=3 proto=1.1
+```
+
+UART 参考时钟是 PS 的 86.4MHz（不是 PL 的 50MHz 慢时钟），已写成 `DPM_UART_REF_HZ` 默认值；
+需要重测时用 `ps/tests/find_uart_baud.py`。
+
+## 5. 连上位机
+
+```bash
+uv run python -m dpm_host --port /dev/ttyUSB0 ping
+uv run python -m dpm_host --port /dev/ttyUSB0 identify
+uv run python -m dpm_host --port /dev/ttyUSB0 source int
+uv run python -m dpm_host --port /dev/ttyUSB0 sig --freq 25e6 --phase 90
+uv run python -m dpm_host --port /dev/ttyUSB0 gate 2000
+uv run python -m dpm_host --port /dev/ttyUSB0 meas
+uv run python -m dpm_host --port /dev/ttyUSB0 scan --out scan.csv
+uv run python -m dpm_host --port /dev/ttyUSB0 gui
+```
+
+`/dev/ttyUSB0` 通常是板载 CP2102N；插拔后用 `uv run python -m serial.tools.list_ports -v` 确认设备。
+协议细节见 [`ps-protocol.md`](ps-protocol.md)。
+
+## 6. 上板验收
+
+```bash
+# 一条命令（含 JTAG 冷启动）：前置检查 → 冷启动 → PING/横幅 → 协议与错误路径
+# → 连续模式 + 流上报 → 10 个频点 × 逐频点相位点（80 点，含 >180°）扫描 → 写报告
+uv run python ps/tools/onboard_accept.py --port /dev/ttyUSB0
+
+# 板子已在运行、只做验收
+uv run python ps/tools/onboard_accept.py --port /dev/ttyUSB0 --no-boot
+```
+
+产物：`build/onboard_acceptance.{md,json,csv}` 与 `build/onboard_boot.log`；任一项失败退出码非 0。
+改验收脚本后先做离线演练（不接板，用与固件同一份 `dpm_cmd.c` 的 C 验证台经 pty 对接）：
+
+```bash
+bash ps/tools/onboard_accept_sim.sh
+```
+
+**相位判据**：期望值按 **MMCM 的移相网格**量化——MMCM 相位最小步长是 1/8 VCO 周期，折算到输出
+就是 `45°/D`（D 取 `SET_SIG` 回显的分频比），即 `exp = round(相位字 / (45°/D)) × (45°/D)`；
+容限 = **1 个 DSP 量化步长**（`360·f_sig/f_dsp`，450MHz 下即 2.222ns 对应的度数）+ 1 毫度。
+DSP 量化是容限，不是期望值的一部分。量化公式复用 `host/dpm_host/sig.py` 与 `ps/src/dpm_sig.c` 的冻结规则。
+
+## 7. 注意事项
+
+- **中断**：`ps/build.sh` 默认以 `DPM_USE_IRQ=1` 构建；主循环始终同时轮询 `STATUS.busy`，即使中断号配错也不会卡死。中断相关配置（GIC target/priority、UART1 IRQ 号）在上板轮次中已修正。
+- **长闸门**：闸门目标最大 28 位（50MHz 下约 5.37s），上位机与固件都按闸门时间放大等待预算，不会把正常测量误报为超时。
+- **0° 边界**：两沿落在同一个 DSP 采样拍时量化为 0 个周期，与 0° 同义；验收判据按取模 360° 比较。
+- **调试钩子**：上电横幅里的 `DPM_BRINGUP_TRACE` 默认关闭；需要时用 `-DDPM_BRINGUP_TRACE=1` 打开，它会占用闸门目标寄存器，测完务必关掉。
+- **SD 卡自启**：本仓库的验证流程使用 JTAG 加载，不修改 SD 卡内容；BOOT.bin 自启需要自备 FSBL。

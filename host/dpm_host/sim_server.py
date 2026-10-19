@@ -623,8 +623,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--phase-model",
         choices=("auto", "controllable", "static"),
         default="auto",
-        help="片内源相位模型：auto=跟随 spec/drp_semantics.json（当前为 static，相位恒 90°）；"
-        "controllable=假装相位字已接线（上位机相位通路自测）；static=固定静态相位",
+        help="片内源相位模型：auto=跟随 spec/drp_semantics.json（方案 A 为可控）；"
+        "controllable=强制相位可写（上位机相位通路自测）；static=固定静态相位（模拟旧 bitstream）",
     )
     ap.add_argument("--git-rev", type=lambda s: int(s, 0), default=0, help="IDENTIFY 返回的 gitRev")
     ap.add_argument("--version", type=lambda s: int(s, 0), default=0x00010000, help="IDENTIFY 返回的 ver")
