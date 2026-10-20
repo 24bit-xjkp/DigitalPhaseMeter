@@ -40,7 +40,7 @@
 | `xmake`            | 构建 Verilator 测试目标、运行测试（测量通路）                          |
 | Verilator          | 由 xmake 的目标规则调用，编译生成的 SystemVerilog                      |
 | `sim/run_xsim.sh`  | 用 Vivado xsim 跑 `sim/` 下的 SystemVerilog 激励（AXI4 接口与顶层 IP） |
-| `vivado/` 下的 tcl | 打包 IP、创建 block design、综合实现与导出 XSA                         |
+| `uv run dpm-vivado-flow` | 增量打包 IP、创建/刷新 block design、综合实现与导出 XSA（`vivado/flow/`；Tcl 脚本是其执行层） |
 | `bash ps/build.sh` | 交叉编译 PS 侧裸机程序，并构建宿主机验证台                             |
 | `uv run pytest`    | PC 侧 Python 测试（`host/tests`，pytest 原生写法）与 GUI 冒烟测试入口  |
 

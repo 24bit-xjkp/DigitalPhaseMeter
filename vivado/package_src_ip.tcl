@@ -26,6 +26,10 @@
 #                MMCM 动态重配置口，接 vivado/rtl/dpm_mmcm_src.v 的对应端口
 #   locked       MMCM 锁定指示（异步电平，IP 内同步后进 STATUS.b0）
 
+# 本脚本可能被 dpm-vivado-flow 的包装脚本 source（包装脚本会设置 argv）；
+# 直接 source 时 argv 可能不存在，这里在参数解析前兜底，保证脚本可被 source。
+if {![info exists argv]} { set argv {} }
+
 set script_dir [file dirname [file normalize [info script]]]
 set root_dir [file normalize [file join $script_dir ..]]
 # 生成产物在 <Name>/ 下（单一产物，见 dpm-chisel-rtl 的产物目录约定）

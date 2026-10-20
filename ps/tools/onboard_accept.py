@@ -127,7 +127,7 @@ class Report:
 def preflight(rep: Report, args: argparse.Namespace) -> None:
     bit = ROOT / "build/vivado/bd_proj/dpm_bd.runs/impl_1/dpm_system_wrapper.bit"
     bin_ = ROOT / "ps/build/dpm_ps.bin"
-    rep.check("bitstream 存在（先跑 vivado/create_bd.tcl + build_bitstream.tcl）", bit.exists(), str(bit))
+    rep.check("bitstream 存在（先跑 uv run dpm-vivado-flow）", bit.exists(), str(bit))
     rep.check("裸机镜像存在（先跑 bash ps/build.sh --ps-only）", bin_.exists(), str(bin_))
     rep.check("串口设备存在", Path(args.port).exists(), args.port)
     if not args.no_boot:

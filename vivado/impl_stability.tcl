@@ -5,9 +5,9 @@
 #
 # 与 impl_multi.tcl 的分工：
 #   - impl_multi.tcl  **换** place/route directive 扫策略，比较不同策略的余量（会覆盖官方策略）；
-#   - 本脚本         **不换**策略，沿用工程当前的 impl_1 strategy（即 build_bitstream.tcl 写入的
-#                    官方策略），只重复独立实现。它回答的是「同一策略下余量稳不稳」，而不是
-#                    「哪个策略最好」。
+#   - 本脚本         **不换**策略，沿用工程当前的 impl_1 strategy（即 Python 流程
+#                    dpm-vivado-flow 的 build 阶段写入的官方策略），只重复独立实现。
+#                    它回答的是「同一策略下余量稳不稳」，而不是「哪个策略最好」。
 #
 # 签核判据（本仓库约定）：
 #   - N 次实现的 WNS 与 WHS **全部为正**、0 个失败端点；
@@ -16,8 +16,8 @@
 #   重新 place/route）。
 #
 # 前置条件：
-#   - 工程已建好（vivado/create_bd.tcl），综合网表已完整（先跑 vivado/build_bitstream.tcl，
-#     或至少 launch_runs synth_1 到完成）；
+#   - 工程已建好（vivado/create_bd.tcl），综合网表已完整（先跑 Python 流程
+#     dpm-vivado-flow 的 build 阶段，或至少 launch_runs synth_1 到完成）；
 #   - 运行前确认没有其它 Vivado 在跑（并发会互相覆盖同一工程的步骤参数，见 vivado/README.md）。
 #
 # 产物（都在 build/vivado/ 下，属于构建产物、不入库）：
@@ -53,7 +53,8 @@ if {[get_property part [current_project]] ne $expected_part} {
 puts "PROJECT_PART: $expected_part"
 
 # 读工程当前策略，只打印不修改：本脚本的语义就是「按官方策略重复验证」。
-# 如果这里不是预期的那套策略，说明 build_bitstream.tcl 还没跑过或策略被别的脚本改过。
+# 如果这里不是预期的那套策略，说明 Python 流程 dpm-vivado-flow 的 build 阶段还没跑过
+# 或策略被别的脚本改过。
 puts "STABILITY_IMPL_STRATEGY: [get_property strategy [get_runs impl_1]]"
 foreach step {PLACE_DESIGN PHYS_OPT_DESIGN ROUTE_DESIGN POST_ROUTE_PHYS_OPT_DESIGN} {
     puts "STABILITY_IMPL_STEP: $step directive=[get_property -quiet STEPS.${step}.ARGS.DIRECTIVE [get_runs impl_1]]"
@@ -101,6 +102,10 @@ for {set i 1} {$i <= $attempts} {incr i} {
     puts "STABILITY_START attempt=$i/$attempts"
     # 每次独立实现：reset_run impl_1 会清掉步骤属性（含挂的 TCL.PRE hook），reset 后必须重挂。
     reset_run impl_1
+    # 签核/调优必须永远是非增量的独立实现：清掉可能残留的参考 checkpoint 并关掉自动增量。
+    # 这两个属性在个别 Vivado 版本上可能不存在，用 catch 安静跳过（不影响下面的签核逻辑）。
+    catch { set_property INCREMENTAL_CHECKPOINT "" [get_runs impl_1] }
+    catch { set_property AUTO_INCREMENTAL_CHECKPOINT 0 [get_runs impl_1] }
     set_property STEPS.INIT_DESIGN.TCL.PRE $hook_filter [get_runs impl_1]
     set_property STEPS.ROUTE_DESIGN.TCL.PRE $hook_waivers [get_runs impl_1]
     launch_runs impl_1 -to_step write_bitstream -jobs 8

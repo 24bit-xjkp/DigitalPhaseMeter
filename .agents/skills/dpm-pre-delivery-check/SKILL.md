@@ -65,11 +65,14 @@ sim/run_xsim.sh        # xsim：AXI4 接口与顶层 IP（SystemVerilog 激励�
   **必须**跑 `sim/run_xsim.sh`（脚本默认会先跑生成入口）：这些通路只有 xsim 覆盖得到。
 - 只改了测量通路（`Controller` / `PhaseMeter` / `EdgeDetector` / `DspCounter`）时，
   重新生成产物后跑 `xmake test -v` 即可；但顶层的端口或行为变了也要顺带跑 xsim。
-- 改了 `vivado/` 下的脚本、约束或 `vivado/rtl/dpm_mmcm_src.v` 时，至少重新执行对应脚本并确认
-  没有 ERROR / CRITICAL WARNING（`validate_bd_design` 的告警不会让脚本退出码非零，必须看日志）；
-  改了 BD 源文件还要重跑 `create_bd.tcl`（`build_bitstream.tcl` 的复用判断不看 RTL 内容）。
+- 改了 `vivado/` 下的脚本、约束或 `vivado/rtl/dpm_mmcm_src.v` 时，至少重新执行对应阶段并确认
+  没有 ERROR / CRITICAL WARNING；官方入口是 `uv run dpm-vivado-flow`（`--force` 强制全量）。
+  它按内容哈希判断复用，改了 BD 源文件会触发全量重建；只手工跑综合/实现会复用旧 IP/旧 BD。
   交付目标是「全流程日志 0 Warnings / 0 Critical Warnings / 0 Errors」+ 实现 methodology 报告
-  `Checks found: 0`（waiver 条目见 `build_bitstream.tcl` 的 `METHODOLOGY_*` 输出）。
+  `Checks found: 0`（见 `dpm-vivado-flow` 输出的 `METHODOLOGY_*` 与 `runme.log` 计数）。
+- 改了 `vivado/flow/` 的 Python/Tcl 时，还要跑：
+  `uv run pytest vivado/flow/tests -v`、`uv run black --check vivado/flow`、
+  `uv run isort --check-only vivado/flow`，并至少做一次 warm 复用 + 一次 `--force` 全量验证。
 
 - **每个模块只有一份产物**：`build/chisel/<Name>/`（见 `dpm-chisel-rtl`）。Verilator、xsim 与
   Vivado 消费的是同一份 RTL（复位同步是纯 RTL 的 `ResetSynchronizer`，没有 XPM 原语），因此各

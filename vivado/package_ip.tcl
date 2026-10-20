@@ -22,6 +22,10 @@
 # 寄存器里（RESULT_GATE/EDGE/PHASE/SEQ），PS 收到中断后读 4 个寄存器即可。
 # 因此 IP 内没有 BRAM、没有第二个 AXI 从口，也没有任何突发传输。
 
+# 本脚本可能被 dpm-vivado-flow 的包装脚本 source（包装脚本会设置 argv）；
+# 直接 source 时 argv 可能不存在，这里在参数解析前兜底，保证脚本可被 source。
+if {![info exists argv]} { set argv {} }
+
 set script_dir [file dirname [file normalize [info script]]]
 set root_dir [file normalize [file join $script_dir ..]]
 # 生成产物在 <Name>/ 下（单一产物：复位同步用纯 RTL 的 ResetSynchronizer，仿真与综合共用同一份）

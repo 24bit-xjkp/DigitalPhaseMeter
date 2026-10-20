@@ -3,16 +3,17 @@
 # 用法：
 #   vivado -mode batch -source vivado/impl_multi.tcl -tclargs 6
 #
-# 前置条件：先跑 package_ip.tcl / package_src_ip.tcl / create_bd.tcl / 综合（见 build_bitstream.tcl）
+# 前置条件：先跑 package_ip.tcl / package_src_ip.tcl / create_bd.tcl / 综合
+# （见 Python 流程 dpm-vivado-flow）
 #
 # 背景：Vivado 的 place/route 有可观的 run-to-run 差异（同一网表、同一策略的 WNS 会明显波动），
 # 因此「跑一次通过」不能作为签核结论，必须多次独立尝试并保留余量最好的一次
 # （结果与所选那次的路由/时序报告一起留存）。
 #
 # 注意：本脚本会在每次尝试前**覆盖** impl_1 的 place/route directive（用于扫不同布局布线
-# 组合），因此它会覆盖 build_bitstream.tcl 选定的官方策略。**签核请以 build_bitstream.tcl
-# 那次为准**（它启动 run 前会把策略写回 Performance_Retiming；当前 450MHz 签核结果见
-# build/vivado/timing_summary.rpt）；本脚本用于评估余量的稳定性/寻找更好的布局。
+# 组合），因此它会覆盖 Python 流程 dpm-vivado-flow 的 build 阶段选定的官方策略。**签核请以
+# 该 build 阶段那次为准**（它启动 run 前会把策略写回 Performance_Retiming；当前 450MHz
+# 签核结果见 build/vivado/timing_summary.rpt）；本脚本用于评估余量的稳定性/寻找更好的布局。
 #
 # 另外：跑本脚本前确认没有别的 Vivado 在跑（并发会互相覆盖工程里的步骤参数）。
 #
@@ -93,6 +94,10 @@ for {set i 1} {$i <= $attempts} {incr i} {
     catch { set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.ARGS.DIRECTIVE AggressiveExplore [get_runs impl_1] }
 
     reset_run impl_1
+    # 调优必须永远是非增量的独立实现：清掉可能残留的参考 checkpoint 并关掉自动增量。
+    # 这两个属性在个别 Vivado 版本上可能不存在，用 catch 安静跳过（不影响下面的调优逻辑）。
+    catch { set_property INCREMENTAL_CHECKPOINT "" [get_runs impl_1] }
+    catch { set_property AUTO_INCREMENTAL_CHECKPOINT 0 [get_runs impl_1] }
     set_property STEPS.INIT_DESIGN.TCL.PRE $hook_filter [get_runs impl_1]
     set_property STEPS.ROUTE_DESIGN.TCL.PRE $hook_waivers [get_runs impl_1]
     launch_runs impl_1 -to_step write_bitstream -jobs 8

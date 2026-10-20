@@ -44,5 +44,17 @@ foreach run_name {synth_1 impl_1} {
             }
         }
     }
+    # 增量综合/实现相关属性（只读）：确认复用/重跑决策依赖的 checkpoint 状态。
+    # INCREMENTAL_MODE 是综合步骤参数，只在 synth_1 上存在；实现侧的增量由
+    # INCREMENTAL_CHECKPOINT 决定。属性不存在时安静返回空串（不同版本可能有差异）。
+    foreach {label prop} [list \
+        AUTO_INCREMENTAL_CHECKPOINT AUTO_INCREMENTAL_CHECKPOINT \
+        INCREMENTAL_CHECKPOINT INCREMENTAL_CHECKPOINT \
+        INCREMENTAL_MODE STEPS.SYNTH_DESIGN.ARGS.INCREMENTAL_MODE \
+        WRITE_INCREMENTAL_SYNTH_CHECKPOINT WRITE_INCREMENTAL_SYNTH_CHECKPOINT] {
+        set value ""
+        catch { set value [get_property -quiet $prop $run] }
+        puts "  $label = $value"
+    }
 }
 puts "RUN_QUERY_END"

@@ -18,6 +18,18 @@ dependencies = [
 
 [dependency-groups]
 dev = ["black>=26.5.1", "isort>=9.0.1", "pytest>=9.1.1", "pytest-xdist>=3.8.0"]
+# Vivado 增量流程作为 workspace 成员安装进同一个根 .venv（不新增第三方运行时依赖）。
+vivado = ["dpm-vivado-flow"]
+
+[tool.uv.workspace]
+members = ["vivado/flow"]
+
+[tool.uv.sources]
+dpm-vivado-flow = { workspace = true }
+
+[tool.uv]
+# 默认把 host 开发工具与 Vivado flow 都装进根 .venv；`uv sync` 后可直接调用 dpm-vivado-flow。
+default-groups = ["dev", "vivado"]
 
 [project.scripts]
 dpm-host = "dpm_host.cli:main"

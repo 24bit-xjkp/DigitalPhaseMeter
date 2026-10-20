@@ -17,5 +17,7 @@ xsim.dir
 # Python 侧（host/ 上位机与 spec/ 工具）的字节码缓存
 __pycache__/
 *.pyc
+# uv 虚拟环境（根 .venv 由 `uv sync` 创建，不入库）
+.venv/
 spec/verify_*.json
 spec/ps_selftest

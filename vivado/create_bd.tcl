@@ -21,8 +21,8 @@
 # 前置条件：先运行 vivado/package_ip.tcl 与 vivado/package_src_ip.tcl 生成两个 IP
 #   （build/vivado/ip/dpm_top、build/vivado/ip/dpm_src_drp）
 #
-# 综合/实现策略（DSP 域高速时钟需要的那些 run 参数）由 build_bitstream.tcl 在启动 run 前内联设置，
-#   本脚本只负责把 BD 建对，不再需要单独的 apply_timing_strategy.tcl。
+# 综合/实现策略（DSP 域高速时钟需要的那些 run 参数）由 Python 流程 dpm-vivado-flow 的
+#   build 阶段在启动 run 前设置，本脚本只负责把 BD 建对，不再需要单独的 apply_timing_strategy.tcl。
 #
 # 结构（两个 AXI4-Lite 从口：测量 IP 与片内信号源的 MMCM 动态重配置口）：
 #
@@ -78,6 +78,10 @@ set ip_repo [file join $build_dir ip]
 # 固定器件：本仓库的设计、综合实现与上板测试都按 ALINX AX7010 的芯片 xc7z010clg400-1 进行，
 # 不再提供切换器件的能力。工程创建后回读校验，写错或被其它流程换器件时直接报错退出。
 set part "xc7z010clg400-1"
+
+# 本脚本可能被 dpm-vivado-flow 的包装脚本 source（包装脚本会设置 argv）；
+# 直接 source 时 argv 可能不存在，这里在参数解析前兜底，保证脚本可被 source。
+if {![info exists argv]} { set argv {} }
 
 # ---- 参数：前两个位置参数保持原义，串口用 -uart / -baud 具名给出 ----
 # DSP 域目标时钟频率（MHz），默认 450；默认走 PL 内的 MMCM（PS 的 FCLK 分频点够不到 300MHz 以上）。

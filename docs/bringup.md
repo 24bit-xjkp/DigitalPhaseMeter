@@ -41,18 +41,22 @@ PS7_UART_CHECK: EN_UART1=1 IO='MIO 48 .. 49' BAUD=115200
 
 ## 2. 重建 bitstream 与 XSA
 
-改了 PS 配置或 RTL 必须按顺序重跑（不能只跑最后一步）：
+改了 PS 配置或 RTL 后，先重新生成 Chisel 产物，再运行官方增量入口（仓库根）：
 
 ```bash
-vivado -mode batch -source vivado/package_ip.tcl        # 测量 IP
-vivado -mode batch -source vivado/package_src_ip.tcl   # 片内源 DRP 控制器 IP
-vivado -mode batch -source vivado/create_bd.tcl         # BD + wrapper（含 UART 配置）
-vivado -mode batch -source vivado/build_bitstream.tcl   # 策略 → 综合/实现/bitstream/XSA
+sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop"
+sbtn -batch "runMain DigitalPhaseMeter.EmitMmcmDrpController"
+uv sync                                  # 一次性：安装 dpm-vivado-flow 到根 .venv
+uv run dpm-vivado-flow                   # 自动只重打包变化的 IP、刷新 BD、重跑受影响的 run
 python3 ps/tools/check_bd_uart.py build/vivado/dpm_system.xsa   # 复验串口配置
 ```
 
+需要从零重建（例如换器件/BD 参数大改）时用 `uv run dpm-vivado-flow --force`；只改 UART 等 BD
+参数时也可直接传 `--uart uart0|uart1|none --baud <波特率>`。底层的 `package_ip.tcl` /
+`package_src_ip.tcl` / `create_bd.tcl` 仍可手工单独执行，但不会自动复用已有结果。
+
 产物：`build/vivado/dpm_system.xsa`、`build/vivado/bd_proj/dpm_bd.runs/impl_1/dpm_system_wrapper.bit`。
-详细流程与注意事项见 [`../vivado/README.md`](../vivado/README.md)。
+详细流程、增量复用矩阵与注意事项见 [`../vivado/README.md`](../vivado/README.md)。
 
 ## 3. 生成 BOOT.bin（本仓库不提供 FSBL）
 

@@ -195,14 +195,17 @@ sim/run_handoff_tb.sh          # 片内源 ↔ 测量通路联调（真实 MMCM 
 ### Vivado：打包 IP、创建 BD、综合实现
 
 ```bash
-vivado -mode batch -source vivado/package_ip.tcl        # 测量 IP → build/vivado/ip/dpm_top
-vivado -mode batch -source vivado/package_src_ip.tcl   # 片内源 DRP 控制器 IP → build/vivado/ip/dpm_src_drp
-vivado -mode batch -source vivado/create_bd.tcl         # PS7 + 互联 + 两个 IP + 裸 MMCM 的 BD
-vivado -mode batch -source vivado/build_bitstream.tcl   # 策略 → 综合 / 实现 / bitstream / XSA
+uv sync                                                 # 把 dpm-vivado-flow 装进根 .venv（一次性）
+uv run dpm-vivado-flow                                  # 官方增量流程：只重跑变化的阶段/run
+uv run dpm-vivado-flow --status                         # 查看 stamp/指纹/DCP/报告状态
+uv run dpm-vivado-flow --force                          # 需要时全量重建
 vivado -mode batch -source vivado/impl_stability.tcl -tclargs 6  # 同策略 6 次独立实现，验证余量稳定性
 ```
 
-流程细节、地址映射与告警清理见 [`vivado/README.md`](vivado/README.md) 与 [`.agents/skills/dpm-vivado-ip`](.agents/skills/dpm-vivado-ip/SKILL.md)。
+底层的 IP 打包 / BD 构造脚本仍可单独执行（`vivado/package_ip.tcl`、`vivado/package_src_ip.tcl`、
+`vivado/create_bd.tcl`），但推荐用 `dpm-vivado-flow`，它会自动处理 IP → BD → 综合/实现的依赖顺序
+并复用已完成的结果。流程细节、增量复用矩阵、地址映射与告警清理见
+[`vivado/README.md`](vivado/README.md) 与 [`.agents/skills/dpm-vivado-ip`](.agents/skills/dpm-vivado-ip/SKILL.md)。
 
 ### PS 侧固件与上位机
 
@@ -226,7 +229,7 @@ uv run python -m dpm_host gui             # PySide6 GUI
 | MMCM 联调    | `sim/run_handoff_tb.sh`                                           | xsim：真实 MMCM 行为模型，80 点相位/频率比对                 |
 | 协议与换算   | `uv run pytest -q`、`uv run python spec/selftest_spec.py`         | 上位机单测、C/Python/金标准三方一致性自检                    |
 | 离线验收演练 | `bash ps/tools/onboard_accept_sim.sh`                             | C 验证台经 pty 跑完整验收流程（80 点扫描）                   |
-| 综合实现签核 | `vivado/build_bitstream.tcl` + `build/vivado` 下的时序报告         | 450MHz：WNS +0.271ns / WHS +0.026ns / 0 失败端点（6/6 稳定性一致） |
+| 综合实现签核 | `uv run dpm-vivado-flow` + `build/vivado` 下的时序报告              | 450MHz：WNS +0.271ns / WHS +0.026ns / 0 失败端点（6/6 稳定性一致） |
 | 上板验收     | `uv run python ps/tools/onboard_accept.py --port /dev/ttyUSB0`    | JTAG 冷启动 + 串口链路 + 协议 + 80 点扫描                    |
 
 报告验证结果时请注明实际运行的目标与配置、区分「已验证」与「未验证」，详见 [`.agents/skills/dpm-pre-delivery-check`](.agents/skills/dpm-pre-delivery-check/SKILL.md)。

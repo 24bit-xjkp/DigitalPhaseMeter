@@ -1,6 +1,6 @@
 ---
 name: dpm-vivado-ip
-description: 'Use when: 在 DigitalPhaseMeter 中打包 Vivado IP（vivado/package_ip.tcl）、创建或修改 PS↔PL 互联的 block design（vivado/create_bd.tcl）、跑 xsim 的 SystemVerilog 测试激励（sim/）、或做综合实现与导出 XSA（vivado/build_bitstream.tcl）。覆盖 IP-XACT 接口推断与补全、地址块、BD 连接与地址分配、xsim 命令行流程与其实测陷阱。'
+description: 'Use when: 在 DigitalPhaseMeter 中打包 Vivado IP（vivado/package_ip.tcl）、创建或修改 PS↔PL 互联的 block design（vivado/create_bd.tcl）、跑 xsim 的 SystemVerilog 测试激励（sim/）、或做综合实现与导出 XSA（Python 入口 vivado/flow 的 dpm-vivado-flow）。覆盖 IP-XACT 接口推断与补全、地址块、BD 连接与地址分配、xsim 命令行流程、增量复用流程与其实测陷阱。'
 argument-hint: '要做的 Vivado/xsim 工作（打包 IP、改 BD、写激励、跑实现）'
 ---
 
@@ -17,23 +17,68 @@ RTL 本身的写法见 `dpm-chisel-rtl`；测量结果的判据见 `dpm-measurem
 ```text
 sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop"    # 顶层 IP RTL
 sbtn -batch "runMain DigitalPhaseMeter.EmitMmcmDrpController"       # DRP 控制器 RTL
-vivado -mode batch -source vivado/package_ip.tcl        # 打包顶层 IP → build/vivado/ip/dpm_top
-vivado -mode batch -source vivado/package_src_ip.tcl    # 打包 DRP 控制器 → ip/dpm_src_drp
-vivado -mode batch -source vivado/create_bd.tcl         # BD → build/vivado/bd_proj（DSP 450MHz、PS 串口 uart1）
+uv sync                                                 # 一次性：把 dpm-vivado-flow 装进根 .venv
+uv run dpm-vivado-flow                                  # 官方增量流程（IP → BD → 综合/实现/XSA）
+uv run dpm-vivado-flow --status                         # 只读查看 stamp/指纹/DCP/报告状态
+uv run dpm-vivado-flow --force                          # 需要时全量重建
 sim/run_xsim.sh                                         # xsim 顶层仿真（同一份生成产物）
-vivado -mode batch -source vivado/build_bitstream.tcl   # 写策略 → 综合/实现/bitstream/XSA
-vivado -mode batch -source vivado/impl_stability.tcl 6  # 同策略 6 次独立实现（签核）
-vivado -mode batch -source vivado/impl_multi.tcl 6      # 换 place/route directive 扫策略（调优）
-vivado -mode batch -source vivado/query_runs.tcl        # 查看 run 的策略与步骤参数（排障）
+vivado -mode batch -source vivado/impl_stability.tcl -tclargs 6  # 同策略 6 次独立实现（签核）
+vivado -mode batch -source vivado/impl_multi.tcl -tclargs 6      # 换 place/route directive 扫策略（调优）
+vivado -mode batch -source vivado/query_runs.tcl        # 查看 run 的策略/步骤/增量参数（排障）
 ```
 
-**改了 RTL 必须从打包重新开始**：两个 IP（`package_ip.tcl` + `package_src_ip.tcl`）的内容变了，
-`create_bd.tcl` 里的 BD 也要重新生成；只重跑 `build_bitstream.tcl` 会用旧的 IP。
+**改了 RTL 之后**：先跑两个 `sbtn` 生成入口，再在仓库根跑 `uv run dpm-vivado-flow`。流程会按内容
+哈希只重打包变化的 IP、在原工程内刷新 BD（接口不变时），并只重跑受影响的 OOC run / `synth_1` /
+`impl_1`；需要从零重建时用 `--force`。手工只重跑底层 Tcl 打包/BD 脚本仍可，但不会自动复用，
+且只重跑综合实现会用到旧 IP。
 
 `build/` 下全部是产物，不入库；入库的是 `.scala`、`test/`、`sim/`、`vivado/` 里的脚本与文档。
 **每个模块只有一份产物**：BD、综合与 xsim 都消费 `build/chisel/<Name>/`（顶层是
 `build/chisel/DigitalPhaseMeterTop/`，`package_ip.tcl` 的 `rtl_dir` 就指这里）；复位同步是纯 RTL 的
 `ResetSynchronizer`，产物里没有 XPM 原语，Verilator 与 xsim / Vivado 编译的是同一份文件。
+
+## 增量流程（dpm-vivado-flow）
+
+入口是根 uv workspace 成员 `vivado/flow`（Python，运行时只用标准库）；Tcl worker 在
+`vivado/flow/tcl/`。`uv sync` 把它装进**根 `.venv`**（不单独建环境），接口约定见
+`vivado/flow/CONTRACT.md`。
+
+- **阶段**：package（内容哈希决定是否重打包）→ BD（复用 / 原位 `upgrade_ip` 刷新 / 全量重建）→
+  build（按 run 指纹选择性 reset + launch + 报告/XSA）。
+- **状态**：`build/vivado/.flow/`（`*.json` stamp/指纹、`plans/`、`scripts/`、`results/`、`logs/`、
+  `ref/`）；构建产物，删除或 `--force` 即回到全量路径。
+- **复用判据**：输入指纹匹配 + 输出 DCP 存在，**不依赖 run 的 `STATUS`**。实测厂商 IP run 显示
+  `Out-of-date` 但 DCP 完整时，只 reset `synth_1` 再 launch，它会被直接复用、不重综合。
+- **warm path**：全部指纹匹配且输出存在时，Python 直接退出，**不启动 Vivado**（约 0.1–0.2 s）。
+- **原位 BD 刷新**：仅 IP 内容变化时，`refresh_bd.tcl` 执行 `update_ip_catalog -rebuild` →
+  `upgrade_ip -quiet` → `generate_target all [get_files <bd>]` → `validate_bd_design` → 地址段
+  `0x43C00000/4K` / `0x43C10000/4K` 检查 → `save_bd_design`；失败由 Python 删除工程并全量重建
+  （`BD_REFRESH_FALLBACK`）。`generate_target` 可能让 `auto_pc` 的 OOC run 被动重综合，属预期成本。
+- **模式**：`--force` 全量；`--report-only` 只重出报告/XSA；`--dry-run` 只生成 Tcl 计划；
+  `--status` 只读；`--strategy-only` 只写策略（若属性有变化会删除 `runs.json`，强制下次重跑）。
+- **增量编译**：`--incremental-synth/impl off|on|auto`，默认 off。参考 DCP 由 Python 复制到
+  `.flow/ref/`，worker 设 `AUTO_INCREMENTAL_CHECKPOINT 0` + `INCREMENTAL_CHECKPOINT` +
+  `STEPS.SYNTH_DESIGN.ARGS.INCREMENTAL_MODE`，并以 `runme.log` 是否出现
+  `read_checkpoint -incremental` 判定是否真的生效。只有墙钟收益 ≥20%、时序不退化、0 告警才
+  设为默认；`impl_stability` / `impl_multi` 每轮显式关闭增量。
+  **2025.2 实测**：增量实现（`RuntimeOptimized`，同网表）cell/net 100% 复用、WNS/WHS 不变，
+  `impl_1 STATS.ELAPSED` 约 31→26 s（约 16%，低于 20% 门槛）；增量综合在 IP 重打包/原位刷新后
+  往往没有同版本参考 DCP，只有 `synth_1` 真正走增量、耗时无收益。因此两者默认保持 off。
+
+### 增量流程的实测坑
+
+| 坑 | 现象/处理 |
+| --- | --- |
+| **`reset_run` 会清步骤属性** | 先 reset 再写策略/hook/增量属性；worker 只对本次实际 reset 的 run 写属性，未 reset 的 run 不碰 |
+| **`STATUS=Out-of-date` 不等于 DCP 不能复用** | 复用看「指纹 + DCP 存在」；不要因为 STATUS 把未变化 IP 全 reset |
+| **`generate_target` 不会自动把受影响 run 标成过期** | IP 内容变化必须由 Python 的 IP 哈希/run 指纹显式触发 reset，否则会静默复用旧网表 |
+| **原位刷新后 `synth_1` 可能需要先 reset** | `launch_runs synth_1 -scripts_only` 报 `[Common 17-69]` 时，worker 先 `reset_run synth_1` 再重试一次 |
+| **`upgrade_ip` 在 IP 已是最新时会打印 `[Coretcl 2-1042]`** | worker 用 `upgrade_ip -quiet`，真正问题由 `generate_target`/`validate_bd_design`/地址检查暴露 |
+| **刷新后打开旧工程会看到 `[BD 41-1661]`** | IP 重打包后的预期中间态，已在 `suppress_early_messages.tcl` 带理由过滤；`upgrade_ip` 后消失 |
+| **参考 DCP 不属于 utils_1 会报 `[Runs 36-537]`** | worker 用 `add_files -fileset utils_1 -norecurse` 登记 `.flow/ref/*.dcp` |
+| **地址段 range 在 2025.2 返回 `0x00001000`** | 地址检查要把 `0x1000`/`4096`/`4K` 都规范成 4K；取 PS7 的 `Data` 地址空间（不是从口自己的 `s_axi_lite`） |
+| **`reset_run` 不清 run 级增量属性** | `INCREMENTAL_CHECKPOINT`/`AUTO_INCREMENTAL_CHECKPOINT` 不是步骤属性，上次实验的设置会泄漏到普通 build；worker 对本次 reset 且非增量目标的 run 显式清空 |
+| **增量实验的参考 DCP 会留在 `.flow/ref/`** | 它是构建产物；普通 build 不读取，但改回默认后建议 `--force` 或让 worker 清属性后再签核 |
 
 ## IP 打包（package_ip.tcl / package_src_ip.tcl）
 
@@ -216,7 +261,7 @@ Safe Clock Startup 内部路径**（`seq_reg1[7] → BUFGCE CE0`）决定；测�
    **两个方向都要写**：只写一个方向会让另一个方向变成新的最差路径。`PRIM_SOURCE=No_buffer` 之后
    DSP 时钟与 `clk_fpga_0` 在工具眼里是同步时钟对，这些 max_delay 会命中 `TIMING-47` 告警
    （设计意图，用 methodology waiver 声明，见「告警清理」）。
-4. **运行策略（`build_bitstream.tcl` 内联）必须同时写到 BD 里自定义 IP 的 OOC 综合 run 上**：
+4. **运行策略（`dpm-vivado-flow` 的 build 阶段）必须同时写到 BD 里自定义 IP 的 OOC 综合 run 上**：
    - 综合（`synth_1` 与 `dpm_system_dpm_top_0_0_synth_1` 两处都写）：
      `DIRECTIVE=PerformanceOptimized`、`GLOBAL_RETIMING=off`、`MAX_DSP=2`。
      `GLOBAL_RETIMING` 保持 off：450MHz 计数器的正确写法是让综合器把
@@ -226,18 +271,15 @@ Safe Clock Startup 内部路径**（`seq_reg1[7] → BUFGCE CE0`）决定；测�
    - run 的 `STEPS.*.ARGS.*` 可以直接 `set_property` 改（内置 strategy 也允许），不需要
      `create_strategy`（2025.2 实测 `get_strategies` / `create_strategy` 不存在）；
      但**给 run 换 strategy 会把步骤参数重置回该 strategy 的预设**。
-   - **写 run 属性之前先比较当前值**：把属性写成「相同的值」也会让已完成的 run 变成过期状态，
-     下一次 `build_bitstream.tcl` 无法复用网表。脚本因此用「值不同才写」。
-   - 综合策略变化后不仅要 reset `synth_1` / `impl_1`，**还要 reset 全部 `*_synth_1` 的 IP/模块
-     OOC run**（它们不是 `synth_1` 的子步骤）。厂商 run 不 reset 就不会重新生成 run 脚本，后挂
-     的 `TCL.PRE` 不生效（实测 clk_wiz 的 `Netlist 29-345` 过滤就这样漏过一次）。hook 变化同样
-     应触发重跑：脚本用 `count_hook_diffs` 在 reset **之前**比较步骤属性差异。
-   - **`apply_run_hooks` 之后不要再调 `launch_runs synth_1 -scripts_only`**：它会把 run 置成需要
-     reset 的状态，紧接着的正式 `launch_runs` 报 `[Common 17-69]`；已 reset 的 run 在正式 launch
-     时会自动重新生成脚本。
-   - **新建 BD 工程刚 open 时，IP 的 OOC 综合 run 还不存在**：先 `launch_runs synth_1 -scripts_only`
-     把 IP run 物化出来再写参数；BD 管理的 IP 不能用 `create_ip_run`
-     （报 `[Vivado 12-3424]`）。
+   - Python 的逐 run 指纹已覆盖策略/hook 内容；`run_build_stage.tcl` 在 reset 前再读当前值，
+     发现漂移就把该 run 加入**实际 reset 列表**（结果里的 `STRATEGY_CHANGED` / `RESET_RUNS`）。
+     未 reset 的 run 不写任何属性，避免把已完成 run 标成过期。
+   - 顺序：materialize → 差异判定 → reset（`synth_1` → 其他 `*_synth_1` → `impl_1`）→ 写策略/
+     增量属性 → 最后挂 `TCL.PRE` → launch/wait。`reset_run` 会清步骤属性，所以属性必须在 reset 后写。
+   - **materialize**：新建 BD 工程刚 open 时 IP 的 OOC 综合 run 还不存在，先
+     `launch_runs synth_1 -scripts_only`；BD 管理的 IP 不能用 `create_ip_run`（报 `[Vivado 12-3424]`）。
+     原位刷新后 `synth_1` 可能需要先 reset，worker 会 `reset_run synth_1` 后重试一次。
+     不要在挂完 hook 后再调 `scripts_only`（正式 launch 会报 `[Common 17-69]`）。
 
 ### 三个必须记住的实测坑
 
@@ -254,10 +296,10 @@ Safe Clock Startup 内部路径**（`seq_reg1[7] → BUFGCE CE0`）决定；测�
 
 ### 签核方式
 
-`build_bitstream.tcl` 一次（写策略 → 综合/实现/bitstream/XSA）+ `impl_stability.tcl 6` 同策略 6 次
-独立实现；`impl_multi.tcl` 只用于换 directive 调优，不用于签核（它会覆盖官方策略）。
-报告里写清 N、最小/最大余量与失败端点数。`build_bitstream.tcl` 在实现完成后会解析 run 的
-methodology 报告：有未 waive 的 Critical Warning 直接 `error`；同时打印
+`uv run dpm-vivado-flow` 一次（增量或 `--force` 全量：策略 → 综合/实现/bitstream/XSA）+
+`impl_stability.tcl 6` 同策略 6 次独立实现；`impl_multi.tcl` 只用于换 directive 调优，不用于签核
+（它会覆盖官方策略）。报告里写清 N、最小/最大余量与失败端点数。build worker 在实现完成后会解析
+run 的 methodology 报告：有未 waive 的 Critical Warning 直接 `error`；同时打印
 `METHODOLOGY_CHECKS_FOUND / CHECKS_WAIVED` 与 `TIMING_BEGIN/END` 的 WNS/WHS。
 
 ## XDC 约束文件的写法（xdc 不是完整的 tcl）
@@ -292,8 +334,8 @@ methodology 报告：有未 waive 的 Critical Warning 直接 `error`；同时�
      零扩展），消**自研 IP** OOC 综合的 `Synth 8-3936`（awAddr 32→6 / 32→12、wData 32→16、
      wStrb 4→2；厂商 IP run 内部另有 INFO 级同名提示，不是告警）；
    - `clk_wiz` 的 `USE_LOCKED=false`（端口无消费者）。
-   - IP/run 属性写错静默失效 → `create_bd.tcl` / `build_bitstream.tcl` 回读校验 `part`、
-     `PRIM_SOURCE`、`USE_LOCKED`，不匹配直接 `error`。
+   - IP/run 属性写错静默失效 → `create_bd.tcl` 回读校验 `part` / `PRIM_SOURCE` / `USE_LOCKED`，
+     不匹配直接 `error`；`dpm-vivado-flow` 的 build 阶段再回读校验 `part`。
 2. **厂商 IP 固有、改不动的，显式屏蔽**（每条在文件内写明理由，**只屏蔽厂商的、不屏蔽自研的**）：
    - `hook_filter_messages.tcl` → `synth_1/SYNTH_DESIGN`、`impl_1/INIT_DESIGN`：`Synth 8-7129`
      （xlconcat 的 In* 写死在 IP 里）、`8-7071`/`8-7023`、`8-4446`、`Opt 31-32`、
@@ -310,14 +352,14 @@ methodology 报告：有未 waive 的 Critical Warning 直接 `error`；同时�
    `TIMING-28`（按名字引用 auto-derived 时钟；为了让一份 xdc 兼容综合黑盒/实现两阶段并抗改名）与
    `TIMING-47`（DRP 动态相位下用有界 `max_delay -datapath_only` 表达跨域，属有意）。waiver 是
    **报告条目、不是 message**（`set_msg_config` 无效），且 `reset_run` 会清掉，稳定性/多策略脚本
-   每轮 reset 后要重挂。报告应显示 `Checks found: 0` + `Checks waived: N`；`build_bitstream.tcl`
-   以「存在任何未 waive 的 Critical Warning」为失败门禁。
+   每轮 reset 后要重挂。报告应显示 `Checks found: 0` + `Checks waived: N`；`dpm-vivado-flow` 的
+   build worker 以「存在任何未 waive 的 Critical Warning」为失败门禁。
 
 ### 三个必须记住的实测坑
 
 | 坑 | 现象 | 处理 |
 | --- | --- | --- |
-| **hook 必须挂在对的步骤上** | 综合告警在 `SYNTH_DESIGN`、实现读网表在 `INIT_DESIGN`、methodology waiver 在 `ROUTE_DESIGN` | 见 `build_bitstream.tcl` 的 `apply_run_hooks` |
+| **hook 必须挂在对的步骤上** | 综合告警在 `SYNTH_DESIGN`、实现读网表在 `INIT_DESIGN`、methodology waiver 在 `ROUTE_DESIGN` | 见 `vivado/flow/tcl/run_build_stage.tcl` 的 hook 计划 |
 | **`reset_run` 会清掉步骤属性，不 reset 的 run 也不会重新生成脚本** | 先 `set_property STEPS.*.TCL.PRE` 再 `reset_run` 等于没设；**厂商 IP 的 OOC run 不 reset 就沿用物化时生成的旧脚本，后挂 hook 不生效**（实测 clk_wiz 过滤漏过） | 顺序「先比较/决策 → 全部 reset（含厂商 OOC run）→ 统一挂 hook → 正式 launch」；不要在挂完后调 `launch_runs -scripts_only`（正式 launch 会报 `[Common 17-69]`） |
 | **hook 脚本要登记进工程** | 只写 `TCL.PRE` 不 `add_files` 报 `[Runs 36-537] File ... is not part of fileset utils_1` | `add_files -fileset utils_1 -norecurse <hook>` |
 | **`open_project` 的早期告警要提前过滤** | `[Board 49-26]`×96 在 `open_project` 内部打印 | 在 `open_project` **之前** source `suppress_early_messages.tcl`；放晚了才「拦不到」 |
@@ -333,9 +375,9 @@ methodology 报告：有未 waive 的 Critical Warning 直接 `error`；同时�
 - 告警类改动要把**清理前后的条数**都给出，并说明哪些是改设计消掉的、哪些是屏蔽/waiver 的（附理由
   文件）；给出所有 run 的 `runme.log` 计数与 methodology 报告的 `Checks found / Checks waived`。
 - 高速时钟类改动要给出**多次实现**的结果（`impl_stability.tcl`），单次通过不作为签核依据。
-- **改了 RTL 之后**：`package_ip.tcl` → `package_src_ip.tcl` → `create_bd.tcl` →
-  `build_bitstream.tcl` 必须按顺序重跑；只重跑后面几步会用到旧的 IP 内容。
-- **改了 BD 源文件（`vivado/rtl/dpm_mmcm_src.v` / `create_bd.tcl`）也必须重建工程**：`build_bitstream.tcl`
-  的复用判断只看策略与 hook，**不看 RTL 内容**；不重建会静默复用旧网表。临时改动可以显式
-  `reset_run` 相关 run，但最稳妥是重跑 `create_bd.tcl`。
+- **改了 RTL 之后**：先跑两个 `sbtn` 生成入口，再在仓库根跑 `uv run dpm-vivado-flow`；它会按内容
+  哈希自动只重打包变化的 IP、刷新 BD 并重跑受影响的 run。需要从零重建时用 `--force`。
+- **改了 BD 源文件（`vivado/rtl/dpm_mmcm_src.v` / `create_bd.tcl`）也必须重建工程**：BD 结构哈希
+  变化会触发全量重建；如果只手工跑 build 而跳过 BD 阶段，会复用旧网表。最稳妥是
+  `uv run dpm-vivado-flow --force`。
 - 没有跑到的步骤（例如没上板）要明确写成「未验证」，不要用「已验证」概括。

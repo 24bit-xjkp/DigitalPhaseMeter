@@ -1,6 +1,6 @@
 # 综合/实现期屏蔽「厂商 IP 固有」告警的过滤器
 #
-# 用法：不需要手工调用。build_bitstream.tcl 把它挂到 run 步骤的 TCL.PRE 上，
+# 用法：不需要手工调用。dpm-vivado-flow 的 build worker 把它挂到 run 步骤的 TCL.PRE 上，
 # 在综合与实现各步骤执行前生效：
 #   STEPS.SYNTH_DESIGN.TCL.PRE        → 综合
 #   STEPS.INIT_DESIGN.TCL.PRE         → 实现（读网表时出现的告警都归这一步）
@@ -18,7 +18,7 @@
 #
 # 每条都写明「为什么可以安全屏蔽」。若以后真的关注其中某项，删掉对应行即可让它重新出现。
 #
-# 注意：本文件必须留在 vivado/ 下并被 build_bitstream.tcl 加进工程的 utils_1 fileset，
+# 注意：本文件必须留在 vivado/ 下并被 dpm-vivado-flow 的 build worker 加进工程的 utils_1 fileset，
 # 否则 Vivado 会报 [Runs 36-537]「hook 脚本不属于工程文件集」。
 
 # ---------------------------------------------------------------------------

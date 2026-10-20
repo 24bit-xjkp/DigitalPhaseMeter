@@ -19,8 +19,9 @@
 #     它与 FCLK_CLK0 之间没有固定的同步沿关系；真实需求是「一个慢时钟周期内到达」，
 #     故用有界 max_delay（保留布线延迟检查），而不是 set_false_path。
 #
-# 注意：waiver 与 hook 一样会在 reset_run 后丢失，所以 build_bitstream / impl_stability /
-# impl_multi 在 reset 之后都要重新挂本文件到 STEPS.ROUTE_DESIGN.TCL.PRE。
+# 注意：waiver 与 hook 一样会在 reset_run 后丢失，所以 dpm-vivado-flow 的 build worker /
+# refresh 回退路径、impl_stability / impl_multi 在 reset 之后都要重新挂本文件到
+# STEPS.ROUTE_DESIGN.TCL.PRE。
 #
 # 新增/删除 waiver 时同步更新 vivado/README.md 的「综合 / 实现告警清理」。
 create_waiver -type METHODOLOGY -id {TIMING-28} -user "dpm_flow" \
