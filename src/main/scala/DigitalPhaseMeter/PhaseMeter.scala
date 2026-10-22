@@ -36,7 +36,7 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
         // 请求控制字
         val request = Input(Bool())
         // 响应控制字
-        val response = DecoupledIO(new PhaseMeterResponsePayload(edgeCntWidth, phaseCntWidth))
+        val response = EnqIO(new PhaseMeterResponsePayload(edgeCntWidth, phaseCntWidth))
     })
 
     // 四个跨域/异步输入都先经检测器的组合输出，再统一打一拍送进 FSM 与计数器控制逻辑。

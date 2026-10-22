@@ -67,7 +67,7 @@ ps/build/host_main --stdio                    # 协议字节走 stdin/stdout
 
 | 方面 | 建模 | 简化/假设 |
 | --- | --- | --- |
-| 寄存器语义 | 逐个对齐 `ControlRegs.scala`：start 脉冲（busy 期间忽略）、busy/resultValid/lost/irqPending、结果被覆盖即 `lostCount++`、IRQ_STATUS W1C、`CTRL.clear` busy 期间挂起 | 输入选择/使能的配置快照经固定几个慢周期送达（模型参数，真实实现同域同拍） |
+| 寄存器语义 | 逐个对齐 `ControlRegs.scala`：start 脉冲（busy 期间忽略）、busy/resultValid/lost/irqPending、结果被覆盖即 `lostCount++`、IRQ_STATUS W1C、`CTRL.clear` 写当拍生效（只复位结果区与标志、不清 busy，在途测量继续跑完并照常锁存结果） | 输入选择/使能的配置快照经固定几个慢周期送达（模型参数，真实实现同域同拍） |
 | 测量模型 | `gate = target + ceil(T_sig/T_slow)`；`edge = floor(gate·f_sig/f_slow)`；相位先量化到整数个 DSP 周期（450MHz 下 1 个周期 = 2.222ns，整数 RNE）再乘沿数 → `phase_cnt = cycles·edge` | 与 `spec/gen_golden.py` 同口径，逐位一致 |
 | 时间推进 | **每次 AXI 事务**推进 64 个慢周期；主循环每轮再用 `--speed`（默认 4096）额外推进，让虚拟时间与墙钟解耦 | 真实硬件是自由运行的时钟；长闸门只花很短墙钟 |
 | 源不可用 | 片内源未使能/未锁定，或外部引脚无信号（默认）→ 两路恒低：`busy` 恒为 1、不产生结果、`RESULT_SEQ` 不自增 | 与真实 PL 的「等参考沿」一致 |

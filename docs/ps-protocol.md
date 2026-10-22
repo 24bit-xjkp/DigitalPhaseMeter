@@ -75,6 +75,11 @@
   （未使能/未锁定）时都算 `ERR_BUSY`。PL 内部对 `busy` 期间的 `CTRL.start` 是**忽略**，
   固件多回一个错误码对调用方等价且更有信息量；上位机应把 `ERR_BUSY` 当作
   「已在测量中」而不是致命错误。
+- **`CLEAR` 要求 PL 空闲**：PL 的 `CTRL.clear` 写当拍生效，只复位结果区与标志
+  （`LOST_COUNT`、`RESULT_*`、`resultValid`、`irqPending`、`seq`），**不清 `busy`、也不取消在途
+  测量**：busy 期间写入时，正在跑的那次测量完成后仍会照常锁存结果并拉中断（记录序号从 0 重来）。
+  因此 PS 固件先等 `STATUS.busy = 0` 再写 clear，等待超时回 `ERR_BUSY`；上位机应把 `CLEAR` 的
+  `ERR_BUSY` 当作「忙、可重试」而不是致命错误。
 - **结果就绪的权威探针是 `GET_RESULT.valid`（或 `GET_MEAS` 的序号变化）**，
   不是 `STATUS.resultValid`：仿真后端的事件驱动模型里，结果锁存与状态位更新可能落在
   同一条命令内部的两次 AXI 读之间，只轮询 `STATUS` 可能看不到 valid 恰好为 1 的那一拍。

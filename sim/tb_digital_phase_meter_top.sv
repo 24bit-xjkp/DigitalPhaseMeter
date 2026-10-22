@@ -8,6 +8,9 @@
 //   - AXI4-Lite 寄存器读写（含写地址/写数据通道顺序颠倒、字节选通、只读寄存器写忽略）；
 //   - 测量启动与 busy/resultValid/lost/中断挂起位的时序，busy 期间重复写 start 被忽略；
 //   - 测量完成中断（高电平）、中断使能门控，以及软件写 IRQ_STATUS 清中断/清 resultValid/清丢失计数；
+//   - 测量期间改写 GATE_TARGET 不影响本次测量（targetGate 由 Controller 在启动的那一拍锁存）；
+//   - CTRL.clear 写当拍生效：busy 期间写清只复位结果区与标志（不清 busy），在途测量继续跑完并
+//     照常锁存结果，记录序号从 0 重新开始；
 //   - 读 4 个结果寄存器并用理论模型校验 gateCnt / edgeCnt / phaseCnt
 //     （模型见 .agents/skills/dpm-measurement-model）；
 //   - 结果只保留最新一条：不读走就再次测量会覆盖旧结果并累加 LOST_COUNT；
@@ -596,7 +599,8 @@ module tb_digital_phase_meter_top;
         check_bit(interrupt, 1'b0, "interrupt after ack");
 
         // ---- 12. 测量期间改写 GATE_TARGET 不影响本次测量 ----
-        // 启动时把目标闸门计数锁存进 activeTargetGate，测量期间用的是锁存值
+        // Controller 在启动的那一拍把 GATE_TARGET 锁存进自己的 targetGate 寄存器，测量期间用的是
+        // 锁存值，因此输入不必在测量期间保持稳定
         axi_lite_write(REG_GATE_TARGET, GATE_TARGET_SLOW);
         axi_lite_write(REG_CTRL, (1 << CTRL_IRQ_ENABLE) | (1 << CTRL_START));
         axi_lite_read(REG_STATUS, read_value);
@@ -657,7 +661,54 @@ module tb_digital_phase_meter_top;
                      "external input measurement after switching back");
         ack_result();
 
-        // ---- 15. 复位再次生效：中断清除、状态归零、结果与信号源配置回默认值 ----
+        // ---- 15. busy 期间写 CTRL.clear：当拍生效、只清结果区与标志，在途测量继续跑完 ----
+        // 先留下一条未读结果（resultValid = 1、seq > 0），再启动一次长闸门的新测量：busy 期间写
+        // CTRL.clear 必须立即把结果区与标志清零，但 busy 保持为 1；在途测量继续跑完并照常锁存
+        // 结果、中断照常出现，记录序号从 0 重新开始。
+        run_measurement(GATE_TARGET_FAST, "pending result before busy clear");
+        axi_lite_read(REG_STATUS, read_value);
+        check_bit(read_value[STATUS_RESULT], 1'b1, "STATUS.resultValid before busy clear");
+        axi_lite_read(REG_RESULT_SEQ, read_value);
+        check_bit(read_value != 32'h0, 1'b1, "RESULT_SEQ > 0 before busy clear");
+
+        // 只清中断挂起位（不动 resultValid），保证后面的 wait_interrupt 等的是本次测量完成
+        axi_lite_write(REG_IRQ_STATUS, 32'h1 << IRQ_PENDING);
+        axi_lite_write(REG_GATE_TARGET, GATE_TARGET_SLOW);
+        axi_lite_write(REG_CTRL, (1 << CTRL_IRQ_ENABLE) | (1 << CTRL_START));
+        repeat (2) @(negedge clock);
+        axi_lite_read(REG_STATUS, read_value);
+        check_bit(read_value[STATUS_BUSY], 1'b1, "STATUS.busy before busy clear");
+        check_bit(read_value[STATUS_RESULT], 1'b1, "STATUS.resultValid kept while busy");
+
+        // busy 期间写 CTRL.clear：当拍生效
+        axi_lite_write(REG_CTRL, (1 << CTRL_IRQ_ENABLE) | (1 << CTRL_CLEAR));
+        axi_lite_read(REG_STATUS, read_value);
+        check_bit(read_value[STATUS_BUSY], 1'b1, "STATUS.busy after busy clear");
+        check_bit(read_value[STATUS_RESULT], 1'b0, "STATUS.resultValid after busy clear");
+        check_bit(read_value[STATUS_LOST], 1'b0, "STATUS.lost after busy clear");
+        check_bit(read_value[STATUS_IRQ], 1'b0, "STATUS.irq after busy clear");
+        axi_lite_read(REG_RESULT_SEQ, read_value);
+        check_equal_u32(read_value, 32'h0, "RESULT_SEQ after busy clear");
+        read_result(snapshot[0], snapshot[1], snapshot[2], snapshot[3]);
+        check_equal_u32(snapshot[0], 32'h0, "RESULT_GATE after busy clear");
+        check_equal_u32(snapshot[1], 32'h0, "RESULT_EDGE after busy clear");
+        check_equal_u32(snapshot[2], 32'h0, "RESULT_PHASE after busy clear");
+        check_bit(interrupt, 1'b0, "interrupt after busy clear");
+
+        // 在途测量继续跑完：中断照常出现、结果照常锁存，序号从 0 重新开始
+        wait_interrupt(4 * GATE_TARGET_SLOW + 200, "measurement continuing after busy clear");
+        check_bit(interrupt, 1'b1, "interrupt after busy clear measurement");
+        axi_lite_read(REG_STATUS, read_value);
+        check_bit(read_value[STATUS_BUSY], 1'b0, "STATUS.busy after busy clear measurement");
+        check_bit(read_value[STATUS_RESULT], 1'b1, "STATUS.resultValid after busy clear measurement");
+        axi_lite_read(REG_LOST_COUNT, read_value);
+        check_equal_u32(read_value, 32'h0, "LOST_COUNT after busy clear measurement");
+        read_result(snapshot[0], snapshot[1], snapshot[2], snapshot[3]);
+        check_record(snapshot[0], snapshot[1], snapshot[2], snapshot[3], GATE_TARGET_SLOW, 0,
+                     "result after busy clear");
+        ack_result();
+
+        // ---- 16. 复位再次生效：中断清除、状态归零、结果与信号源配置回默认值 ----
 
         @(negedge clock);
         resetn = 1'b0;

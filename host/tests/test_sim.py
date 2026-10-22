@@ -171,19 +171,53 @@ def test_irq_status_w1c() -> None:
     assert fpga.lost_count == 0
 
 
-def test_clear_is_pended_while_busy() -> None:
+def test_clear_is_immediate_while_busy() -> None:
+    """`CTRL.clear` 写当拍立即生效：清结果区/标志/seq，**不清 busy**。
+
+    对齐 RTL（`ControlRegs.scala` 的 `clearPulse` 分支）：在途测量继续跑完并照常锁存结果，
+    序号从 0 开始；旧结果被清掉后不会再计入 lostCount。
+    """
     fpga, clock = new_fpga(freq_hz=10_000_000)
+    # 第一条结果故意不读走（resultValid = 1），随后启动第二次测量（busy）
     fpga.start()
-    fpga.write(F.REG_CTRL, F.CTRL_IRQ_ENABLE | F.CTRL_CLEAR)
+    clock.advance(0.01)
+    fpga.poll()
+    assert fpga.result_valid and not fpga.busy
+    assert (fpga.result_seq, fpga.seq) == (0, 1)
+    fpga.start()
     assert fpga.busy
-    assert fpga.clear_req
+
+    # busy 中写 clear：写入当拍立即生效，不挂起
+    fpga.write(F.REG_CTRL, F.CTRL_IRQ_ENABLE | F.CTRL_CLEAR)
+    assert fpga.busy  # 不清 busy：在途测量继续
+    assert not fpga.result_valid
+    assert not fpga.irq_pending
+    assert fpga.lost_count == 0
+    assert (fpga.result_gate, fpga.result_edge, fpga.result_phase, fpga.result_seq, fpga.seq) == (0, 0, 0, 0, 0)
+    # 只复位结果区与标志：不动 irqEnable、GATE_TARGET 与本次已锁存的目标闸门
+    assert fpga.read(F.REG_CTRL) == F.CTRL_IRQ_ENABLE
+    assert (fpga.target_gate, fpga.active_target_gate) == (2000, 2000)
+
+    # 在途测量完成 → 照常锁存，序号从 0 开始；旧结果已被清掉，不产生丢失计数
     clock.advance(0.01)
     fpga.poll()
     assert not fpga.busy
-    assert not fpga.clear_req
-    # clear 生效：结果区与标志复位、seq 归零
+    assert fpga.result_valid
+    assert (fpga.result_seq, fpga.seq) == (0, 1)
+    assert fpga.lost_count == 0
+    assert fpga.read(F.REG_RESULT_GATE) == 2005
+
+
+def test_clear_wins_over_same_step_latch() -> None:
+    """同拍与结果锁存竞争时 clear 优先（RTL 里 clearPulse 写在结果锁存之后）：结果丢弃。"""
+    fpga, clock = new_fpga(freq_hz=10_000_000)
+    fpga.start()
+    clock.advance(0.01)  # 测量完成时刻已过，但还没 poll() 锁存
+    fpga.write(F.REG_CTRL, F.CTRL_IRQ_ENABLE | F.CTRL_CLEAR)
+    assert not fpga.busy
     assert not fpga.result_valid
-    assert (fpga.result_gate, fpga.result_edge, fpga.result_phase, fpga.seq) == (0, 0, 0, 0)
+    assert (fpga.result_gate, fpga.result_edge, fpga.result_phase, fpga.result_seq) == (0, 0, 0, 0)
+    assert (fpga.seq, fpga.lost_count) == (0, 0)
 
 
 def test_gate_target_byte_strobe() -> None:
@@ -507,8 +541,27 @@ def test_clear_and_reset_counters(env: PsEnv) -> None:
     env.request(P.Cmd.CLEAR)
     assert not env.fpga.result_valid
     assert env.fpga.seq == 0
+    # RESET_COUNTERS 只清丢失计数与中断挂起，不动结果（对齐固件 handle_reset_counters）
+    env.request(P.Cmd.START)
+    env.clock.advance(0.01)
+    env.fpga.poll()
+    assert env.fpga.result_valid
     env.request(P.Cmd.RESET_COUNTERS)
     assert env.fpga.lost_count == 0
+    assert env.fpga.result_valid  # 不能把未读走的结果清掉
+    assert (env.fpga.result_seq, env.fpga.seq) == (0, 1)
+    assert not env.fpga.irq_pending
+
+
+def test_clear_while_busy_over_command_path(env: PsEnv) -> None:
+    """仿真后端的 CLEAR 不等 idle（简化）：忙时也立即清零且回 OK，不清 busy。"""
+    env.request(P.Cmd.START)
+    assert env.fpga.busy
+    frame = env.request(P.Cmd.CLEAR)
+    assert frame.cmd == P.Cmd.CLEAR.response
+    assert env.fpga.busy
+    assert not env.fpga.result_valid
+    assert (env.fpga.seq, env.fpga.lost_count) == (0, 0)
 
 
 def test_stream_notifications(env: PsEnv) -> None:

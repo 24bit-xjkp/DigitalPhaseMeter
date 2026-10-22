@@ -211,7 +211,9 @@ int dpm_cmd_fetch(dpm_cmd_ctx_t* c)
 /** 等待 PL 空闲（STATUS.busy = 0）。返回 0 = 已空闲，1 = 超时。
  *
  * 用于「必须在 idle 时做」的命令：DRP 重配置（SET_SIG）与结果区清零（CLEAR）。
- * PL 的 CTRL.clear 在 busy 期间本来就是挂起的，这里等它落地再回报成功。 */
+ * PL 的 CTRL.clear 写当拍生效，但**只复位结果区与标志、不清 busy**：若在测量进行中写，
+ * 在途测量跑完后仍会照常锁存结果并置标志，清零动作等于白做。因此这里先等它空闲，
+ * 保证写完回报成功时结果区确实保持为空。 */
 static int wait_idle(dpm_cmd_ctx_t* c, uint32_t timeout_ms, uint32_t poll_limit)
 {
     uint32_t i;
@@ -692,7 +694,8 @@ static uint32_t handle_get_sig(dpm_cmd_ctx_t* c, uint8_t* out, uint32_t cap)
 
 static uint32_t handle_clear(dpm_cmd_ctx_t* c, uint8_t* out, uint32_t cap)
 {
-    /* PL 的 CTRL.clear 在 busy 期间挂起（测量结束后生效），这里等它落地再回报成功。 */
+    /* PL 的 CTRL.clear 写当拍生效，但不清 busy：在途测量完成后仍会锁存结果。这里先等空闲再写，
+     * 保证回报成功时结果区已被清空（避免在途结果在清零之后又落进结果区）。 */
     if(wait_idle(c, DPM_WAIT_TIMEOUT_MS(c->gate_target, c->clk.slow_hz), DPM_WAIT_POLL_LIMIT(c->gate_target)) != 0)
     {
         return cmd_reply_err(c, DPM_RESP_ERR_BUSY, out, cap);

@@ -16,7 +16,10 @@
 实现的寄存器语义与 `src/main/scala/DigitalPhaseMeter/ControlRegs.scala` 一致：
 CTRL/STATUS/GATE_TARGET/四个结果寄存器/LOST_COUNT/IRQ_STATUS(W1C)/VERSION/CAPS/
 SIG_CTRL/SIG_STATUS，以及「结果未读走即被覆盖 → lostCount++」「busy 期间忽略 start」
-「CTRL.clear 在 busy 期间挂起」「片内源使能前两路输出恒低 → 测量永不完成」。
+「GATE_TARGET 在启动拍锁存（测量期间改写不影响本次测量）」
+「CTRL.clear 写当拍立即生效：只复位 lostCount/seq/irqPending/resultValid/结果字，
+不清 busy —— 在途测量（包括卡在等参考沿、永不完成的那种）继续存在」
+「片内源使能前两路输出恒低 / 外部输入无信号 → 测量挂在等参考沿、永不完成」。
 """
 
 from __future__ import annotations
@@ -182,7 +185,6 @@ class SimBackend:
         self.lost_count = 0
         self.seq = 0
         self.res_gate = self.res_edge = self.res_phase = self.res_seq = 0
-        self.clear_req = 0
         self.freq_hz = freq_hz
         self.phase_mdeg = phase_mdeg
         self.finish_at: float | None = None  # 测量完成的绝对时间
@@ -223,6 +225,19 @@ class SimBackend:
             self.result_valid = 1
             self.pending_result = None
             self.finish_at = None
+
+    def _apply_clear(self) -> None:
+        """CTRL.clear：写当拍立即复位结果区与标志（与 `ControlRegs.scala` 的 clearPulse 分支一致）。
+
+        只清 lostCount、seq、irqPending、resultValid 与 4 个结果字；**不清 busy**，也不动
+        GATE_TARGET / irqEnable / SIG_CTRL。因此在途测量（包括卡在等参考沿、永不完成的那种）
+        不会被 clear 取消或恢复，完成后照常锁存结果、序号从 0 重新开始。
+        """
+        self.lost_count = 0
+        self.seq = 0
+        self.irq_pending = 0
+        self.result_valid = 0
+        self.res_gate = self.res_edge = self.res_phase = self.res_seq = 0
 
     # ---- 测量模型 ----
     # 方案 A（上板已实测）：相位可控，写 MMCM 的 PHASE_MUX/DELAY_TIME 即生效，
@@ -278,7 +293,7 @@ class SimBackend:
             if value & 1:
                 self.start()
             if value & 4:
-                self.clear_req = 1
+                self._apply_clear()
         elif idx == 2:
             self.gate_target = value & 0x0FFFFFFF
         elif idx == 8:  # IRQ_STATUS，W1C
@@ -293,19 +308,6 @@ class SimBackend:
             self.src_select = (value >> 1) & 1
             self.config_pending = 1
             self.config_pending_until = time.monotonic() + 0.02
-        if self.clear_req and not self.busy:
-            self.clear_req = 0
-            self.seq = self.lost_count = self.irq_pending = self.result_valid = 0
-            self.res_gate = self.res_edge = self.res_phase = self.res_seq = 0
-        if self.clear_req and self.busy and self.finish_at is None:
-            # 「外部输入无信号 → 一直等参考沿」这种挂起状态没有完成时刻，
-            # 真实 PL 里也只有 CTRL.clear / 重新配置能恢复，因此这里让 clear 直接取消它。
-            # （PL 侧的 clear 在 busy 期间是挂起的：真实硬件要等测量结束；
-            #   对「永远不会结束」的测量，软件需要先切回可用信号源再 clear。）
-            self.clear_req = 0
-            self.busy = 0
-            self.seq = self.lost_count = self.irq_pending = self.result_valid = 0
-            self.res_gate = self.res_edge = self.res_phase = self.res_seq = 0
 
     def read(self, off: int) -> int:
         idx = (off >> 2) & 0xF

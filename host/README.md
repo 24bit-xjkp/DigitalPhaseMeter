@@ -160,8 +160,9 @@ uv run python host/tools/gui_smoke.py --scan     # 再跑一次 2×3 扫描并�
 `sim_fpga.py` 分三块建模，语义分别对齐 RTL、协议文档与当前实现：
 
 1. **寄存器语义**（对齐 `src/main/scala/DigitalPhaseMeter/ControlRegs.scala` 与
-   `ps/include/dpm_regs.h`）：`CTRL.start` 写 1 触发（busy 期间被忽略）、`CTRL.clear` 在 busy 期间
-   挂起、`STATUS` 四位、结果未读走即被覆盖时 `lostCount++` / `seq++`、`IRQ_STATUS` 三位 W1C、
+   `ps/include/dpm_regs.h`）：`CTRL.start` 写 1 触发（busy 期间被忽略）、`CTRL.clear` 写当拍生效
+   （只清结果区与标志、不清 busy，在途测量继续跑完）、`STATUS` 四位、结果未读走即被覆盖时
+   `lostCount++` / `seq++`、`IRQ_STATUS` 三位 W1C、
    `GATE_TARGET` 按字节选通合并、`SIG_CTRL` 同拍生效（门控与选择都在主时钟域，与写寄存器的域相同，
    写完成后 `SIG_STATUS.sourceReady` 立即反映新配置）。片内源未使能/未锁定时两路恒低 →
    **测量永远不完成**（用来验证上位机能超时退出）。

@@ -10,7 +10,7 @@ import chisel3.experimental.prefix
   *   闸门计数器宽度
   */
 class ControllerInPayload(val gateCntWidth: Int = 28) extends Bundle {
-    // 目标闸门计数，在测量期间保持不变
+    // 目标闸门计数，在启动的那一拍被锁存；之后改写不影响本次测量（输入不必在测量期间保持稳定）
     val targetGate = UInt(gateCntWidth.W)
 }
 
@@ -87,6 +87,7 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
 
     private val gateCntClear = Reg(Bool())
     private val (gateCnt, _) = Counter(0 to (1 << gateCntWidth) - 1, true.B, gateCntClear)
+    private val targetGate = RegInit(0.U(gateCntWidth.W))
 
     private object StateEnum extends ChiselEnum { val idle, waitStart, measuring, waitStop = Value }
     import StateEnum._
@@ -98,6 +99,7 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
                 outValid := false.B
                 when(io.in.valid) {
                     stateReg := waitStart
+                    targetGate := io.in.bits.targetGate
                     request.send
                 }
             }
@@ -109,7 +111,7 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
                 }
             }
             is(measuring) {
-                when(gateCnt === io.in.bits.targetGate) {
+                when(gateCnt === targetGate) {
                     stateReg := waitStop
                     request.send
                 }

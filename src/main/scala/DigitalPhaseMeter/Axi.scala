@@ -26,6 +26,7 @@ object AxiResp {
   *   数据宽度，必须为 8 的整数倍
   */
 class Axi4LiteSlavePorts(val addrWidth: Int = 32, val dataWidth: Int = 32) extends Bundle {
+    assert(dataWidth % 8 == 0)
     // 写地址通道
     val awaddr = Input(UInt(addrWidth.W))
     val awprot = Input(UInt(3.W))
@@ -70,7 +71,8 @@ object ByteStrobe {
       *   合并结果，宽度与 `old` 相同
       */
     def merge(old: UInt, data: UInt, strb: UInt): UInt = {
-        val bytes = (0 until old.getWidth / 8).map { i => Mux(strb(i), data(8 * i + 7, 8 * i), old(8 * i + 7, 8 * i)) }
+        assert(old.getWidth % 8 == 0)
+        val bytes = (0 until old.getWidth / 8).map(i => Mux(strb(i), data, old)(8 * i + 7, 8 * i))
         Cat(bytes.reverse)
     }
 }
@@ -85,6 +87,7 @@ object ByteStrobe {
   *   数据宽度
   */
 class AxiLiteWritePayload(val addrWidth: Int = 32, val dataWidth: Int = 32) extends Bundle {
+    assert(dataWidth % 8 == 0)
     val addr = UInt(addrWidth.W)
     val data = UInt(dataWidth.W)
     val strb = UInt((dataWidth / 8).W)

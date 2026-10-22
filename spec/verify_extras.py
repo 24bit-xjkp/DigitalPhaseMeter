@@ -7,6 +7,7 @@
   2. 连续/单次模式：`SET_MODE` 来回切换，`seq` 单调递增、`lostCount` 不增长；
   3. 错误路径：非法频率、非法相位、非法模式值 → ERR_PARAM；未锁定就选片内源 → ERR_BUSY；
   4. 外部输入源无信号：切到外部后启动测量，应停在 busy（不返回错误），客户端要能超时退出；
+     恢复只能靠切回可用信号源（新 RTL 下 `CTRL.clear` 只清结果与标志、不清 busy，不能取消在途测量）；
   5. 相位不可控行为：请求 0/45/90/135，读数全部等于 90°（当前 bitstream 实测结论）。
 
 用法：
@@ -46,12 +47,14 @@ def record(name: str, ok: bool, detail: str) -> None:
 
 
 def _recover_source(link) -> bool:
-    """返回 True 表示已恢复到可继续测量的状态。"""
     """从「外部输入无信号 → 测量挂在等参考沿」恢复到可用状态。
 
-    真实 PL 的恢复路径是：**把输入源切回片内源**（时钟重新有边沿）→ 挂起的那次测量
-    随即完成 → `busy` 变 0；`CTRL.clear` 在 busy 期间是挂起的（固件可能直接回 ERR_BUSY）。
-    因此这里先 SET_SOURCE(1) 等 busy 落下，再按需 clear。
+    真实 PL 的恢复路径只有一条：**把输入源切回片内源**，让被测信号重新有边沿，
+    挂起的那次测量随即完成、`busy` 落回 0（之后可以读走残留结果、清标志）。
+    `CTRL.clear` 在新 RTL 下是写当拍生效的，但它**只复位结果区与标志、不清 `busy`**，
+    因此不能用来取消「卡在等参考沿」的在途测量——这正是这里不再依赖 clear 的原因。
+
+    返回 True 表示已恢复到可继续测量的状态。
     """
     try:
         link.set_source(1)
@@ -66,16 +69,13 @@ def _recover_source(link) -> bool:
             # 真实 PL 会在边沿恢复后完成这次测量；仿真后端没有实现「重新收到边沿就继续」，
             # 于是 busy 会一直挂着。把这个状态记为**已知的模型差异**（不是协议错误），
             # 并让调用方跳过后续用例（否则后面的测量都会撞上 ERR_BUSY）。
-            try:
-                link.clear()
-            except vs.BusyError:
-                pass
-            st2 = link.status()
+            # 注意：clear 不清 busy，所以不能像旧实现那样用 clear 取消这次挂起的测量。
             record(
                 "从无信号状态恢复（切回片内源）",
                 True,
-                f"模型差异：切回片内源后 busy 仍为 1（STATUS=0x{st2['status']:X}）——"
-                "真实 PL 会在边沿恢复后完成测量；本后端未实现，后续用例跳过",
+                f"模型差异：切回片内源后 busy 仍为 1（STATUS=0x{st['status']:X}）——"
+                "真实 PL 会在边沿恢复后完成测量，本后端未实现边沿恢复；"
+                "CTRL.clear 只清结果与标志、不清 busy，不能用于恢复，后续用例跳过",
             )
             return False
         # 把可能残留的结果读走，避免影响后续用例
@@ -87,7 +87,7 @@ def _recover_source(link) -> bool:
         try:
             link.clear()
         except vs.BusyError:
-            pass  # busy 期间 clear 被拒是协议允许的
+            pass  # CLEAR 仍可能被固件回 ERR_BUSY（固件先等 idle），这里只是尽力清标志
         record("从无信号状态恢复（切回片内源）", True, f"busy 已落，STATUS=0x{st['status']:X}")
         return True
     except Exception as exc:  # noqa: BLE001

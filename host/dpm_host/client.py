@@ -585,7 +585,11 @@ class DpmClient:
         return P.decode_sig_info(frame.payload)
 
     def clear(self, **kw: object) -> None:
-        """`CLEAR`：复位结果区与标志（busy 期间 PL 会挂起）。"""
+        """`CLEAR`：复位结果区与标志。
+
+        PL 的 `CTRL.clear` 写当拍立即生效、**不清 busy**，在途测量继续跑完并照常锁存结果
+        （序号从 0 开始）；真实固件会先等 idle 再写，忙时回 `ERR_BUSY`。
+        """
         self.request(Cmd.CLEAR, **kw)  # type: ignore[arg-type]
 
     def stream(self, enable: bool | int, interval_ms: int = P.DEFAULT_STREAM_INTERVAL_MS, **kw: object) -> tuple[int, int]:

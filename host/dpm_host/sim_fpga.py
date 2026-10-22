@@ -7,7 +7,7 @@
 
    | 偏移  | 名称          | 语义                                                       |
    | ----- | ------------- | ---------------------------------------------------------- |
-   | 0x00  | CTRL          | b0 start（写 1 触发，**busy 期间被忽略**）、b1 irqEnable、b2 clear（busy 期间挂起） |
+   | 0x00  | CTRL          | b0 start（写 1 触发，**busy 期间被忽略**）、b1 irqEnable、b2 clear（写当拍立即生效，复位结果区与标志、不清 busy） |
    | 0x04  | STATUS        | b0 busy、b1 resultValid、b2 lost、b3 irqPending             |
    | 0x08  | GATE_TARGET   | 低 28 位有效，按字节选通合并                                |
    | 0x0C..0x18 | RESULT_GATE/EDGE/PHASE/SEQ | 最新一条结果                     |
@@ -50,7 +50,8 @@
    片内源未使能或未锁定时两路恒低 → 测量**永远不会完成**（这正是要让上位机超时退出的路径）。
 
 时间由注入的 `clock`（默认 `time.monotonic`）驱动：模型是事件式的，调用 :meth:`SimFpga.poll`
-才会推进状态（配置送达、锁定、测量完成、挂起的 clear）。测试里用 :class:`FakeClock` 精确控制。
+才会推进状态（配置送达、锁定、测量完成）。`CTRL.clear` 不参与时间推进：写当拍立即生效
+（对齐 RTL，见 :meth:`SimFpga._apply_clear`）。测试里用 :class:`FakeClock` 精确控制。
 """
 
 from __future__ import annotations
@@ -166,7 +167,6 @@ class SimFpga:
         self.result_edge = 0
         self.result_phase = 0
         self.result_seq = 0
-        self.clear_req = False
 
         # ---- SIG_CTRL：主时钟域的使能与选择寄存器（与输入选择同域，无跨域送达延迟） ----
         self.sig_enable = bool(sig_enable)
@@ -225,7 +225,7 @@ class SimFpga:
         return float(self.clock())
 
     def poll(self, now: float | None = None) -> None:
-        """推进时间相关状态：输入选择跟随 SIG_CTRL、MMCM 锁定、测量完成、挂起的 clear。"""
+        """推进时间相关状态：输入选择跟随 SIG_CTRL、MMCM 锁定、测量完成。"""
         t = self.now() if now is None else float(now)
 
         # 1) SIG_CTRL 与输入选择同域：写入后输入选择跟随（默认下一拍，可配延迟）
@@ -257,9 +257,7 @@ class SimFpga:
                 self._meas_started_at = None
                 self._meas_counts = None
 
-        # 4) clear 在 busy 期间挂起，busy 结束后生效
-        if self.clear_req and not self.busy:
-            self._apply_clear()
+        # CTRL.clear 不在这里推进：写当拍立即生效（见 _apply_clear / write）
 
     # ------------------------------------------------------------ 测量模型
 
@@ -317,8 +315,12 @@ class SimFpga:
         self.result_valid = True
 
     def _apply_clear(self) -> None:
-        """`CTRL.clear` 生效：结果区与全部标志复位，seq 归零。"""
-        self.clear_req = False
+        """`CTRL.clear` 写当拍生效：只复位结果区与全部标志、seq 归零（不清 busy）。
+
+        对齐 RTL（`ControlRegs.scala` 的 `clearPulse` 分支）：不清 `busy`、不改
+        `targetGate`/`irqEnable`/`SIG_CTRL`；在途测量继续跑完并照常锁存结果（序号从 0 开始）。
+        同拍与结果锁存竞争时 clear 优先：`write()` 先 `poll()` 再清零，这一拍锁存的结果被丢弃。
+        """
         self.seq = 0
         self.lost_count = 0
         self.irq_pending = False
@@ -384,8 +386,8 @@ class SimFpga:
                 if data & CTRL_START:
                     self.start()
                 if data & CTRL_CLEAR:
-                    # busy 期间挂起，由 poll() 在空闲时生效
-                    self.clear_req = True
+                    # 写当拍立即生效（不清 busy，在途测量继续跑完）
+                    self._apply_clear()
             return
         if off == REG_GATE_TARGET:
             merged = 0
@@ -468,6 +470,7 @@ class SimFpga:
         if self.busy:
             self.start_ignored_while_busy += 1
             return False
+        # 对齐 Controller：启动拍锁存目标闸门，测量期间改 GATE_TARGET 不影响本次测量
         self.active_target_gate = self.target_gate & GATE_TARGET_MAX
         self.busy = True
         self._meas_started_at = self.now()

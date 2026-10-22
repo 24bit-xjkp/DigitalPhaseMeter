@@ -53,6 +53,10 @@ static uint32_t div_ceil_u64(uint64_t num, uint64_t den)
 
 /* ------------------------------------------------------------- 状态推进 */
 
+/** CTRL.clear 的写当拍效果：只复位结果寄存器与全部标志。
+ *
+ * 与 `ControlRegs.scala` 的 clearPulse 分支一致：**不清 busy**，
+ * 在途测量继续跑完并照常锁存结果（序号从 0 重新计数）。 */
 static void do_clear(dpm_model_t *m)
 {
     m->res_gate = 0u;
@@ -63,15 +67,11 @@ static void do_clear(dpm_model_t *m)
     m->lost_count = 0u;
     m->irq_pending = 0u;
     m->result_valid = 0u;
-    m->clear_pending = 0u;
 }
 
 /** 结果锁存（与 ControlRegs 的 response 分支同序：覆盖旧结果 → lostCount++）。 */
 static void latch_result(dpm_model_t *m)
 {
-    if (m->clear_pending != 0u) {
-        do_clear(m); /* CTRL.clear 在 busy 期间挂起，busy 落下这一刻生效 */
-    }
     if (m->result_valid != 0u) {
         m->lost_count++; /* 上一次结果没被读走就被覆盖 */
     }
@@ -286,11 +286,7 @@ static void apply_dpm_write(dpm_model_t *m, uint32_t off, uint32_t data)
     case DPM_REG_CTRL:
         m->irq_enable = (data & DPM_CTRL_IRQ_ENABLE) != 0u ? 1u : 0u;
         if ((data & DPM_CTRL_CLEAR) != 0u) {
-            if (m->busy != 0u) {
-                m->clear_pending = 1u; /* busy 期间挂起 */
-            } else {
-                do_clear(m);
-            }
+            do_clear(m); /* 写当拍生效：只复位结果区与标志，不动 busy */
         }
         if ((data & DPM_CTRL_START) != 0u && m->busy == 0u) {
             start_measurement(m, m->gate_target & 0x0FFFFFFFu);

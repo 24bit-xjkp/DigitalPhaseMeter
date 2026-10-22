@@ -123,6 +123,10 @@ Verilator 与 xsim / Vivado 都能直接编译。
   `MmcmDrpController` 的 Verilator 用例覆盖「真实基地址 + 页内偏移」；`dpm_top` 没有 Verilator
   顶层用例，xsim 顶层激励用的是页内偏移地址，真实基地址下 `dpm_top` 的等价性靠静态理由
   （译码只消费 `addr[5:2]`，高位/低位本来就不参与逻辑）。
+- **Chisel 7 有现成的位宽/方向表意写法，不必手写 helper**：内部命令总线用 `EnqIO`（等价
+  `DecoupledIO`，从口产出命令）与 `DeqIO`（等价 `Flipped(DecoupledIO)`，寄存器堆消费命令）；
+  位宽剪裁用 `take(n)`（取低 n 位）、零扩展用 `pad(w)`（`w` 不大于原位宽时返回原值，否则高位补 0）。
+  它们生成的 SV 与手写切片/拼接完全一致（`Axi4LiteSlave` 与 `ControlRegs` 已按此写法重构）。
 - **Bundle 构造参数不要叫 `width`**：与 Chisel `Aggregate.width` 冲突（要求 `override`），
   用 `dataWidth` 之类的名字。子类复用父 Bundle 的参数时要写 `override val`。
 - **显式复位端口也是普通端口，测试不驱动就等于该域不复位**：模块自己声明的复位端口（不在 `io` 里，
@@ -147,6 +151,9 @@ Verilator 与 xsim / Vivado 都能直接编译。
 - **「软件清标志」与「硬件置标志」同拍竞争时，用后写优先决定谁赢**：`ControlRegs` 里软件写
   `IRQ_STATUS` 清 `resultValid` 的块在前、`Controller.out.valid` 锁存新结果并置 `resultValid`/`irqPending`
   的块在后，因此同一拍按「新结果优先」处理，刚到达的结果与中断不会被软件的清除动作吃掉。顺序反过来会丢结果。
+  `CTRL.clear` 反过来是**clear 优先**：它用 `WireDefault` 脉冲当拍生效（不挂起，无需 pending 状态），
+  块写在结果锁存块之后，同拍到达的结果被丢弃、`busy` 仍按测量完成撤销；clear 只清结果区与标志，不动
+  `busy` / `GATE_TARGET` / `SIG_CTRL`。
 - **数据量只有几个字时不要引入片内存储**：一次测量的结果只有 4 个字，直接把结果锁存进可由 PS 读回的
   只读寄存器（GPIO 式数据通道）远比「BRAM + 独立 AXI4 突发口」简单——后者要 AXI4 全速从口、双口 RAM、
   突发/选通/`SLVERR` 处理与地址译码，前者只要几个寄存器加一次 `out.valid` 锁存。选通道先看数据量，

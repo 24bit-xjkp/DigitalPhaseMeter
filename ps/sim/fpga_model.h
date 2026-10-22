@@ -8,7 +8,8 @@
  * 建模范围与假设（写进 `ps/README.md`，避免把模型当成硬件）：
  *   1. 寄存器语义逐个对齐 `src/main/scala/DigitalPhaseMeter/ControlRegs.scala`：
  *      start 脉冲（busy 期间忽略）、busy/resultValid/lost/irqPending、
- *      结果被覆盖即 lostCount++、IRQ_STATUS 的 W1C、CTRL.clear 在 busy 期间挂起、
+ *      结果被覆盖即 lostCount++、IRQ_STATUS 的 W1C、
+ *      CTRL.clear 写当拍生效（只复位结果区与标志，不清 busy；在途测量继续跑完并照常锁存结果）、
  *      SIG_CTRL 写入后配置快照经若干慢周期才送达测量域（期间 DPM 的写通道挂起）。
  *   2. 测量模型（与 `spec/gen_golden.py` 逐位一致，全程整数 RNE）：
  *        gate_cnt  = target_gate + ceil(T_sig / T_slow)
@@ -63,7 +64,6 @@ typedef struct {
     uint32_t lost_count;      /**< LOST_COUNT */
     uint32_t seq;             /**< 下一个记录的序号 */
     uint8_t irq_pending;      /**< STATUS.b3 */
-    uint8_t clear_pending;    /**< CTRL.clear 在 busy 期间挂起 */
     uint32_t res_gate;        /**< RESULT_GATE */
     uint32_t res_edge;        /**< RESULT_EDGE */
     uint32_t res_phase;       /**< RESULT_PHASE */

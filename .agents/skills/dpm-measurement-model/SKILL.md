@@ -21,13 +21,13 @@ argument-hint: '要验证的测量结果或要写的判据'
 | `idle` | 闸门计数器清零并停用；两个测量计数器清零（`clearCnt = stateReg === idle`）；`in.valid` 到来时发出 `start` 请求 |
 | `waitStart` | `PhaseMeter` 等到参考信号 `extSig_sig1` 的上升沿，回 `start` 响应 |
 | `measuring` | 闸门计数器开始按低速时钟累加；`edgeCnt` 在 `extSig_sig1` 上升沿累加；相位计数在 `extSig_sig1` 上升沿使能、在 `extSig_sig2` 上升沿停用 |
-| `waitStop` | 闸门计数达到 `in.bits.targetGate` 后发出 `stop` 请求，`PhaseMeter` 等到 `extSig_sig2` 的下一个上升沿才回响应 |
+| `waitStop` | 闸门计数达到启动时锁存的 `targetGate` 后发出 `stop` 请求，`PhaseMeter` 等到 `extSig_sig2` 的下一个上升沿才回响应 |
 | 锁存 | 收到 `stop` 响应后把 `edgeCnt` / `phaseCnt` / 当前 `gateCnt` 写入输出负载，`out.valid` 拉高**一个**低速周期，回到 `idle` |
 
 要点：
 
 - 测量窗口的关闭依赖**被测信号的下一个上升沿**，所以两个输入必须是自由运行的周期信号；一次性脉冲会挂住握手。
-- `targetGate` 在测量期间必须保持不变。
+- `targetGate` 在启动拍被 `Controller` 锁存，测量期间软件改写 `in.bits.targetGate` 不影响本次测量（不必保持稳定）。
 - 计数器只在 `idle` 清零，因此连续测量之间不需要额外复位，但每次都从零开始。
 
 ## 三个观测量
@@ -85,7 +85,7 @@ DSP 时钟按整数比缩放（`sim/tb_src_handoff.sv` 取 `T_MAIN=18900ps` / `T
 | 相位计数 | `2^32` 个高速周期 ≈ 9.54 s 的连续累加（450MHz） |
 | 边沿计数 | `2^32` 个参考沿 |
 
-`targetGate` 与闸门计数器同为 28 位（`UInt(gateCntWidth.W)`），所以 5.37 s 是**可达上限**而不是饱和点：想要更长的闸门时间必须同时加宽 `gateCntWidth` 与 `targetGate` 的位宽。`in.bits.targetGate` 在测量期间必须保持不变。`DspCounter`（DSP48E1 累加器实现）另有一条 `width <= 48` 的约束，加宽时两处都要改。
+`targetGate` 与闸门计数器同为 28 位（`UInt(gateCntWidth.W)`），所以 5.37 s 是**可达上限**而不是饱和点：想要更长的闸门时间必须同时加宽 `gateCntWidth` 与 `targetGate` 的位宽。`in.bits.targetGate` 在启动拍被锁存，测量期间可自由改写。`DspCounter`（DSP48E1 累加器实现）另有一条 `width <= 48` 的约束，加宽时两处都要改。
 
 ## 已知局限
 

@@ -52,7 +52,7 @@
 /** CTRL（0x00）：b0/b2 是写 1 触发位，读回时恒为 0；b1 是普通读写位。 */
 #define DPM_CTRL_START (1u << 0)     /**< 写 1 启动一次测量（busy 期间被忽略） */
 #define DPM_CTRL_IRQ_ENABLE (1u << 1)/**< 中断使能（每次写 CTRL 都按此位整体更新） */
-#define DPM_CTRL_CLEAR (1u << 2)     /**< 写 1 复位结果寄存器与全部标志（busy 期间挂起） */
+#define DPM_CTRL_CLEAR (1u << 2)     /**< 写 1 当拍复位结果寄存器与全部标志（不清 busy） */
 
 /** STATUS（0x04）。 */
 #define DPM_STATUS_BUSY (1u << 0)        /**< 测量进行中 */

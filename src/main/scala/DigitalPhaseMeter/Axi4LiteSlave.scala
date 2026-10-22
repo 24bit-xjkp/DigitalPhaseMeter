@@ -2,6 +2,7 @@ package DigitalPhaseMeter
 
 import chisel3._
 import chisel3.util._
+import chisel3.util.circt.ClockGate
 
 /** AXI4-Lite 从口
   *
@@ -45,41 +46,15 @@ class Axi4LiteSlave(
         // AXI4-Lite 从口
         val axi = new Axi4LiteSlavePorts(addrWidth, dataWidth)
         // 写命令，到寄存器堆
-        val wr = DecoupledIO(new AxiLiteWritePayload(addrWidth, dataWidth))
+        val wr = EnqIO(new AxiLiteWritePayload(addrWidth, dataWidth))
         // 读命令，到寄存器堆
-        val rd = DecoupledIO(new AxiLiteReadPayload(addrWidth))
+        val rd = EnqIO(new AxiLiteReadPayload(addrWidth))
         // 读数据，由寄存器堆组合给出
         val rdData = Input(UInt(dataWidth.W))
     })
 
-    /** 取低若干位
-      *
-      * @param value
-      *   原值
-      * @param width
-      *   需要的低位宽度
-      * @return
-      *   原值的低 `width` 位；`width` 等于原宽度时直接返回原值，避免多余的位提取节点
-      */
-    private def lowBits(value: UInt, width: Int): UInt = {
-        if (width == value.getWidth) value else value(width - 1, 0)
-    }
-
-    /** 把剪裁后的内部值零扩展回完整 payload 宽度
-      *
-      * @param value
-      *   内部值，宽度为实际使用宽度
-      * @param width
-      *   目标 payload 宽度
-      * @return
-      *   高 `width - value.getWidth` 位补 0 的载荷
-      */
-    private def zeroExtend(value: UInt, width: Int): UInt = {
-        if (value.getWidth == width) value else Cat(0.U((width - value.getWidth).W), value)
-    }
-
     // ---- 写通道 ----
-    // 锁存寄存器只保存实际使用的低位（输出时由 zeroExtend 补 0），
+    // 锁存寄存器只保存实际使用的低位（交回 payload 时由 pad 补 0），
     // 高位不再进寄存器，综合器也就没有「未读寄存器位」可 trim
     private val awAddr = Reg(UInt(usedAddrWidth.W))
     private val awHeld = RegInit(false.B)
@@ -95,21 +70,21 @@ class Axi4LiteSlave(
     io.axi.bresp := AxiResp.okay
 
     when(io.axi.awready && io.axi.awvalid) {
-        awAddr := lowBits(io.axi.awaddr, usedAddrWidth)
+        awAddr := io.axi.awaddr.take(usedAddrWidth)
         awHeld := true.B
     }
     when(io.axi.wready && io.axi.wvalid) {
-        wData := lowBits(io.axi.wdata, usedDataWidth)
-        wStrb := lowBits(io.axi.wstrb, usedStrbWidth)
+        wData := io.axi.wdata.take(usedDataWidth)
+        wStrb := io.axi.wstrb.take(usedStrbWidth)
         wHeld := true.B
     }
 
     // 地址与数据都锁存后发出写命令；写命令保持有效直到寄存器堆接收。
     // 高位零扩展回完整 payload 宽度：下游只消费低位，高位恒 0 与原全宽锁存等价
     io.wr.valid := awHeld && wHeld && !bValid
-    io.wr.bits.addr := zeroExtend(awAddr, addrWidth)
-    io.wr.bits.data := zeroExtend(wData, dataWidth)
-    io.wr.bits.strb := zeroExtend(wStrb, strbWidth)
+    io.wr.bits.addr := awAddr.pad(addrWidth)
+    io.wr.bits.data := wData.pad(dataWidth)
+    io.wr.bits.strb := wStrb.pad(strbWidth)
     when(io.wr.fire) {
         awHeld := false.B
         wHeld := false.B
@@ -125,7 +100,7 @@ class Axi4LiteSlave(
     io.axi.arready := (!rValid || io.axi.rready) && io.rd.ready && !reset.asBool
     io.rd.valid := io.axi.arready && io.axi.arvalid
     // 读地址是组合路径：只把实际使用的低位交给寄存器堆，其余位零扩展
-    io.rd.bits.addr := zeroExtend(lowBits(io.axi.araddr, usedAddrWidth), addrWidth)
+    io.rd.bits.addr := io.axi.araddr.take(usedAddrWidth).pad(addrWidth)
     io.axi.rvalid := rValid
     io.axi.rdata := rData
     io.axi.rresp := AxiResp.okay

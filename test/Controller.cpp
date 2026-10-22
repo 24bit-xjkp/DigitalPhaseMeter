@@ -108,6 +108,12 @@ namespace
         femtosecond_t phase_offset{200_ns};
         /// 目标闸门计数
         std::uint64_t gate_cnt{target_gate};
+        /// 启动后经过多少个低速时钟周期再改写目标闸门计数：用于验证 Controller 在启动的那
+        /// 一拍就把 targetGate 锁存进自己的寄存器（测量期间改写不影响本次测量）。为空表示
+        /// 测量期间不改写
+        std::optional<std::uint64_t> gate_change_after_cycles{};
+        /// 改写后的目标闸门计数，仅在 gate_change_after_cycles 有值时使用
+        std::uint64_t gate_change_value{};
     };
 
     /// 一次测量的输出负载
@@ -164,16 +170,30 @@ namespace
         const auto sig2_phase{static_cast<std::uint64_t>(option.phase_offset.rep)};
 
         co_await wait_reset_finish(port.reset);
-        // 对齐到高速时钟下降沿后再发起请求
+        // 对齐到高速时钟下降沿后再发起请求；同时记下启动时刻，作为「启动后经过多少个低速
+        // 周期再改写 targetGate」的基准——targetGate 在启动的那一拍就被 Controller 锁存
         co_await wait_stimulate(port.dsp_clock);
+        const auto start_fs{static_cast<std::uint64_t>(co_await time_in_time_precision()) * 10000zu};
         port.io_in_valid = 1;
         co_await wait_stimulate(port.dsp_clock);
 
+        bool gate_changed{false};
         // 信号自由运行，直到控制器给出测量结果
         while(static_cast<std::uint64_t>(port.io_out_valid) == 0u)
         {
             // 时间精度为10ps，换算到飞秒需要乘以1e4
             const auto now{static_cast<std::uint64_t>(co_await time_in_time_precision()) * 10000zu};
+            // 按需在启动后的指定时刻改写目标闸门计数（此时测量仍在进行中）：输入不必在测量
+            // 期间保持稳定，本次测量仍应当按启动拍锁存的目标值完成
+            if(option.gate_change_after_cycles.has_value() && !gate_changed)
+            {
+                const auto change_at{start_fs + *option.gate_change_after_cycles * static_cast<std::uint64_t>(clock_period.rep)};
+                if(now >= change_at)
+                {
+                    port.io_in_bits_target_gate = option.gate_change_value;
+                    gate_changed = true;
+                }
+            }
             port.io_sig_sig1 = signal_level(now, 0zu, sig1_period, sig1_high);
             port.io_sig_sig2 = signal_level(now, sig2_phase, sig2_period, sig2_high);
             co_await wait_stimulate(port.dsp_clock);
@@ -530,5 +550,46 @@ TEST_SUITE("Controller")
             check_window(measurement.result, option);
             check_phase(measurement.result, option);
         }
+    }
+
+    TEST_CASE("the target gate is latched when the measurement starts")
+    {
+        // 启动后等 20 个低速时钟周期（400ns，此时 FSM 早已进入 measuring）再把
+        // io.in.bits.targetGate 从大目标值改成 8：Controller 在启动的那一拍就把目标值锁存进
+        // 自己的寄存器，本次测量必须按大目标值完成，测量中的改写不影响本次测量。
+        constexpr std::uint64_t changed_gate{8zu};
+        const stimulus_t option{
+            .sig1_period = 400_ns,
+            .sig1_high = 200_ns,
+            .sig2_period = 400_ns,
+            .sig2_high = 200_ns,
+            .gate_change_after_cycles = 20zu,
+            .gate_change_value = changed_gate,
+        };
+
+        dut_context_t ctx{
+            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
+        };
+        ctx.set_base_name("Controller.target_gate_latch");
+        port_t port{ctx.dut()};
+
+        ctx.add_task(generate_clock(port.clock, clock_period));
+        ctx.add_task(generate_clock(port.dsp_clock, dsp_period));
+        ctx.add_task(generate_reset(port.reset, port.clock));
+
+        std::array<measurement_t, 1zu> measurements{};
+        ctx.add_task(run_measurements(port, option, measurements));
+
+        ctx.loop_until_finish(5_ms);
+
+        REQUIRE(measurements[0].observed);
+        // 测量期间输入确实被改成了小值（否则下面的判据没有区分度）
+        CHECK_EQ(static_cast<std::uint64_t>(port.io_in_bits_target_gate), changed_gate);
+        // 闸门计数仍按启动时锁存的大目标值完成（gate_cnt_tolerance 覆盖停止握手带来的偏差），
+        // 而不是按测量中改写后的小值
+        CHECK_EQ(measurements[0].result.gate_cnt, gate_cnt_tolerance(option.sig2_period.rep)(option.gate_cnt));
+        CHECK_GT(measurements[0].result.gate_cnt, changed_gate);
+        // 窗口内的参考沿数随之与目标闸门时间一致（而不是与小值一致）
+        check_window(measurements[0].result, option);
     }
 }

@@ -41,6 +41,7 @@ from .sim_fpga import (
     CTRL_START,
     GATE_TARGET_MAX,
     IRQ_LOST_CLEAR,
+    IRQ_PENDING,
     REG_GATE_TARGET,
     REG_SIG_CTRL,
     VERSION_VALUE,
@@ -156,14 +157,18 @@ class SimPs:
             if cmd == P.Cmd.GET_SIG:
                 return self._get_sig()
             if cmd == P.Cmd.CLEAR:
+                # 简化：真实固件先 wait_idle 再写 CTRL.clear（busy 时回 ERR_BUSY），这里直接写。
+                # RTL 的 CTRL.clear 写当拍生效且不清 busy：忙时也能立即清掉结果区/标志，在途
+                # 测量继续跑完并照常锁存结果。与固件的可观察差异只有「忙时不回 ERR_BUSY」。
                 self.fpga.write(0x00, CTRL_IRQ_ENABLE | CTRL_CLEAR)
                 return self._ok(cmd)
             if cmd == P.Cmd.STREAM:
                 return self._set_stream(frame.payload)
             if cmd == P.Cmd.RESET_COUNTERS:
-                self.fpga.write(0x20, IRQ_LOST_CLEAR)
-                if not self.fpga.busy:
-                    self.fpga.write(0x00, CTRL_IRQ_ENABLE | CTRL_CLEAR)
+                # 对齐固件 handle_reset_counters：只清丢失计数与中断挂起（b0|b2），不动
+                # resultValid/结果字（避免丢结果）。注意这里**不写** CTRL.clear——它会连结果区
+                # 一起复位，与固件行为不同。
+                self.fpga.write(0x20, IRQ_PENDING | IRQ_LOST_CLEAR)
                 return self._ok(cmd)
             if frame.is_notification:
                 # 通知帧是 PS → PC 的方向，收到就当噪声忽略
@@ -335,9 +340,13 @@ class SimPs:
         interval = max(0.001, self.stream_interval_ms / 1000.0)
         if self.fpga.result_valid and t - self._last_stream_at >= interval:
             result = self._read_result()
-            lost_delta = (self.fpga.lost_count - self._last_lost_reported) & 0xFFFF
+            # 对齐固件：丢失计数只增不改（CLEAR/RESET_COUNTERS 会让它回卷，回卷按 0 增量处理，
+            # 不能拿减法取低 16 位——否则清零会被当成一次 65535 的丢失），字段 u16 饱和上报
+            lost_delta = self.fpga.lost_count - self._last_lost_reported
+            if lost_delta < 0:
+                lost_delta = 0
             self._last_lost_reported = self.fpga.lost_count
-            data = P.StreamData(self._meas_from(result), lost_delta)
+            data = P.StreamData(self._meas_from(result), min(lost_delta, 0xFFFF))
             out.append(P.encode_frame(P.Cmd.STREAM_DATA, P.encode_stream_data(data)))
             self.notifications_sent += 1
             if lost_delta:
