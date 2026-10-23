@@ -12,9 +12,14 @@ lazy val DigitalPhaseMeter = (project in file("."))
             "-deprecation",
             "-feature",
             "-Xcheckinit",
-            "-Ymacro-annotations"
+            "-Ymacro-annotations",
+            // Chisel 的匿名 Bundle 会「推断出结构类型」，访问其成员需要 reflective call，因此只关掉这一类。
+            "-Xlint:_,-infer-structural",
+            "-Wunused:imports,privates,locals,patvars,implicits,explicits",
+            "-Wdead-code",
+            "-Werror"
         ),
-        addCompilerPlugin("org.chipsalliance" % "chisel-plugin" % chiselVersion cross CrossVersion.full)
+        addCompilerPlugin(("org.chipsalliance" % "chisel-plugin" % chiselVersion).cross(CrossVersion.full))
     )
-    // 入口点缓存：入口点或其传递依赖未变化时跳过执行（实现见 project/RunMainCached.scala）
     .settings(RunMainCached.settings)
+    .settings(addCommandAlias("scalaLint", "scalafixAll --check; compile"))

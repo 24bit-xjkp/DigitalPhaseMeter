@@ -1,7 +1,6 @@
 package DigitalPhaseMeter
 
 import chisel3._
-import chisel3.util._
 
 /** 复位同步器：异步置位、同步释放
   *

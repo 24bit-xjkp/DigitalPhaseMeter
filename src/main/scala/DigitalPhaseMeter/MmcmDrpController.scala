@@ -1,9 +1,9 @@
 package DigitalPhaseMeter
 
 import chisel3._
+import chisel3.experimental.prefix
 import chisel3.util._
 import chisel3.util.experimental.InlineInstance
-import chisel3.experimental.prefix
 
 class MmcmDrpControllerBundle extends Bundle {
     val addrWidth = 32

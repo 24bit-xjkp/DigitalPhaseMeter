@@ -183,6 +183,16 @@ sbtn -batch "runMainCached DigitalPhaseMeter.EmitController"              # 未�
 
 模块名可以用 `override def desiredName` 与类名不同（例如 `EdgeDetector` 按边沿类型/同步方式生成 `EdgeDetectorRising` / `EdgeDetectorBoth`）：`build/chisel/<Name>/` 下的文件名与 `filelist.f` 中的模块名以生成结果为准，`xmake`、xsim 与 Vivado 都按 `filelist.f` 取文件，不按目录名推导。
 
+### 代码检查
+
+```bash
+sbtn -batch scalaLint          # Scalafix + 编译器 lint，0 warning 门禁
+sbtn -batch "scalafixAll"      # 自动修复可修的规则（导入排序、删除未使用导入）
+scalafmt --test                # 格式检查（scalafmt 就地修复）
+```
+
+Scalafix 只作用于 `src/main/scala`；`build.sbt` / `project/*.scala` 是 sbt 2 的构建定义（Scala 3），不在规则范围内，其告警要手工修复。规则内容、有意关闭的检查项与验证报告要求见 [`.agents/skills/dpm-pre-delivery-check`](.agents/skills/dpm-pre-delivery-check/SKILL.md)。
+
 ### Verilator 单元测试（测量通路）
 
 ```bash

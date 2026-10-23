@@ -1,8 +1,8 @@
 package DigitalPhaseMeter
 
 import chisel3._
-import chisel3.util._
 import chisel3.experimental.prefix
+import chisel3.util._
 
 /** 相位计输入信号，sig1为参考信号，sig2为被测信号
   */
@@ -67,12 +67,12 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
             is(sWaitStart) {
                 when(pulseSig1) {
                     state := sMeasuring
-                    responseValid.send
+                    responseValid.send()
                 }
             }
             is(sMeasuring) { when(request) { state := sWaitStop } }
             is(sWaitStop) {
-                when(pulseSig2) { responseValid.send }
+                when(pulseSig2) { responseValid.send() }
                 when(responseReady) { state := sIdle }
             }
         }

@@ -1,6 +1,6 @@
 ---
 name: dpm-pre-delivery-check
-description: 'Use when: 在 DigitalPhaseMeter 中完成一处修改、准备提交或向用户报告结果之前，需要跑格式化、静态检查与回归测试。覆盖 C++（clang-format / clang-tidy）、Scala（scalafmt）与全量测试的检查命令、编译数据库的重新生成、交付范围的确认，以及验证结果的报告要求。'
+description: 'Use when: 在 DigitalPhaseMeter 中完成一处修改、准备提交或向用户报告结果之前，需要跑格式化、静态检查与回归测试。覆盖 C++（clang-format / clang-tidy）、Scala（scalafmt / Scalafix / 编译器 lint）与全量测试的检查命令、编译数据库的重新生成、交付范围的确认，以及验证结果的报告要求。'
 argument-hint: '本次要交付的改动'
 ---
 
@@ -22,11 +22,15 @@ argument-hint: '本次要交付的改动'
 | C++ | `clang-format -i <改动的 .cpp>`（配置 `.clang-format`，`ColumnLimit = 130`、4 空格缩进） |
 | Scala | `scalafmt`（就地格式化）；`scalafmt --test` 只检查、不改文件 |
 
-`scalafmt --test` 会检查仓库内的全部 Scala 源文件（含 `build.sbtn`），是提交前的最低要求。
+`scalafmt --test` 检查 `src/main/scala/**/*.scala`、`build.sbt`、`project/*.scala` 与 `project/*.sbt`，是提交前的最低要求；`build/`、`target/` 由 `.scalafmt.conf` 的 `project.excludeFilters` 排除（sbt 2 的 BSP 会在 `build/tmp-bsp-src` 解压构建定义源码，不排除会让 `scalafmt --test` 把这些生成文件当成未格式化的源文件）。格式化用 `scalafmt` 就地修复。
 
 ## 2. 静态检查
 
-C++ 代码用 clang-tidy，配置在 `.clang-tidy`（`clang-analyzer-*`、`modernize-*`、`google-*`、`readability-*`、`cert-*`、`concurrency-*`、`bugprone-*`、`cppcoreguidelines-*` 等，含项目自定的若干关闭项）：
+C++ 用 clang-tidy，Scala 用 Scalafix + 编译器 lint；两侧的「误报」都只允许按精确抑制处理。
+
+### C++：clang-tidy
+
+配置在 `.clang-tidy`（`clang-analyzer-*`、`modernize-*`、`google-*`、`readability-*`、`cert-*`、`concurrency-*`、`bugprone-*`、`cppcoreguidelines-*` 等，含项目自定的若干关闭项）：
 
 ```bash
 clang-tidy -p .vscode --config-file=.clang-tidy test/Controller.cpp
@@ -40,7 +44,7 @@ clang-tidy -p .vscode --config-file=.clang-tidy test/Controller.cpp
 
 - **标准是 0 warning**。新增告警要么改代码，要么在确实属于工具误报时按下一条处理。
 
-### 误报的处理约定
+#### 误报的处理约定
 
 确认是误报时用行内 `NOLINT(<check>)` 精确抑制，并写清原因，不要整段关闭检查。当前的既有例子：`REQUIRE` 失败会终止用例，其后对 `std::optional` 的访问是安全的，但 clang-tidy 仍会报 `bugprone-unchecked-optional-access`：
 
@@ -51,6 +55,37 @@ const auto& result{after_reset.value()};  // NOLINT(bugprone-unchecked-optional-
 ```
 
 当前代码里已按下述方式处理过这类告警，改动时不要重新引入：先判断后执行的循环用普通 `while` 而不是 `do-while`（`cppcoreguidelines-avoid-do-while`）；浮点转整用 `::std::lround`（`bugprone-incorrect-roundings`）。
+
+### Scala：Scalafix + 编译器 lint
+
+工具链分两层：sbt-scalafix（插件声明在 `project/plugins.sbt`，规则与配置在 `.scalafix.conf`）负责语义级 lint 与自动修复；编译器 lint 由 `build.sbt` 的 `scalacOptions` 打开。检查入口是 sbt 命令别名 `scalaLint`：
+
+```bash
+sbtn -batch scalaLint                  # = scalafixAll --check + compile（带 -Werror），标准是 0 warning
+```
+
+也可以分开跑：
+
+```bash
+sbtn -batch "scalafixAll --check"      # 只跑 Scalafix 规则检查
+sbtn -batch compile                    # 只跑编译器 lint（-Werror 让告警变成构建失败）
+```
+
+自动修复与格式化（就地改文件，改完重新跑 `scalaLint`）：
+
+```bash
+sbtn -batch "scalafixAll"              # 导入排序、删除未使用导入等可自动修的规则
+scalafmt                               # 格式化；scalafmt --test 只检查不改文件
+```
+
+- **Scalafix 规则**（`.scalafix.conf`）：`OrganizeImports`（按 `groups` 分组排序并删除未使用导入，删除功能依赖编译器 `-Wunused:imports`）、`DisableSyntax`（禁 `var` / `throw` / `null` / `while` / `return` / `finalize` / XML）、`NoAutoTupling`、`NoValInForComprehension`、`LeakingImplicitClassVal`。
+- **编译器规则**（`build.sbt` 的 `scalacOptions`）：`-Xlint:_,-infer-structural`、`-Wunused:imports,privates,locals,patvars,implicits,explicits`、`-Wdead-code`、`-Werror`。硬件描述代码里的 `var` / `while` / `return` 要么不可综合、要么容易写出与预期不符的时序，统一用 Chisel 的 `Reg` / `Wire` / `require` 等价写法替代。
+- **有意关闭 / 不启用的检查，不要加回来**：
+  - `-infer-structural` 关闭（即 `-Xlint:_,-infer-structural`）：Chisel 每个模块的 `io` 都是匿名 `Bundle`，访问其成员会合法触发「推断结构类型 / reflective call」告警。
+  - 不启用 `-Wvalue-discard` 与 `-Wnonunit-statement`：Chisel 的 `when(...)` 返回 `WhenContext` 且几乎总在语句位置，这两条会把所有条件赋值误报成 unused value。
+- **误报的处理约定**：确属误报时用行内 `// scalafix:off <Rule>` / `// scalafix:on <Rule>` 精确抑制并写清原因；编译器告警用 `@nowarn` 精确抑制，不要整体关闭规则或检查项。本仓库当前没有需要抑制的告警。
+- **覆盖范围**：Scalafix 只作用于 `src/main/scala`（sbt 项目源码）。`build.sbt` / `project/*.scala` 是 sbt 2 的构建定义（由 sbt 自己用 Scala 3 编译），不在 Scalafix 规则范围内；sbt reload / 编译时出现的构建定义告警要手工修复（例如本次把 `cross CrossVersion.full` 改成 `.cross(CrossVersion.full)`）。
+- 当前代码里已按下述方式处理过这类告警，改动时不要重新引入：5 处未使用 import 已删除，导入分组顺序统一交给 `OrganizeImports` 维护；`CdcToggleHandShake.Sender.send` 改成显式空参列表的 `def send(): Unit`（原 nullary-unit 写法容易被误当纯函数调用）；`EdgeDetector` 对 `Enumeration` 的 match 补 `case _` 覆盖 `both`（`Type` 不是 sealed 类型，行为不变）。
 
 ## 3. 回归测试
 

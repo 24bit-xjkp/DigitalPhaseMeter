@@ -2,7 +2,6 @@ package DigitalPhaseMeter
 
 import chisel3._
 import chisel3.util._
-import chisel3.util.circt.ClockGate
 
 /** AXI4-Lite 从口
   *

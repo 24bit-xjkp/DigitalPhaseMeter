@@ -1,8 +1,10 @@
 package DigitalPhaseMeter
 
-import chisel3._
 import java.nio.file._
+
+import chisel3._
 import circt.stage.ChiselStage
+
 trait Main extends App {
 
     /** 生成SystemVerilog源文件

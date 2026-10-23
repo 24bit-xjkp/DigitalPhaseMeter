@@ -1,8 +1,8 @@
 package DigitalPhaseMeter
 
 import chisel3._
-import chisel3.util._
 import chisel3.experimental.prefix
+import chisel3.util._
 
 /** 控制/状态与测量结果寄存器堆
   *

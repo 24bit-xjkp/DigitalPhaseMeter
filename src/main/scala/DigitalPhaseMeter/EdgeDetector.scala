@@ -1,12 +1,13 @@
 package DigitalPhaseMeter
 
 import chisel3._
-import chisel3.util._
 
 /** 边沿类型 */
-object EdgeType extends Enumeration {
-    type Type = Value
-    val rising, falling, both = Value
+sealed trait EdgeType
+object EdgeType {
+    case object Rising extends EdgeType
+    case object Falling extends EdgeType
+    case object Both extends EdgeType
 }
 
 /** 边沿检测器
@@ -18,7 +19,7 @@ object EdgeType extends Enumeration {
   * @param async
   *   是否为异步边沿
   */
-class EdgeDetector(val n: Int = 3, val edgeType: EdgeType.Type = EdgeType.rising) extends Module {
+class EdgeDetector(val n: Int = 3, val edgeType: EdgeType = EdgeType.Rising) extends Module {
     require(n >= 2)
     val io = IO(new Bundle {
         val in = Input(Bool())
@@ -26,15 +27,15 @@ class EdgeDetector(val n: Int = 3, val edgeType: EdgeType.Type = EdgeType.rising
     })
     private val pipeline = MyShiftRegisters(io.in, n)
     io.trigger := (edgeType match {
-        case EdgeType.rising  => !pipeline(n - 1) && pipeline(n - 2)
-        case EdgeType.falling => pipeline(n - 1) && !pipeline(n - 2)
-        case EdgeType.both    => pipeline(n - 1) =/= pipeline(n - 2)
+        case EdgeType.Rising  => !pipeline(n - 1) && pipeline(n - 2)
+        case EdgeType.Falling => pipeline(n - 1) && !pipeline(n - 2)
+        case EdgeType.Both    => pipeline(n - 1) =/= pipeline(n - 2)
     })
-    override def desiredName: String = s"EdgeDetector${edgeType.toString.capitalize}"
+    override def desiredName: String = s"EdgeDetector${edgeType.toString}"
 }
 
 object EdgeDetector {
-    def apply(sig: Bool, edgeType: EdgeType.Type = EdgeType.rising, n: Int = 3): Bool = {
+    def apply(sig: Bool, edgeType: EdgeType = EdgeType.Rising, n: Int = 3): Bool = {
         val edgeDetector = Module(new EdgeDetector(n, edgeType))
         edgeDetector.io.in := sig
         edgeDetector.io.trigger

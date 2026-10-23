@@ -1,18 +1,17 @@
 package DigitalPhaseMeter
 
 import chisel3._
-import chisel3.util._
 
 /** 单 bit 电平的跨时钟域握手
   *
   * 用「电平翻转 + 同步链」表达跨域事件：发送方翻转电平，接收方用同步链采到翻转沿即得到 一个目的域脉冲。位宽为 1，因此不需要额外的数据通路。
   */
 object CdcToggleHandShake {
-    def receive(sig: Bool): Bool = { EdgeDetector(sig, EdgeType.both) }
+    def receive(sig: Bool): Bool = { EdgeDetector(sig, EdgeType.Both) }
 
     class Sender(name: String) {
         private val sig = RegInit(false.B).suggestName(name)
-        def send = sig := !sig
+        def send() = sig := !sig
     }
     object Sender {
         import scala.language.implicitConversions

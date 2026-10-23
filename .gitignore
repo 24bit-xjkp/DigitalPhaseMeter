@@ -1,8 +1,9 @@
 target
-# project/ 下只入库构建定义（含 sbt 版本文件）；Metals 等工具生成的其余文件继续忽略
+# project/ 下只入库构建定义（含 sbt 版本文件与插件声明）；Metals 等工具生成的其余文件继续忽略
 project/*
 !project/*.scala
 !project/build.properties
+!project/plugins.sbt
 build
 .vscode
 .metals

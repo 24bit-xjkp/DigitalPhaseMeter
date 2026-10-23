@@ -1,8 +1,8 @@
 package DigitalPhaseMeter
 
 import chisel3._
-import chisel3.util._
 import chisel3.experimental.prefix
+import chisel3.util._
 
 /** 控制器输入负载
   *
@@ -99,20 +99,20 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
                 when(io.in.valid) {
                     state := sWaitStart
                     targetGate := io.in.bits.targetGate
-                    request.send
+                    request.send()
                 }
             }
             is(sWaitStart) {
                 when(responseValid) {
                     state := sMeasuring
                     gateCntClear := false.B
-                    responseReady.send
+                    responseReady.send()
                 }
             }
             is(sMeasuring) {
                 when(gateCnt === targetGate) {
                     state := sWaitStop
-                    request.send
+                    request.send()
                 }
             }
             is(sWaitStop) {
@@ -121,7 +121,7 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
                     payload.waiveAllAs[PhaseMeterResponsePayload] :<= phaseMeter.response.bits
                     payload.gateCnt := gateCnt
                     outValid := true.B
-                    responseReady.send
+                    responseReady.send()
                 }
             }
         }

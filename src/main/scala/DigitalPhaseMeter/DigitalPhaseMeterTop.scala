@@ -1,7 +1,6 @@
 package DigitalPhaseMeter
 
 import chisel3._
-import chisel3.reflect.DataMirror
 
 /** 数字相位计顶层
   *
@@ -43,16 +42,13 @@ import chisel3.reflect.DataMirror
   *   边沿计数器宽度
   * @param phaseCntWidth
   *   相位计数器宽度
-  * @param resetDepth
-  *   复位同步链级数
   */
 class DigitalPhaseMeterTop(
     val addrWidth: Int = 32,
     val dataWidth: Int = 32,
     val gateCntWidth: Int = 28,
     val edgeCntWidth: Int = 32,
-    val phaseCntWidth: Int = 32,
-    val resetDepth: Int = 4
+    val phaseCntWidth: Int = 32
 ) extends RawModule {
     // 主时钟，低速域
     val clock = IO(Input(Clock()))
@@ -73,7 +69,7 @@ class DigitalPhaseMeterTop(
 
     // 各时钟域一个复位同步器：异步置位、与**各自域的时钟**同步释放。
     // 复位释放与消费它的时钟同域，跨域释放会在释放沿上违反建立/保持时间（两个时钟相位关系不固定）
-    private val mainReset = ResetSynchronizer(clock, resetn, resetDepth)
+    private val mainReset = ResetSynchronizer(clock, resetn)
 
     withClockAndReset(clock, mainReset) {
         val controller = Module(new Controller(gateCntWidth, edgeCntWidth, phaseCntWidth))
