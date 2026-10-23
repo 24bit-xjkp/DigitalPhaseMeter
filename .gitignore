@@ -1,5 +1,8 @@
 target
-project
+# project/ 下只入库构建定义（含 sbt 版本文件）；Metals 等工具生成的其余文件继续忽略
+project/*
+!project/*.scala
+!project/build.properties
 build
 .vscode
 .metals
@@ -21,3 +24,4 @@ __pycache__/
 .venv/
 spec/verify_*.json
 spec/ps_selftest
+*.semanticdb

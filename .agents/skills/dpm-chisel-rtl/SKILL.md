@@ -51,18 +51,27 @@ sbtn -batch "runMain DigitalPhaseMeter.EmitController"
   `sbtn -batch "runMain ...EmitA" "runMain ...EmitB"` 只会生成 A（B 那一串变成 A 的参数，
   实测被 `ChiselStage` 忽略、不报错），表现是"以为重新生成了，实际只有第一个模块是新的"。
   批量生成用 shell 循环：`for m in Controller DigitalPhaseMeterTop; do sbtn -batch "runMain DigitalPhaseMeter.Emit$m"; done`。
-- **不要用 `--` 分隔符传递参数**：
+- **`--` 是 JVM 参数与程序参数的分隔符，不会传给程序**：sbt 2 的 `runMain` / `runMainCached` 都用
+  `RunUtil.splitArgs` 把 `--` 之前的部分当 JVM 参数、之后的部分当程序参数，`--` 本身不会进入 `ChiselStage`
+  的参数列表。给生成主类传 `ChiselStage` 参数时直接跟在类名之后，不要用 `--` 做“选项结束”标记。
 
-  ```bash
-  sbtn -batch "runMain DigitalPhaseMeter.EmitController --"   # 错误
-  ```
+### 迭代时用 `runMainCached`
 
-  sbtn 会把字面量 `--` 作为第一个参数传给程序，`emitSystemVerilog` 原样转交给 `ChiselStage` 的参数列表就变成
-  `-- --split-verilog --target-dir build/chisel/Controller`；混入的 `--` 让 `--target-dir` 不再生效，
-  **SV 会被写进进程当前目录（仓库根）而不是 `build/chisel/<Name>/`**，目标目录只剩一个空目录。
-  表现为"生成成功但测试看不到模块""仓库根目录多出一堆 `.sv` 和 `filelist.f`"。生成入口当前没有任何
-  自定义参数，写成 `runMain <主类>` 即可；若确实要传 `ChiselStage` 的参数，直接跟在类名之后。
-  已经产生散落文件时，删掉仓库根下的 `*.sv` / `filelist.f` 后按正确形式重新生成。
+调用形式与 `runMain` 相同，但只在入口点或其传递依赖变化时执行一次：
+
+```bash
+sbtn -batch "runMainCached DigitalPhaseMeter.EmitController"             # 未变化则跳过；强制重跑用 runMain
+```
+
+- **依赖判定取字节码闭包**：从入口主类的 `.class` 出发解析常量池里的类引用，沿项目 class 目录展开，对可达的
+  `.class` 文件求 SHA-256，再叠加依赖 classpath 摘要。判定看编译产物而不是源码文本：不改变字节码的编辑（例如在文件末尾追加注释）不会触发重跑。
+- **缓存按主类隔离**：改 `PhaseMeter` 只会让 `EmitPhaseMeter` / `EmitController` / `EmitDigitalPhaseMeterTop`
+  重跑，与 `EmitSignalInputMux` 等入口点无关。
+- 缓存用 sbt 2 的 ActionCache 落盘，`sbtn` 会话重启后仍有效；`sbtn clean` 不会清掉它。`Emit<Name>` 入口点还会
+  检查约定产物 `build/chisel/<Name>/filelist.f`，缺失时重新生成（避免删掉产物后误跳过）；需要无条件重跑时直接用 `runMain`。
+- 缓存键还包含主类名、程序参数、JVM 参数与 fork 配置，改这些都会触发重跑。
+- 实现见 `project/RunMainCached.scala`（`package sbt` 以复用 sbt 内部 API）。改动摘要或缓存键的构造方式时
+  递增 `CacheFormatVersion`，避免旧缓存条目误命中。
 
 ## 产物目录：每个模块一份
 

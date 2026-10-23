@@ -171,6 +171,14 @@ sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop"          # 顶�
 sbtn -batch "runMain DigitalPhaseMeter.EmitMmcmDrpController"             # 片内源的 DRP 控制器 IP
 ```
 
+迭代时用 `runMainCached` 代替 `runMain`：入口点及其传递依赖（按编译后的字节码依赖闭包判定）没有变化时直接跳过，变化时才执行一次（判定看编译产物，不看源码文本，不改变字节码的编辑不会触发重跑）；缓存按主类隔离，例如改 `PhaseMeter` 只会让依赖它的入口点重跑。
+
+```bash
+sbtn -batch "runMainCached DigitalPhaseMeter.EmitController"              # 未变化则跳过；需要强制重跑时改用 runMain
+```
+
+它使用 sbt 2 的 ActionCache（磁盘缓存，`sbtn` 会话重启后仍有效），实现见 `project/RunMainCached.scala`。缓存还带一层产物检查：`Emit<Name>` 入口点的约定产物 `build/chisel/<Name>/filelist.f` 不在时会重新生成；`sbtn clean` 不会清掉缓存，需要无条件重跑时改用 `runMain`。
+
 每个模块只生成**一份**产物：复位同步由纯 RTL 的 `ResetSynchronizer` 实现，Verilator、xsim 与综合共用同一份 RTL，没有 `--type=sim|syn` 的差别。改完 RTL 要先跑生成入口再跑测试——`xmake test` 与 `sim/run_xsim.sh` 都不会替你生成。生成入口的调用形式与陷阱见 [`.agents/skills/dpm-chisel-rtl`](.agents/skills/dpm-chisel-rtl/SKILL.md)。
 
 模块名可以用 `override def desiredName` 与类名不同（例如 `EdgeDetector` 按边沿类型/同步方式生成 `EdgeDetectorRising` / `EdgeDetectorBoth`）：`build/chisel/<Name>/` 下的文件名与 `filelist.f` 中的模块名以生成结果为准，`xmake`、xsim 与 Vivado 都按 `filelist.f` 取文件，不按目录名推导。

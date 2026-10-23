@@ -16,3 +16,5 @@ lazy val DigitalPhaseMeter = (project in file("."))
         ),
         addCompilerPlugin("org.chipsalliance" % "chisel-plugin" % chiselVersion cross CrossVersion.full)
     )
+    // 入口点缓存：入口点或其传递依赖未变化时跳过执行（实现见 project/RunMainCached.scala）
+    .settings(RunMainCached.settings)
