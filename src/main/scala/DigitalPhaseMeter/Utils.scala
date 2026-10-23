@@ -18,7 +18,11 @@ trait Main extends App {
     ): Unit = {
         val outputDir = Paths.get("build", "chisel", name)
         val chiselArgs = args.toArray.concat(Array("--target-dir", outputDir.toString()))
-        val firtoolOpts = Array("-disable-all-randomization", "-default-layer-specialization=enable")
+        val firtoolOpts = Array(
+            "-disable-all-randomization",
+            "-default-layer-specialization=enable",
+            "--lowering-options=emittedLineLength=120"
+        )
         Files.createDirectories(outputDir)
         ChiselStage.emitSystemVerilogFile(genModule, chiselArgs, firtoolOpts)
     }

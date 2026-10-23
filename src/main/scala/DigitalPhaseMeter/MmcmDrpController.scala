@@ -2,6 +2,26 @@ package DigitalPhaseMeter
 
 import chisel3._
 import chisel3.util._
+import chisel3.util.experimental.InlineInstance
+import chisel3.experimental.prefix
+
+class MmcmDrpControllerBundle extends Bundle {
+    val addrWidth = 32
+    val dataWidth = 32
+    // AXI4-Lite 从口
+    val s_axi_lite = new Axi4LiteSlavePorts(addrWidth, dataWidth)
+    // MMCM 动态重配置口
+    val drp_daddr = Output(UInt(7.W))
+    val drp_di = Output(UInt(16.W))
+    val drp_den = Output(Bool())
+    val drp_dwe = Output(Bool())
+    val drp_dout = Input(UInt(16.W))
+    val drp_drdy = Input(Bool())
+    // MMCM 锁定指示（异步电平）
+    val locked = Input(Bool())
+    // 重配置复位（高有效），接到 MMCM 的 RST：重配置期间必须先把它拉高
+    val mmcm_reset = Output(Bool())
+}
 
 /** MMCM 动态重配置（DRP）控制器
   *
@@ -40,211 +60,165 @@ import chisel3.util._
   * `{CLKFBOUT, CLKFBOUT2, CLKOUT0, CLKOUT0_2, CLKOUT1, CLKOUT1_2, DIVCLK, POWER}` 八笔写，全部完成后回 IDLE。
   *
   * 重配置期间 MMCM 会失锁、输出停止，因此软件必须在测量空闲（`STATUS.busy = 0`）时改。
-  *
-  * 本模块用 `RawModule`：顶层必须显式声明时钟与复位，且 AXI 端口名要满足 Vivado 的接口推断约定（`ipx::infer_bus_interfaces` 按端口名前缀建接口）。
-  *
-  * @param addrWidth
-  *   AXI 地址宽度
-  * @param dataWidth
-  *   AXI 数据宽度，当前只支持 32
-  * @param resetDepth
-  *   复位同步链级数
   */
-class MmcmDrpController(val addrWidth: Int = 32, val dataWidth: Int = 32, val resetDepth: Int = 4) extends RawModule {
-    require(dataWidth == 32, "MmcmDrpController 只支持 32 位数据宽度")
+class MmcmDrpControllerImpl extends Module with InlineInstance {
+    val io = IO(new MmcmDrpControllerBundle)
+    private val addrWidth = io.addrWidth
+    private val dataWidth = io.dataWidth
 
-    // 主时钟：AXI 与 DRP 同域（DRP 的 DCLK 直接用主时钟，不额外消耗时钟资源）
-    val clock = IO(Input(Clock()))
-    // 异步复位输入，低有效
-    val resetn = IO(Input(Bool()))
-    // AXI4-Lite 从口
-    val s_axi_lite = IO(new Axi4LiteSlavePorts(addrWidth, dataWidth))
-    // MMCM 动态重配置口
-    val drp_daddr = IO(Output(UInt(7.W)))
-    val drp_di = IO(Output(UInt(16.W)))
-    val drp_den = IO(Output(Bool()))
-    val drp_dwe = IO(Output(Bool()))
-    val drp_dout = IO(Input(UInt(16.W)))
-    val drp_drdy = IO(Input(Bool()))
-    // MMCM 锁定指示（异步电平）
-    val locked = IO(Input(Bool()))
-    // 重配置复位（高有效），接到 MMCM 的 RST：重配置期间必须先把它拉高
-    val mmcm_reset = IO(Output(Bool()))
+    // ---- 软件可写的 MMCM 寄存器镜像 ----
+    // 复位值取 clk_wiz Write DRP 在同一工作点（50MHz 参考、D=40、相位 0/90°）
+    // 生成的值，保证软件不写任何寄存器时 MMCM 的静态配置与改造前一致。
+    private val clkFbOut = RegInit(0x128a.U(16.W))
+    private val clkFbOut2 = RegInit(0x0000.U(16.W))
+    private val clkOut0 = RegInit(0x1514.U(16.W))
+    private val clkOut0_2 = RegInit(0x0000.U(16.W))
+    private val clkOut1 = RegInit(0x1514.U(16.W))
+    private val clkOut1_2 = RegInit(0x000a.U(16.W))
+    private val divClk = RegInit(0x1041.U(16.W))
+    private val power = RegInit(0xffff.U(16.W))
 
-    // 主时钟域的复位：异步置位、同步释放
-    private val mainReset = ResetSynchronizer(clock, resetn, resetDepth)
+    // locked 是异步电平，先同步到本时钟域
+    private val lockedSync = CdcLevel(io.locked)
 
-    withClockAndReset(clock, mainReset) {
-        // ---- 软件可写的 MMCM 寄存器镜像 ----
-        // 复位值取 clk_wiz Write DRP 在同一工作点（50MHz 参考、D=40、相位 0/90°）
-        // 生成的值，保证软件不写任何寄存器时 MMCM 的静态配置与改造前一致。
-        val cfgClkfbout = RegInit(0x128a.U(16.W))
-        val cfgClkfbout2 = RegInit(0x0000.U(16.W))
-        val cfgClkout0 = RegInit(0x1514.U(16.W))
-        val cfgClkout0_2 = RegInit(0x0000.U(16.W))
-        val cfgClkout1 = RegInit(0x1514.U(16.W))
-        val cfgClkout1_2 = RegInit(0x000a.U(16.W))
-        val cfgDivclk = RegInit(0x1041.U(16.W))
-        val cfgPower = RegInit(0xffff.U(16.W))
+    // ---- AXI4-Lite 从口 ----
+    // 寄存器空间只有 11 个字、读写都一拍完成：就地吸收命令，不给 AXI 挂起。
+    // 地址译码只看页内偏移 addr[11:0]（[11:6] 窗口、[5:2] 寄存器索引、[1:0] 对齐），
+    // 写数据与字节选通只用低 16 位 / 低 2 字节，因此 AXI 从口内部只锁存这些低位，
+    // 其余位零扩展回 32 位 payload。行为与全宽锁存完全一致，只是不再产生
+    // 「未读寄存器位被 trim」的 Synth 8-3936 告警。
+    private val axiLiteSlave = Axi4LiteSlave(addrWidth, dataWidth, addrUsedWidth = 12, dataUsedWidth = 16)
+    axiLiteSlave.wr.ready := true.B
+    axiLiteSlave.rd.ready := true.B
 
-        // locked 是异步电平，先同步到本时钟域
-        val lockedSync = CdcLevel(locked)
+    private val busy = RegInit(false.B)
+    // 软件写 LOAD=1 置起本标志；状态机在 IDLE 看到它就开始重配置并清除。
+    // 用「寄存器」而不是单拍脉冲，避免组合脉冲宽度依赖 AXI 握手时序。
+    private val loadPending = RegInit(false.B)
+    // 调试计数：记录收到多少次写、多少次 LOAD（读寄存器 15 可查看）
 
-        // ---- AXI4-Lite 从口 ----
-        // 寄存器空间只有 11 个字、读写都一拍完成：就地吸收命令，不给 AXI 挂起。
-        // 地址译码只看页内偏移 addr[11:0]（[11:6] 窗口、[5:2] 寄存器索引、[1:0] 对齐），
-        // 写数据与字节选通只用低 16 位 / 低 2 字节，因此 AXI 从口内部只锁存这些低位，
-        // 其余位零扩展回 32 位 payload。行为与全宽锁存完全一致，只是不再产生
-        // 「未读寄存器位被 trim」的 Synth 8-3936 告警。
-        val axiLiteSlave = Axi4LiteSlave(addrWidth, dataWidth, addrUsedWidth = 12, dataUsedWidth = 16)
-        axiLiteSlave.wr.ready := true.B
-        axiLiteSlave.rd.ready := true.B
-
-        val busy = RegInit(false.B)
-        // 软件写 LOAD=1 置起本标志；状态机在 IDLE 看到它就开始重配置并清除。
-        // 用「寄存器」而不是单拍脉冲，避免组合脉冲宽度依赖 AXI 握手时序。
-        val loadPending = RegInit(false.B)
-        // 调试计数：记录收到多少次写、多少次 LOAD（读寄存器 15 可查看）
-
-        // 地址译码：BD 把本 IP 映射到 4KB 段（0x43C1_0000），寄存器索引只用到 [5:2]。
-        //
-        // 关键（上板实测踩到的缺陷）：AXI 互连**不剥离基地址**，slave 看到的是完整 32 位
-        // 地址（PS 写 0x43C1_0008 时 addr = 0x43C1_0008），因此窗口判断只能看**页内偏移**
-        // [11:0]：`addr[11:6]` 必须为 0（寄存器区只有 0x00..0x28）、`addr[1:0]` 必须为 0
-        // （32 位对齐）。高 20 位由 BD 的地址段（M01_AXI → 0x43C1_0000）保证。
-        // 早期版本按「整条地址 < 0x40」判断，xsim/Verilator 里激励给的是裸偏移能过，
-        // 上板时所有 DRP 读写都被当窗口外丢弃 → `SET_SIG` 永远回 ERR_BUSY。
-        def inWindowOf(addr: UInt): Bool = {
-            val rest = Cat(addr(11, 6), addr(1, 0))
-            rest === 0.U
-        }
-        val inWindow = inWindowOf(axiLiteSlave.wr.bits.addr)
-        val inWindowRd = inWindowOf(axiLiteSlave.rd.bits.addr)
-
-        // 写通道：按 `wstrb` 合并字节（保持 AXI 字节选通语义，
-        // 同时让 32 位写数据与 4 位选通全部被真正消费）。
-        // 8 个 MMCM 配置寄存器都只用低 16 位，故只关心 strb 的低 2 位。
-        // 8 个配置寄存器都只用低 16 位，所以按字节选通合并时只需要低 2 个字节：
-        // 写数据的 [15:0] 与 wstrb[1:0] 被完整消费，[31:16] / strb[3:2] 与它们
-        // 对应的高 16 位寄存器位一样在本设计里不使用。
-        def merged(old16: UInt, newIn: UInt): UInt = {
-            val lo = Wire(UInt(8.W))
-            val hi = Wire(UInt(8.W))
-            lo := Mux(axiLiteSlave.wr.bits.strb(0), newIn(7, 0), old16(7, 0))
-            hi := Mux(axiLiteSlave.wr.bits.strb(1), newIn(15, 8), old16(15, 8))
-            Cat(hi, lo)
-        }
-
-        // LOAD 是写 1 触发，不落寄存器；用字节选通合并后的值
-        when(axiLiteSlave.wr.valid && inWindow) {
-            switch(axiLiteSlave.wr.bits.addr(5, 2)) {
-                is(2.U) { cfgClkfbout := merged(cfgClkfbout, axiLiteSlave.wr.bits.data)(15, 0) }
-                is(3.U) {
-                    cfgClkfbout2 := merged(cfgClkfbout2, axiLiteSlave.wr.bits.data)(15, 0)
-                }
-                is(4.U) { cfgClkout0 := merged(cfgClkout0, axiLiteSlave.wr.bits.data)(15, 0) }
-                is(5.U) {
-                    cfgClkout0_2 := merged(cfgClkout0_2, axiLiteSlave.wr.bits.data)(15, 0)
-                }
-                is(6.U) { cfgClkout1 := merged(cfgClkout1, axiLiteSlave.wr.bits.data)(15, 0) }
-                is(7.U) {
-                    cfgClkout1_2 := merged(cfgClkout1_2, axiLiteSlave.wr.bits.data)(15, 0)
-                }
-                is(8.U) { cfgDivclk := merged(cfgDivclk, axiLiteSlave.wr.bits.data)(15, 0) }
-                is(9.U) { cfgPower := merged(cfgPower, axiLiteSlave.wr.bits.data)(15, 0) }
-                is(10.U) { when(axiLiteSlave.wr.bits.data(0)) { loadPending := true.B } }
-            }
-        }
-
-        // drp_dout：本设计不需要读-改-写（软件给的是完整寄存器值），
-        // 但仍把上一次 DRP 访问读回的内容放进 STATUS 的高 16 位作为诊断信息，
-        // 便于上板核对 MMCM 寄存器的实际内容。
-        val drpLastRead = RegNext(drp_dout, 0.U)
-
-        // 读数据：窗口外读回 0。寄存器的数据只用低 16 位，高 16 位恒 0。
-        axiLiteSlave.rdData := Mux(
-            inWindowRd,
-            MuxLookup(axiLiteSlave.rd.bits.addr(5, 2), 0.U)(
-                Seq(
-                    0.U -> 0x44504d03L.U, // "DPM3"
-                    1.U -> Cat(drpLastRead, 13.U(13.W), busy, busy, lockedSync),
-                    2.U -> cfgClkfbout,
-                    3.U -> cfgClkfbout2,
-                    4.U -> cfgClkout0,
-                    5.U -> cfgClkout0_2,
-                    6.U -> cfgClkout1,
-                    7.U -> cfgClkout1_2,
-                    8.U -> cfgDivclk,
-                    9.U -> cfgPower
-                )
-            ),
-            0.U
-        )
-
-        // ---- DRP 状态机：先按住 MMCM 复位，再顺序发送 8 笔写，最后放开复位 ----
-        //
-        // 为什么必须先拉高 MMCM 的 RST（上板实测 + unisim 行为模型的双重依据）：
-        //   * MMCM 的 DRP 写要求器件处于复位状态（unisim 模型在 RST 为低时直接报
-        //     `Error: RST need to be high when changing parameters through DRP`，
-        //     且把 @(negedge RST) 当作「新配置生效」的时刻）；
-        //   * 上板实测：不拉 RST 时**分频字立即生效、相位字不生效**（写相位字段后输出
-        //     相位纹丝不动），因为相位延迟单元只在复位/重新锁定时重新初始化。
-        // 因此重配置的完整时序是：RST=1 → 8 笔 DRP 写 → RST=0 → MMCM 重新锁定。
-        val sIdle :: sResetHold :: sWrite :: sWait :: sRelease :: sDone :: Nil = Enum(6)
-        val state = RegInit(sIdle)
-        val idx = RegInit(0.U(3.W))
-        val holdCnt = RegInit(0.U(4.W))
-
-        val daddrTable = VecInit(
-            Seq(0x14.U, 0x15.U, 0x08.U, 0x09.U, 0x0a.U, 0x0b.U, 0x16.U, 0x28.U)
-        )
-        val diTable = VecInit(
-            Seq(cfgClkfbout, cfgClkfbout2, cfgClkout0, cfgClkout0_2, cfgClkout1, cfgClkout1_2, cfgDivclk, cfgPower)
-        )
-
-        drp_daddr := daddrTable(idx)
-        drp_di := diTable(idx)
-        // DEN 与 DWE 都只在 sWrite 那一拍拉高：
-        //  * MMCM 要求 DEN 只拉高**一个** DCLK 周期（DADDR/DI/DWE 此时有效）；
-        //  * 厂商 unisim 模型对「DWE 连续多个 DCLK 拉高」直接报 DRC Error 并结束仿真。
-        drp_den := state === sWrite
-        drp_dwe := state === sWrite
-        // 复位在「按住 + 8 笔写 + 等 DRDY」期间保持拉高，写完放开
-        mmcm_reset := (state === sResetHold) || (state === sWrite) || (state === sWait)
-
-        when(state === sIdle) {
-            busy := false.B
-            holdCnt := 0.U
-            when(loadPending) {
-                loadPending := false.B
-                idx := 0.U
-                busy := true.B
-                state := sResetHold
-            }
-        }.elsewhen(state === sResetHold) {
-            // 复位至少要按住几拍（MMCM 数据手册要求 RST 有效宽度；这里取 8 个 DCLK）
-            holdCnt := holdCnt + 1.U
-            when(holdCnt === 7.U) { state := sWrite }
-        }.elsewhen(state === sWrite) {
-            state := sWait
-        }.elsewhen(state === sWait) {
-            when(drp_drdy) {
-                when(idx === 7.U) { state := sRelease }.otherwise {
-                    idx := idx + 1.U
-                    state := sWrite
-                }
-            }
-        }.elsewhen(state === sRelease) {
-            // 放开复位后 MMCM 重新锁定（locked 先掉后起），软件轮询 locked 判断完成
-            holdCnt := holdCnt + 1.U
-            when(holdCnt === 7.U) { state := sDone }
-        }.otherwise { // sDone
-            state := sIdle
-        }
-
-        // AXI 从口：本模块顶层端口与 Axi4LiteSlave 的方向约定一致，直接整体连接
-        s_axi_lite :<>= axiLiteSlave.axi
+    // 地址译码：BD 把本 IP 映射到 4KB 段（0x43C1_0000）
+    // `addr[11:6]` 必须为 0（寄存器区只有 0x00..0x28）、`addr[1:0]` 必须为 0（32 位对齐）。
+    // 高 20 位由 BD 的地址段（M01_AXI → 0x43C1_0000）保证。
+    private object RegIndex extends ChiselEnum {
+        val iVersion, iStatus, iClkFbOut, iClkFbOut2, iClkOut0, iClkOut0_2, iClkOut1, iClkOut1_2, iDivClk, iPower,
+            iLoadPending = Value
     }
+    private val indexWidth = RegIndex.getWidth
+    import RegIndex._
+    def inWindowOf(addr: UInt): Bool = {
+        val rest = Cat(addr.tail(20) >> indexWidth + 2, addr.take(2))
+        rest === 0.U
+    }
+    private val inWindow = inWindowOf(axiLiteSlave.wr.bits.addr)
+    private val inWindowRd = inWindowOf(axiLiteSlave.rd.bits.addr)
+
+    // LOAD 是写 1 触发，不落寄存器；用字节选通合并后的值
+    prefix("wrImpl") {
+        when(axiLiteSlave.wr.fire && inWindow) {
+            import axiLiteSlave.wr.bits._
+            switch(addr(indexWidth + 1, 2)) {
+                is(iClkFbOut.asUInt) { clkFbOut := ByteStrobe.merge(clkFbOut, data, strb) }
+                is(iClkFbOut2.asUInt) { clkFbOut2 := ByteStrobe.merge(clkFbOut2, data, strb) }
+                is(iClkOut0.asUInt) { clkOut0 := ByteStrobe.merge(clkOut0, data, strb) }
+                is(iClkOut0_2.asUInt) { clkOut0_2 := ByteStrobe.merge(clkOut0_2, data, strb) }
+                is(iClkOut1.asUInt) { clkOut1 := ByteStrobe.merge(clkOut1, data, strb) }
+                is(iClkOut1_2.asUInt) { clkOut1_2 := ByteStrobe.merge(clkOut1_2, data, strb) }
+                is(iDivClk.asUInt) { divClk := ByteStrobe.merge(divClk, data, strb) }
+                is(iPower.asUInt) { power := ByteStrobe.merge(power, data, strb) }
+                is(iLoadPending.asUInt) { when(data(0)) { loadPending := true.B } }
+            }
+        }
+    }
+
+    // drp_dout：本设计不需要读-改-写（软件给的是完整寄存器值），
+    // 但仍把上一次 DRP 访问读回的内容放进 STATUS 的高 16 位作为诊断信息，
+    // 便于上板核对 MMCM 寄存器的实际内容。
+    private val drpLastRead = RegNext(io.drp_dout, 0.U)
+
+    // 读数据：窗口外读回 0。寄存器的数据只用低 16 位，高 16 位恒 0。
+    private val versionValue = Cat("DPM".map(_.U(8.W)) :+ 3.U(8.W))
+    private val statusValue = Cat(drpLastRead, 13.U(13.W), busy, busy, lockedSync)
+    private val indexMap = Seq(
+        iVersion -> versionValue,
+        iStatus -> statusValue,
+        iClkFbOut -> clkFbOut,
+        iClkFbOut2 -> clkFbOut2,
+        iClkOut0 -> clkOut0,
+        iClkOut0_2 -> clkOut0_2,
+        iClkOut1 -> clkOut1,
+        iClkOut1_2 -> clkOut1_2,
+        iDivClk -> divClk,
+        iPower -> power
+    )
+    axiLiteSlave.rdData := Mux(
+        inWindowRd,
+        MuxLookup(axiLiteSlave.rd.bits.addr(indexWidth + 1, 2), 0.U)(indexMap.map { case (i, v) => (i.asUInt, v) }),
+        0.U
+    )
+
+    // ---- DRP 状态机：先按住 MMCM 复位，再顺序发送 8 笔写，最后放开复位 ----
+    //
+    // 为什么必须先拉高 MMCM 的 RST（上板实测 + unisim 行为模型的双重依据）：
+    //   * MMCM 的 DRP 写要求器件处于复位状态（unisim 模型在 RST 为低时直接报
+    //     `Error: RST need to be high when changing parameters through DRP`，
+    //     且把 @(negedge RST) 当作「新配置生效」的时刻）；
+    //   * 上板实测：不拉 RST 时**分频字立即生效、相位字不生效**（写相位字段后输出
+    //     相位纹丝不动），因为相位延迟单元只在复位/重新锁定时重新初始化。
+    // 因此重配置的完整时序是：RST=1 → 8 笔 DRP 写 → RST=0 → MMCM 重新锁定。
+    private object StateEnum extends ChiselEnum { val sIdle, sResetHold, sWrite, sWait, sRelease = Value }
+    import StateEnum._
+    private val state = RegInit(sIdle)
+    private val isIdle = state === sIdle
+    private val idxCntEnable = state === sWait && io.drp_drdy
+    private val holdCntEnable = state.isOneOf(sResetHold, sRelease)
+    private val (idx, idxTrigger) = Counter(0 until 8, idxCntEnable, isIdle)
+    private val (holdCnt, holdCntTrigger) = Counter(0 until 8, holdCntEnable, isIdle)
+
+    private val daddrTable = VecInit(0x14.U, 0x15.U, 0x08.U, 0x09.U, 0x0a.U, 0x0b.U, 0x16.U, 0x28.U)
+    private val diTable = VecInit(indexMap.drop(2).map { case (_, v) => v })
+
+    io.drp_daddr := daddrTable(idx)
+    io.drp_di := diTable(idx)
+    // DEN 与 DWE 都只在 sWrite 那一拍拉高：
+    //  * MMCM 要求 DEN 只拉高**一个** DCLK 周期（DADDR/DI/DWE 此时有效）；
+    //  * 厂商 unisim 模型对「DWE 连续多个 DCLK 拉高」直接报 DRC Error 并结束仿真。
+    private val isWrite = state === sWrite
+    io.drp_den := isWrite
+    io.drp_dwe := isWrite
+    // 复位在「按住 + 8 笔写 + 等 DRDY」期间保持拉高，写完放开
+    io.mmcm_reset := state.isOneOf(sResetHold, sWrite, sWait)
+
+    prefix("fsm") {
+        switch(state) {
+            is(sIdle) {
+                busy := false.B
+                holdCnt := 0.U
+                when(loadPending) {
+                    loadPending := false.B
+                    busy := true.B
+                    state := sResetHold
+                }
+            }
+            // 复位至少要按住几拍（MMCM 数据手册要求 RST 有效宽度；这里取 8 个 CLK）
+            is(sResetHold) { when(holdCntTrigger) { state := sWrite } }
+            is(sWrite) { state := sWait }
+            is(sWait) { when(io.drp_drdy) { state := Mux(idxTrigger, sRelease, sWrite) } }
+            is(sRelease) { when(holdCntTrigger) { state := sIdle } }
+        }
+    }
+
+    // AXI 从口：本模块顶层端口与 Axi4LiteSlave 的方向约定一致，直接整体连接
+    io.s_axi_lite :<>= axiLiteSlave.axi
+}
+
+class MmcmDrpController extends RawModule {
+    val clock = IO(Input(Clock()))
+    val resetn = IO(Input(Bool()))
+    val io = FlatIO(new MmcmDrpControllerBundle)
+    private val mainReset = ResetSynchronizer(clock, resetn)
+    private val impl = withClockAndReset(clock, mainReset) { Module(new MmcmDrpControllerImpl) }
+    io :<>= impl.io
 }
 
 object EmitMmcmDrpController extends Main { emitSystemVerilog(new MmcmDrpController) }

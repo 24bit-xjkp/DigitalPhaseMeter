@@ -5,16 +5,7 @@ import chisel3.util._
 
 /** AXI 响应编码
   */
-object AxiResp {
-    // 正常访问成功
-    val okay = 0.U(2.W)
-    // 独占访问成功
-    val exOkay = 1.U(2.W)
-    // 从设备错误
-    val slvErr = 2.U(2.W)
-    // 解码错误
-    val decErr = 3.U(2.W)
-}
+object AxiResp extends ChiselEnum { val okay, exOkay, slvErr, decErr = Value }
 
 /** AXI4-Lite 从口信号
   *
@@ -26,7 +17,7 @@ object AxiResp {
   *   数据宽度，必须为 8 的整数倍
   */
 class Axi4LiteSlavePorts(val addrWidth: Int = 32, val dataWidth: Int = 32) extends Bundle {
-    assert(dataWidth % 8 == 0)
+    require(dataWidth % 8 == 0)
     // 写地址通道
     val awaddr = Input(UInt(addrWidth.W))
     val awprot = Input(UInt(3.W))
@@ -71,7 +62,7 @@ object ByteStrobe {
       *   合并结果，宽度与 `old` 相同
       */
     def merge(old: UInt, data: UInt, strb: UInt): UInt = {
-        assert(old.getWidth % 8 == 0)
+        require(old.getWidth % 8 == 0)
         val bytes = (0 until old.getWidth / 8).map(i => Mux(strb(i), data, old)(8 * i + 7, 8 * i))
         Cat(bytes.reverse)
     }
@@ -87,7 +78,7 @@ object ByteStrobe {
   *   数据宽度
   */
 class AxiLiteWritePayload(val addrWidth: Int = 32, val dataWidth: Int = 32) extends Bundle {
-    assert(dataWidth % 8 == 0)
+    require(dataWidth % 8 == 0)
     val addr = UInt(addrWidth.W)
     val data = UInt(dataWidth.W)
     val strb = UInt((dataWidth / 8).W)

@@ -10,8 +10,8 @@ import chisel3.util._
 object CdcToggleHandShake {
     def receive(sig: Bool): Bool = { EdgeDetector(sig, EdgeType.both) }
 
-    class Sender {
-        private val sig = RegInit(false.B)
+    class Sender(name: String) {
+        private val sig = RegInit(false.B).suggestName(name)
         def send = sig := !sig
     }
     object Sender {
@@ -20,7 +20,7 @@ object CdcToggleHandShake {
     }
 
     def send(sig: Bool) = {
-        val toggleHandShaker = new Sender
+        val toggleHandShaker = new Sender(s"${sig.name}HandShaker")
         sig := toggleHandShaker
         toggleHandShaker
     }

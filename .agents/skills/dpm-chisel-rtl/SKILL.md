@@ -26,9 +26,16 @@ object EmitFoo extends Main {
 
 - `Main`（定义在 `Utils.scala`）提供 `emitSystemVerilog`：创建输出目录、调用 `ChiselStage.emitSystemVerilogFile`；程序收到的参数原样转交给 `ChiselStage`（不再有 `--type` 之类被 `Main` 摘掉的选项，见下文）。
 - 输出目录为 `build/chisel/<Name>/`（**每个模块只有一份产物**），`<Name>` 由主类名剥离 `Emit` 前缀得到（`EmitFoo` → `Foo`）。需要与类名不同的目录名时显式传第二个参数。
-- 传给 firtool 的固定选项是 `-disable-all-randomization` 与 `-default-layer-specialization=enable`；`--split-verilog` 与 `--target-dir` 由 `emitSystemVerilog` 自动追加。
-- 参数合法性用 `assert` 校验（如 `assert(n >= 2 && n <= 10)`），与既有模块保持一致。
+- 传给 firtool 的固定选项是 `-disable-all-randomization`、`-default-layer-specialization=enable` 与
+  `--lowering-options=emittedLineLength=120,locationInfoStyle=wrapInAtSquareBracket`；`--split-verilog`
+  与 `--target-dir` 由 `emitSystemVerilog` 自动追加。两个 lowering 选项只改输出格式（位置注释从
+  `// src/...` 变成 `// @[src/...]`、单行代码上限放宽到 120 字符），不改变逻辑，也不是改善标识符
+  可读性的手段——要改善生成物的可读性，得从命名与层次入手。
+- 参数合法性用 `require` 校验（elaboration 期，如 `require(n >= 2)`、`require(dataWidth % 8 == 0)`）；
+  不要用 `assert`（那是硬件断言：常量条件会被优化掉，检查时机也不同）。现有模块统一用 `require`，
+  例如 `DspCounter` 的位宽上限、`ResetSynchronizer` 的级数下限。
 - `build/chisel/` 是构建产物，**不入库**（`.gitignore` 已覆盖 `build`）。改 RTL 只能改 `.scala` 后重新生成，不要手工编辑生成的 `.sv`。
+- 跨模块共享的 FSM 枚举声明在模块外的顶层 `object`（如 `PhaseMeterStateEnum` 定义在 `PhaseMeter.scala`，被 `PhaseMeter` 与 `Controller` 共用）。改动枚举值/顺序会同时影响两个状态机，新增状态时确认两边的 `switch` 都覆盖到。
 
 ## 生成入口
 
@@ -80,6 +87,18 @@ Verilator 与 xsim / Vivado 都能直接编译。
 - 不要手工维护源文件列表，也不要依赖目录 glob（源文件顺序由 firtool 决定）。
 - 新模块没有出现在 `filelist.f` 中，说明生成没有跑到，或产物目录不对（见上一节的 `--` 陷阱）。
 - 文件顺序即 firtool 的拓扑顺序，`filelist.f` 就是权威列表。
+- **生成目录名、filelist 中的文件名与模块名不一定相同**：模块可用 `override def desiredName` 改名，
+  例如 `EdgeDetector` 按配置生成 `EdgeDetectorRisingA`/`EdgeDetectorBothA`——`filelist.f` 里列的是
+  后者，而目录仍叫 `build/chisel/EdgeDetector/`。消费方一律按 `filelist.f` 取文件与模块，不要按目录名
+  推导；新增消费方时同样只认 `filelist.f`。
+- **内层包装只影响内部名，不改变顶层端口名**：`MmcmDrpController` 用外层 `RawModule` +
+  内层 `MmcmDrpControllerImpl extends Module with InlineInstance`（配 `FlatIO`）压平层次，端口仍是
+  `clock`/`resetn`/`s_axi_lite_*`/`drp_*`/`mmcm_reset`；但内部寄存器带内层实例名前缀
+  （`impl_state`、`impl_clkFbOut`），子模块连线会出现 `_impl_axiLiteSlave__io_*` 这类双下划线。
+  写断言或看波形时按这些前缀找。
+- `Axi4LiteSlave.apply` / `PhaseMeter.apply` 里的 `.suggestName("")` 只是去掉「实例名 + 模块名」的
+  重复前缀（生成实例 `axiLiteSlave_`/`phaseMeter_`，内部线名 `_axiLiteSlave__io_*`/`_phaseMeter__io_*`），
+  不影响连接与端口名。
 - 目录里可能残留上一次生成、这次已被删除（或改名）的模块 `.sv`：消费方都按 `filelist.f` 取文件，
   残留文件不参与编译，但排查"读到了旧模块"时先清掉整个 `build/chisel/` 再重新生成最省事。
 
@@ -163,7 +182,8 @@ Verilator 与 xsim / Vivado 都能直接编译。
   （写 `(mode === 1.U) -> addr` 而不是 `mode -> addr`）。
 - **高速域（当前 450MHz）只放「边沿检测 + 计数器/比较器 + 二级 FSM」**：频率/相位全部交给 MMCM，
   高速域不要放配置运算或分频逻辑。450MHz 下测量域自身最差 setup 路径余量 **+0.541ns**
-  （`stateReg[0] → sig_reg`）；**整体 WNS 受 clk_wiz Safe Clock Startup 内部路径限制（+0.271ns）**，
+  （2026-10-19 签核的生成物里是 `stateReg[0] → sig_reg`；重构后对应信号为 `state[0] → validHandShaker`，
+  这一版尚未重新综合签核）；**整体 WNS 受 clk_wiz Safe Clock Startup 内部路径限制（+0.271ns）**，
   不要拿整体 WNS 判断测量逻辑还剩多少优化空间。
 - **450MHz 的 32 位计数器用 DSP48E1，不要用 fabric 进位链**：fabric 32 位计数器（8 个 CARRY4 串联）
   与「16 位低段 + 16 位高段」的分段计数器在该器件上都收敛不到正余量，固定开销在
@@ -216,18 +236,25 @@ Verilator 与 xsim / Vivado 都能直接编译。
   把 `dspReset` 也接到 `clock` 域的同步器上（照抄上一行），生成 RTL 表面完全正常，实际是跨域释放。
   DSP 域复位**由谁产生**还会影响 `dspClock` 域复位分配网络的布局与余量；当前 450MHz 设计把链的
   异步端接在 `mainReset` 上。2026-10-19 轮次测量域最差 setup 路径是 `stateReg[0] → sig_reg`
-  （+0.541ns），整体 WNS 由 clk_wiz Safe Clock Startup 内部路径决定（+0.271ns）。
+  （+0.541ns；重构后对应信号为 `state[0] → validHandShaker`，尚未重新签核），整体 WNS 由
+  clk_wiz Safe Clock Startup 内部路径决定（+0.271ns）。
 - `ResetSynchronizer` 是 `RawModule`，自己显式声明 `clock` / `resetn` / `reset`；复位链直接复用
   `MyShiftRegister(false.B, n, true.B)`（`ShiftRegister.scala`），并且例化在
   `withClockAndReset(clock, (!resetn).asAsyncReset)` 里，因此链上寄存器是**异步复位**的：置位立即生效，
   释放与传入的时钟对齐（n 级）。消费端把它当普通 `Bool` 同步复位用即可，不需要 `AsyncReset` 类型。
-- **同步链的寄存器要带 `ASYNC_REG`**：`MyShiftRegisters` 构造时就
-  `addAttribute(pipeline, """ASYNC_REG = "TRUE"""")`，生成的 SV 是每个 `pipeline_i` 前的
-  `(* ASYNC_REG = "TRUE" *)`；复位同步链与 `EdgeDetector` 的采样链都复用它，不要在别处另写裸移位链。
-  这个属性只在**综合/实现期**起作用（工具据此把链上触发器放近、按异步输入处理），Verilator 与 xsim
+- **同步链的寄存器要带 `ASYNC_REG`**：`MyShiftRegisters`/`MyShiftRegister`（`ShiftRegister.scala`）
+  现在**不生成子模块**：它返回一个打包的 `UInt` 寄存器（`RegInit(Fill(n, init))`），按
+  `pipeline := Cat(pipeline.take(n - 1), in)` 移位，`addAttribute` 加在这一个向量寄存器上——生成 SV
+  是**一条** `(* ASYNC_REG = "TRUE" *) reg [n-1:0] ...`（父版本是逐位 `pipeline_i` 各一条）。
+  `asBools` 返回**从最低位到最高位**：bit0 是最新采样、最高位最旧；`EdgeDetector` 用
+  `pipeline(n-1)`/`pipeline(n-2)` 取最旧的两级。复位同步链、`EdgeDetector` 采样链与 `CdcLevel` 都
+  复用它，不要在别处另写裸移位链。
+  该属性只在**综合/实现期**起作用（工具据此把链上触发器放近、按异步输入处理），Verilator 与 xsim
   完全看不见——所以"属性还在不在"只能靠生成后 grep 生成的 SV，或综合后查
-  `get_property ASYNC_REG [get_cells -hier -filter {ASYNC_REG == 1}]`（本项目实测：OOC 综合后 4 个
-  链触发器都是 `ASYNC_REG=1`）。行为本身由 `test/ResetSynchronizer.cpp` 覆盖（异步置位 + 恰好 n 拍释放）。
+  `get_property ASYNC_REG [get_cells -hier -filter {ASYNC_REG == 1}]`。父版本的逐位写法曾实测 OOC
+  综合后 4 个链触发器都是 `ASYNC_REG=1`；当前向量写法是 Xilinx 常见写法，但改成向量后尚未做过
+  综合后复核，交付签核时要确认**每一位**链触发器都是 1。行为本身由 `test/ResetSynchronizer.cpp`
+  覆盖（异步置位 + 恰好 n 拍释放）。
 - 跨域的控制信号沿用现有的握手约定（`Controller` 用 `request` / `response` 的 valid-ready 加 `EdgeDetector` 做脉冲展宽），不要新增裸的跨域电平信号。
 - **软件写的配置位不要跨域**：`SIG_CTRL` 的使能/选择位与「输入门控 + 二选一」都放在主时钟域
   （和写它的寄存器堆同域，见 `SignalInputMux`），因此写寄存器与切换同拍生效，不需要任何跨域通路。

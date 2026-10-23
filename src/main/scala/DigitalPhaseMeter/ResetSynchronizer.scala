@@ -9,7 +9,7 @@ import chisel3.util._
   *   同步释放的延迟级数
   */
 class ResetSynchronizer(val n: Int = 4) extends RawModule {
-    assert(n >= 2)
+    require(n >= 2)
     val clock = IO(Input(Clock()))
     // 异步复位输入，低有效
     val resetn = IO(Input(Bool()))

@@ -59,7 +59,7 @@ class ControllerOutPayload(
   *   相位计数器宽度
   */
 class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extends Module {
-    assert(gateCntWidth <= 30)
+    require(gateCntWidth <= 30)
     val dspClock = IO(Input(Clock()))
     val io = IO(new Bundle {
         // 被测信号：由上级在本域完成外部输入/片内源的使能门控与二选一后送来（对外部与 MMCM 源都是异步信号）
@@ -89,36 +89,35 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
     private val (gateCnt, _) = Counter(0 to (1 << gateCntWidth) - 1, true.B, gateCntClear)
     private val targetGate = RegInit(0.U(gateCntWidth.W))
 
-    private object StateEnum extends ChiselEnum { val idle, waitStart, measuring, waitStop = Value }
-    import StateEnum._
-    private val stateReg = RegInit(idle)
+    import PhaseMeterStateEnum._
+    private val state = RegInit(sIdle)
     prefix("fsm") {
-        switch(stateReg) {
-            is(idle) {
+        switch(state) {
+            is(sIdle) {
                 gateCntClear := true.B
                 outValid := false.B
                 when(io.in.valid) {
-                    stateReg := waitStart
+                    state := sWaitStart
                     targetGate := io.in.bits.targetGate
                     request.send
                 }
             }
-            is(waitStart) {
+            is(sWaitStart) {
                 when(responseValid) {
-                    stateReg := measuring
+                    state := sMeasuring
                     gateCntClear := false.B
                     responseReady.send
                 }
             }
-            is(measuring) {
+            is(sMeasuring) {
                 when(gateCnt === targetGate) {
-                    stateReg := waitStop
+                    state := sWaitStop
                     request.send
                 }
             }
-            is(waitStop) {
+            is(sWaitStop) {
                 when(responseValid) {
-                    stateReg := idle
+                    state := sIdle
                     payload.waiveAllAs[PhaseMeterResponsePayload] :<= phaseMeter.response.bits
                     payload.gateCnt := gateCnt
                     outValid := true.B

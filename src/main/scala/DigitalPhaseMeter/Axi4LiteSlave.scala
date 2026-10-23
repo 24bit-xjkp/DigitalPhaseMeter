@@ -31,7 +31,7 @@ class Axi4LiteSlave(
     addrUsedWidth: Int = 0,
     dataUsedWidth: Int = 0
 ) extends Module {
-    assert(dataWidth % 8 == 0)
+    require(dataWidth % 8 == 0)
     // 0 是「用满全宽」的简写（Scala 2 的默认参数不能引用前面的构造参数，因此这里用 0 做哨兵值）
     require(addrUsedWidth >= 0 && addrUsedWidth <= addrWidth, "addrUsedWidth 必须为 0（全宽）或 1..addrWidth")
     require(dataUsedWidth >= 0 && dataUsedWidth <= dataWidth, "dataUsedWidth 必须为 0（全宽）或 1..dataWidth")
@@ -67,7 +67,7 @@ class Axi4LiteSlave(
     io.axi.awready := !awHeld && !bValid && !reset.asBool
     io.axi.wready := !wHeld && !bValid && !reset.asBool
     io.axi.bvalid := bValid
-    io.axi.bresp := AxiResp.okay
+    io.axi.bresp := AxiResp.okay.asUInt
 
     when(io.axi.awready && io.axi.awvalid) {
         awAddr := io.axi.awaddr.take(usedAddrWidth)
@@ -103,7 +103,7 @@ class Axi4LiteSlave(
     io.rd.bits.addr := io.axi.araddr.take(usedAddrWidth).pad(addrWidth)
     io.axi.rvalid := rValid
     io.axi.rdata := rData
-    io.axi.rresp := AxiResp.okay
+    io.axi.rresp := AxiResp.okay.asUInt
 
     // 先默认撤销数据有效，同一拍接收新读地址时再置位（后写优先）
     when(io.axi.rvalid && io.axi.rready) { rValid := false.B }
@@ -120,7 +120,7 @@ object Axi4LiteSlave {
         addrUsedWidth: Int = 0,
         dataUsedWidth: Int = 0
     ) = {
-        val axiLiteSlave = Module(new Axi4LiteSlave(addrWidth, dataWidth, addrUsedWidth, dataUsedWidth))
+        val axiLiteSlave = Module(new Axi4LiteSlave(addrWidth, dataWidth, addrUsedWidth, dataUsedWidth)).suggestName("")
         axiLiteSlave.io
     }
 }

@@ -311,6 +311,10 @@ PL 侧的 `dpm_src_drp` 因此在收到 `LOAD` 后按下面的顺序自己完成
 4. 软件轮询 DRP 段 `STATUS`（偏移 `0x04`）的 **bit0 = locked**（或 DPM 的
    `SIG_STATUS.srcLocked`）确认完成。
 
+> 注意：DRP 段 `STATUS` 的 bit1/bit2 只是「重配置进行中」的指示；`LOAD` 后状态机在放开 `RST`、
+> 回到 IDLE 后就会撤销 busy，**远早于 MMCM 重新锁定**。判断完成必须轮询 bit0 `locked`
+> （或 `SIG_STATUS.srcLocked`），不能等 busy 撤销。
+
 > **实测结论**：不拉这个复位时，**分频字立即生效、相位字不生效**（写相位寄存器后输出相位
 > 纹丝不动）；unisim 行为模型与上板都复现了这一行为，因此控制器必须按上面的时序执行。
 

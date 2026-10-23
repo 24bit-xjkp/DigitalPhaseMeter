@@ -2,6 +2,7 @@ package DigitalPhaseMeter
 
 import chisel3._
 import chisel3.util._
+import chisel3.experimental.prefix
 
 /** 控制/状态与测量结果寄存器堆
   *
@@ -60,7 +61,7 @@ class ControlRegs(
     val edgeCntWidth: Int = 32,
     val phaseCntWidth: Int = 32
 ) extends Module {
-    assert(dataWidth == 32, "寄存器堆当前只支持 32 位数据宽度")
+    require(dataWidth == 32, "寄存器堆当前只支持 32 位数据宽度")
     // 每条测量结果占用的字数
     val recordWords = 4
     // 结果寄存器只能保留最新一条
@@ -68,13 +69,14 @@ class ControlRegs(
 
     /** 寄存器索引
       *
-      * 声明顺序即寄存器索引（写译码与读 mux 都用 `.id`），不要插入或改变顺序。
+      * 声明顺序即寄存器索引（写译码与读 mux 都用 `.asUInt`），不要插入或改变顺序。
       */
-    private object RegIndex extends Enumeration {
-        val ctrl, status, gateTarget, resultGate, resultEdge, resultPhase, resultSeq, lostCnt, irqStatus, version, caps,
-            sigCtrl, sigStatus = Value
+    private object RegIndex extends ChiselEnum {
+        val iCtrl, iStatus, iGateTarget, iResultGate, iResultEdge, iResultPhase, iResultSeq, iLostCnt, iIrqStatus,
+            iVersion, iCaps, iSigCtrl, iSigStatus = Value
     }
-    private val indexWidth = log2Ceil(RegIndex.values.size)
+    import RegIndex._
+    private val indexWidth = RegIndex.getWidth
     // 版本号："DPM2"，末尾 02 表示数据经寄存器（GPIO 式）传递
     private val versionValue = Cat("DPM".map(_.U(8.W)) :+ 2.U(8.W))
     // 能力寄存器：每条结果 4 个字、结果深度 1 条、数据通道为寄存器（而非 BRAM 突发口）、
@@ -127,29 +129,31 @@ class ControlRegs(
     private val clearPulse = WireDefault(false.B)
     // 写通道不挂起任何命令：配置与输入选择同在本域生效，不需要等跨时钟域送达
     io.wr.ready := true.B
-    when(io.wr.fire) {
-        switch(io.wr.bits.addr(indexWidth + 1, 2)) {
-            is(RegIndex.ctrl.id.U) {
-                when(io.wr.bits.strb(0)) {
-                    irqEnable := io.wr.bits.data(1)
-                    when(io.wr.bits.data(0)) { startPulse := true.B }
-                    when(io.wr.bits.data(2)) { clearPulse := true.B }
+    prefix("wrImpl") {
+        when(io.wr.fire) {
+            switch(io.wr.bits.addr(indexWidth + 1, 2)) {
+                is(iCtrl.asUInt) {
+                    when(io.wr.bits.strb(0)) {
+                        irqEnable := io.wr.bits.data(1)
+                        when(io.wr.bits.data(0)) { startPulse := true.B }
+                        when(io.wr.bits.data(2)) { clearPulse := true.B }
+                    }
                 }
-            }
-            is(RegIndex.gateTarget.id.U) {
-                targetGate := ByteStrobe.merge(targetGate, io.wr.bits.data, io.wr.bits.strb)
-            }
-            is(RegIndex.irqStatus.id.U) {
-                when(io.wr.bits.strb(0)) {
-                    when(io.wr.bits.data(0)) { irqPending := false.B }
-                    when(io.wr.bits.data(1)) { resultValid := false.B }
-                    when(io.wr.bits.data(2)) { lostCnt := 0.U }
+                is(iGateTarget.asUInt) {
+                    targetGate := ByteStrobe.merge(targetGate, io.wr.bits.data, io.wr.bits.strb)
                 }
-            }
-            is(RegIndex.sigCtrl.id.U) {
-                when(io.wr.bits.strb(0)) {
-                    sigEnable := io.wr.bits.data(0)
-                    srcSelect := io.wr.bits.data(1)
+                is(iIrqStatus.asUInt) {
+                    when(io.wr.bits.strb(0)) {
+                        when(io.wr.bits.data(0)) { irqPending := false.B }
+                        when(io.wr.bits.data(1)) { resultValid := false.B }
+                        when(io.wr.bits.data(2)) { lostCnt := 0.U }
+                    }
+                }
+                is(iSigCtrl.asUInt) {
+                    when(io.wr.bits.strb(0)) {
+                        sigEnable := io.wr.bits.data(0)
+                        srcSelect := io.wr.bits.data(1)
+                    }
                 }
             }
         }
@@ -196,23 +200,24 @@ class ControlRegs(
     // 选择外部输入时一定有信号可用（是否有边沿由外部决定）；选择片内源时要求使能有效且 MMCM 已锁定，
     // 否则两路输出恒低，测量 FSM 会一直等不到参考沿
     private val sourceReady = !srcSelect || (sigEnable && srcLocked)
+    private val lostFlag = lostCnt =/= 0.U
     io.rd.ready := true.B
     io.rdData := MuxLookup(io.rd.bits.addr(indexWidth + 1, 2), 0.U)(
         Seq(
-            RegIndex.ctrl -> Cat(irqEnable, 0.U(1.W)).pad(dataWidth),
-            RegIndex.status -> Cat(irqPending, lostCnt =/= 0.U, resultValid, busy).pad(dataWidth),
-            RegIndex.gateTarget -> targetGate.pad(dataWidth),
-            RegIndex.resultGate -> result.gateCnt,
-            RegIndex.resultEdge -> result.edgeCnt,
-            RegIndex.resultPhase -> result.phaseCnt,
-            RegIndex.resultSeq -> result.seqCnt,
-            RegIndex.lostCnt -> lostCnt,
-            RegIndex.irqStatus -> Cat(lostCnt =/= 0.U, resultValid, irqPending).pad(dataWidth),
-            RegIndex.version -> versionValue,
-            RegIndex.caps -> capsValue,
-            RegIndex.sigCtrl -> Cat(srcSelect, sigEnable).pad(dataWidth),
-            RegIndex.sigStatus -> Cat(sourceReady, srcLocked, srcSelect, sigEnable).pad(dataWidth)
-        ).map(t => (t._1.id.U, t._2))
+            iCtrl -> Cat(irqEnable, 0.U(1.W)).pad(dataWidth),
+            iStatus -> Cat(irqPending, lostFlag, resultValid, busy).pad(dataWidth),
+            iGateTarget -> targetGate.pad(dataWidth),
+            iResultGate -> result.gateCnt,
+            iResultEdge -> result.edgeCnt,
+            iResultPhase -> result.phaseCnt,
+            iResultSeq -> result.seqCnt,
+            iLostCnt -> lostCnt,
+            iIrqStatus -> Cat(lostFlag, resultValid, irqPending).pad(dataWidth),
+            iVersion -> versionValue,
+            iCaps -> capsValue,
+            iSigCtrl -> Cat(srcSelect, sigEnable).pad(dataWidth),
+            iSigStatus -> Cat(sourceReady, srcLocked, srcSelect, sigEnable).pad(dataWidth)
+        ).map { case (i, v) => (i.asUInt, v) }
     )
 }
 

@@ -18,7 +18,7 @@ argument-hint: '要验证的测量结果或要写的判据'
 
 | 阶段 | 发生的事 |
 | --- | --- |
-| `idle` | 闸门计数器清零并停用；两个测量计数器清零（`clearCnt = stateReg === idle`）；`in.valid` 到来时发出 `start` 请求 |
+| `idle` | 闸门计数器清零并停用；两个测量计数器清零（`clearCnt = RegNext(state === sIdle)`）；`in.valid` 到来时发出 `start` 请求 |
 | `waitStart` | `PhaseMeter` 等到参考信号 `extSig_sig1` 的上升沿，回 `start` 响应 |
 | `measuring` | 闸门计数器开始按低速时钟累加；`edgeCnt` 在 `extSig_sig1` 上升沿累加；相位计数在 `extSig_sig1` 上升沿使能、在 `extSig_sig2` 上升沿停用 |
 | `waitStop` | 闸门计数达到启动时锁存的 `targetGate` 后发出 `stop` 请求，`PhaseMeter` 等到 `extSig_sig2` 的下一个上升沿才回响应 |

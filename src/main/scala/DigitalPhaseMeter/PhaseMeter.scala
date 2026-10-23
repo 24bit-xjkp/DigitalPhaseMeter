@@ -22,6 +22,10 @@ class PhaseMeterResponsePayload(val edgeCntWidth: Int = 32, val phaseCntWidth: I
     val phaseCnt = UInt(phaseCntWidth.W)
 }
 
+/** 相位计状态机枚举
+  */
+object PhaseMeterStateEnum extends ChiselEnum { val sIdle, sWaitStart, sMeasuring, sWaitStop = Value }
+
 /** 相位计，工作在高速时钟域
   *
   * @param edgeCntWidth
@@ -55,22 +59,21 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
     private val responseReady = RegNext(CdcToggleHandShake.receive(io.response.ready))
     private val responseValid = CdcToggleHandShake.send(io.response.valid)
 
-    private object StateEnum extends ChiselEnum { val idle, waitStart, measuring, waitStop = Value }
-    import StateEnum._
-    private val stateReg = RegInit(idle)
+    import PhaseMeterStateEnum._
+    private val state = RegInit(sIdle)
     prefix("fsm") {
-        switch(stateReg) {
-            is(idle) { when(request) { stateReg := waitStart } }
-            is(waitStart) {
+        switch(state) {
+            is(sIdle) { when(request) { state := sWaitStart } }
+            is(sWaitStart) {
                 when(pulseSig1) {
-                    stateReg := measuring
+                    state := sMeasuring
                     responseValid.send
                 }
             }
-            is(measuring) { when(request) { stateReg := waitStop } }
-            is(waitStop) {
+            is(sMeasuring) { when(request) { state := sWaitStop } }
+            is(sWaitStop) {
                 when(pulseSig2) { responseValid.send }
-                when(responseReady) { stateReg := idle }
+                when(responseReady) { state := sIdle }
             }
         }
     }
@@ -81,8 +84,8 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
     // 置位与清零必须**用同一级延迟**（pulseSig1Valid / pulseSig2Valid）：相位计数的是
     // 「sig1 检测沿 → sig2 检测沿」之间的高速时钟周期数，两个边沿脉冲经同样的边沿检测
     // 流水线后相隔 K 拍，那么使能窗口也必须是 K 拍
-    private val clearCnt = RegNext(stateReg === idle)
-    private val pulseSig1Valid = RegNext(stateReg.isOneOf(waitStart, measuring) && pulseSig1)
+    private val clearCnt = RegNext(state === sIdle)
+    private val pulseSig1Valid = RegNext(state.isOneOf(sWaitStart, sMeasuring) && pulseSig1)
     private val pulseSig2Valid = RegNext(pulseSig2)
     // 无复位值在 xsim 里是 X，在第一次测量时经 `cnt + enable` 污染计数器
     private val phaseCntEnable = RegInit(false.B)
@@ -94,7 +97,7 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
 
 object PhaseMeter {
     def apply(edgeCntWidth: Int = 32, phaseCntWidth: Int = 32) = {
-        val phaseMeter = Module(new PhaseMeter(edgeCntWidth, phaseCntWidth))
+        val phaseMeter = Module(new PhaseMeter(edgeCntWidth, phaseCntWidth)).suggestName("")
         phaseMeter.io
     }
 }

@@ -31,7 +31,7 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
 ├── Controller               低速域 FSM：闸门计数、与 PhaseMeter 握手、锁存结果
 │   ├── ResetSynchronizer    DSP 域复位：从主复位同步得到（异步置位、与 dspClock 同步释放）
 │   └── PhaseMeter           高速域测量核心
-│       ├── EdgeDetector ×4  3 级流水的边沿检测（sig1、sig2 与两类握手脉冲）
+│       ├── EdgeDetector ×4  3 级流水的边沿检测（RisingA/BothA；sig1、sig2 与两类握手脉冲）
 │       └── DspCounter ×2    DSP48E1 累加器计数器，分别累计 edgeCnt / phaseCnt
 └── （片内无存储：数据通道就是寄存器本身，见下文「PS↔PL 互联」）
 ```
@@ -173,6 +173,8 @@ sbtn -batch "runMain DigitalPhaseMeter.EmitMmcmDrpController"             # 片�
 
 每个模块只生成**一份**产物：复位同步由纯 RTL 的 `ResetSynchronizer` 实现，Verilator、xsim 与综合共用同一份 RTL，没有 `--type=sim|syn` 的差别。改完 RTL 要先跑生成入口再跑测试——`xmake test` 与 `sim/run_xsim.sh` 都不会替你生成。生成入口的调用形式与陷阱见 [`.agents/skills/dpm-chisel-rtl`](.agents/skills/dpm-chisel-rtl/SKILL.md)。
 
+模块名可以用 `override def desiredName` 与类名不同（例如 `EdgeDetector` 按边沿类型/同步方式生成 `EdgeDetectorRisingA` / `EdgeDetectorBothA`）：`build/chisel/<Name>/` 下的文件名与 `filelist.f` 中的模块名以生成结果为准，`xmake`、xsim 与 Vivado 都按 `filelist.f` 取文件，不按目录名推导。
+
 ### Verilator 单元测试（测量通路）
 
 ```bash
@@ -231,5 +233,9 @@ uv run python -m dpm_host gui             # PySide6 GUI
 | 离线验收演练 | `bash ps/tools/onboard_accept_sim.sh`                             | C 验证台经 pty 跑完整验收流程（80 点扫描）                   |
 | 综合实现签核 | `uv run dpm-vivado-flow` + `build/vivado` 下的时序报告              | 450MHz：WNS +0.271ns / WHS +0.026ns / 0 失败端点（6/6 稳定性一致） |
 | 上板验收     | `uv run python ps/tools/onboard_accept.py --port /dev/ttyUSB0`    | JTAG 冷启动 + 串口链路 + 协议 + 80 点扫描                    |
+
+> 上表的综合实现签核与上板验收是 2026-10-19 的记录；2026-10-23 的可读性重构（提交 `0a93c2a`）改了
+> 生成 RTL 的内部命名与同步链 `ASYNC_REG` 的打包形式，尚未重跑综合/实现与上板——交付新的
+> bitstream/XSA 前需重跑 `uv run dpm-vivado-flow` 并重新签核（见 [`vivado/README.md`](vivado/README.md)）。
 
 报告验证结果时请注明实际运行的目标与配置、区分「已验证」与「未验证」，详见 [`.agents/skills/dpm-pre-delivery-check`](.agents/skills/dpm-pre-delivery-check/SKILL.md)。

@@ -14,7 +14,5 @@ lazy val DigitalPhaseMeter = (project in file("."))
             "-Xcheckinit",
             "-Ymacro-annotations"
         ),
-        addCompilerPlugin(
-            "org.chipsalliance" % "chisel-plugin" % chiselVersion cross CrossVersion.full
-        )
+        addCompilerPlugin("org.chipsalliance" % "chisel-plugin" % chiselVersion cross CrossVersion.full)
     )

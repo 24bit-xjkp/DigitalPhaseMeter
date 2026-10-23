@@ -20,7 +20,7 @@ import chisel3.util._
   *   是否给计数器加复位；`PhaseMeter` 里的两个计数器都靠 `clear` 清零，传入 false
   */
 class DspCounter(val width: Int = 48, val withReset: Boolean = true) extends Module {
-    assert(width <= 48)
+    require(width <= 48)
     val io = IO(new Bundle {
         val clear = Input(Bool())
         val enable = Input(Bool())
