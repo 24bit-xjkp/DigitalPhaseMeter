@@ -30,7 +30,7 @@ argument-hint: '要测试的模块或用例（如 Controller 的相位测量精�
 - SV 编译选项含 `-Wall --trace-fst --x-assign unique --x-initial unique --coverage`：波形为 FST，**寄存器在复位前的取值是随机的**（见下文"未初始化寄存器"）。
 - 源文件来自 `filelist.f`，所以必须先跑生成入口（见 `dpm-chisel-rtl`），否则构建失败。
 - **目录名、目标名与生成模块名可能不同**：模块可用 `desiredName` 改名（`EdgeDetector` 生成
-  `EdgeDetectorRisingA`/`EdgeDetectorBothA`），`build/chisel/EdgeDetector/filelist.f` 里是后者，但
+  `EdgeDetectorRising`/`EdgeDetectorBoth`），`build/chisel/EdgeDetector/filelist.f` 里是后者，但
   target 仍按 `.cpp` 文件名 `EdgeDetector` 注册。`verilator.shared` 规则用 `--prefix <Name>Verilator`
   且不传 `--top-module`，由 Verilator 自动选目录里唯一的顶层模块，所以 `test/EdgeDetector.cpp` 里的
   `<EdgeDetectorVerilator.h>` 与 `EdgeDetectorVerilator` 类型仍然成立。前提是每个生成目录只有一个

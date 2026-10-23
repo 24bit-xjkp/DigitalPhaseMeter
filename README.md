@@ -106,21 +106,21 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
 
 ### 寄存器映射（`s_axi_lite`，基地址 0x43C0_0000）
 
-| 偏移 | 名称           | 访问 | 说明                                                                                                                                                                                       |
-| ---- | -------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 偏移 | 名称           | 访问 | 说明                                                                                                                                                                                                           |
+| ---- | -------------- | ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 0x00 | `CTRL`         | 混合 | [0] `start`：写 1 启动一次测量（自清脉冲，`busy` 期间忽略）；[1] `irqEnable`：中断使能；[2] `clear`：写 1 当拍复位结果寄存器与全部标志（不清 `busy`，在途测量继续完成并照常锁存结果）。读回时 bit0/bit2 恒为 0 |
-| 0x04 | `STATUS`       | RO   | [0] `busy`：测量中；[1] `resultValid`：有未被读走的结果；[2] `lost`：有结果被覆盖丢失；[3] `irqPending`                                                                                    |
-| 0x08 | `GATE_TARGET`  | RW   | [27:0] 目标闸门计数（低速时钟周期数），按字节选通写入                                                                                                                                      |
-| 0x0C | `RESULT_GATE`  | RO   | 最新结果的 `gateCnt`，实际闸门计数                                                                                                                                                         |
-| 0x10 | `RESULT_EDGE`  | RO   | 最新结果的 `edgeCnt`，窗口内参考信号上升沿数                                                                                                                                                |
-| 0x14 | `RESULT_PHASE` | RO   | 最新结果的 `phaseCnt`，相位计数                                                                                                                                                            |
-| 0x18 | `RESULT_SEQ`   | RO   | 最新结果的记录序号                                                                                                                                                                         |
-| 0x1C | `LOST_COUNT`   | RO   | 结果未被读走即被覆盖的次数                                                                                                                                                                 |
-| 0x20 | `IRQ_STATUS`   | W1C  | [0] 中断挂起、[1] `resultValid`（写 1 表示结果已读走）、[2] 丢失计数：均写 1 清除                                                                                                          |
-| 0x24 | `VERSION`      | RO   | `0x4450_4D02`（"DPM2"）                                                                                                                                                                    |
-| 0x28 | `CAPS`         | RO   | [7:0] 每条结果字数 = 4；[15:8] 结果深度 = 1；[16] 数据通道为寄存器 = 1；[17] 带片内信号源与输入选择寄存器 = 1                                                                              |
-| 0x2C | `SIG_CTRL`     | RW   | [0] `enable`：片内源使能（0 时两路输出恒低）；[1] `srcSelect`：0 = 外部引脚输入、1 = 片内信号源。整体按 bit0 字节写入                                                                      |
-| 0x30 | `SIG_STATUS`   | RO   | [0] `enable`；[1] `srcSelect`；[2] `srcLocked`：片内源 MMCM 已锁定；[3] `sourceReady`：当前选择在配置上可用（选外部恒为 1，选片内源要求使能且 MMCM 已锁定）                                |
+| 0x04 | `STATUS`       | RO   | [0] `busy`：测量中；[1] `resultValid`：有未被读走的结果；[2] `lost`：有结果被覆盖丢失；[3] `irqPending`                                                                                                        |
+| 0x08 | `GATE_TARGET`  | RW   | [27:0] 目标闸门计数（低速时钟周期数），按字节选通写入                                                                                                                                                          |
+| 0x0C | `RESULT_GATE`  | RO   | 最新结果的 `gateCnt`，实际闸门计数                                                                                                                                                                             |
+| 0x10 | `RESULT_EDGE`  | RO   | 最新结果的 `edgeCnt`，窗口内参考信号上升沿数                                                                                                                                                                   |
+| 0x14 | `RESULT_PHASE` | RO   | 最新结果的 `phaseCnt`，相位计数                                                                                                                                                                                |
+| 0x18 | `RESULT_SEQ`   | RO   | 最新结果的记录序号                                                                                                                                                                                             |
+| 0x1C | `LOST_COUNT`   | RO   | 结果未被读走即被覆盖的次数                                                                                                                                                                                     |
+| 0x20 | `IRQ_STATUS`   | W1C  | [0] 中断挂起、[1] `resultValid`（写 1 表示结果已读走）、[2] 丢失计数：均写 1 清除                                                                                                                              |
+| 0x24 | `VERSION`      | RO   | `0x4450_4D02`（"DPM2"）                                                                                                                                                                                        |
+| 0x28 | `CAPS`         | RO   | [7:0] 每条结果字数 = 4；[15:8] 结果深度 = 1；[16] 数据通道为寄存器 = 1；[17] 带片内信号源与输入选择寄存器 = 1                                                                                                  |
+| 0x2C | `SIG_CTRL`     | RW   | [0] `enable`：片内源使能（0 时两路输出恒低）；[1] `srcSelect`：0 = 外部引脚输入、1 = 片内信号源。整体按 bit0 字节写入                                                                                          |
+| 0x30 | `SIG_STATUS`   | RO   | [0] `enable`；[1] `srcSelect`；[2] `srcLocked`：片内源 MMCM 已锁定；[3] `sourceReady`：当前选择在配置上可用（选外部恒为 1，选片内源要求使能且 MMCM 已锁定）                                                    |
 
 `CTRL` 是「普通读写位 + 写 1 触发位」的混合：`irqEnable` 每次写 `CTRL` 都按 bit1 整体更新，因此启动测量时要写 `CTRL = (1<<1) | (1<<0)`。
 
@@ -173,7 +173,7 @@ sbtn -batch "runMain DigitalPhaseMeter.EmitMmcmDrpController"             # 片�
 
 每个模块只生成**一份**产物：复位同步由纯 RTL 的 `ResetSynchronizer` 实现，Verilator、xsim 与综合共用同一份 RTL，没有 `--type=sim|syn` 的差别。改完 RTL 要先跑生成入口再跑测试——`xmake test` 与 `sim/run_xsim.sh` 都不会替你生成。生成入口的调用形式与陷阱见 [`.agents/skills/dpm-chisel-rtl`](.agents/skills/dpm-chisel-rtl/SKILL.md)。
 
-模块名可以用 `override def desiredName` 与类名不同（例如 `EdgeDetector` 按边沿类型/同步方式生成 `EdgeDetectorRisingA` / `EdgeDetectorBothA`）：`build/chisel/<Name>/` 下的文件名与 `filelist.f` 中的模块名以生成结果为准，`xmake`、xsim 与 Vivado 都按 `filelist.f` 取文件，不按目录名推导。
+模块名可以用 `override def desiredName` 与类名不同（例如 `EdgeDetector` 按边沿类型/同步方式生成 `EdgeDetectorRising` / `EdgeDetectorBoth`）：`build/chisel/<Name>/` 下的文件名与 `filelist.f` 中的模块名以生成结果为准，`xmake`、xsim 与 Vivado 都按 `filelist.f` 取文件，不按目录名推导。
 
 ### Verilator 单元测试（测量通路）
 
@@ -224,15 +224,15 @@ uv run python -m dpm_host gui             # PySide6 GUI
 
 工程已完成并通过实测验收（2026-10-19）。可复跑的验证入口：
 
-| 层次         | 入口                                                              | 说明                                                         |
-| ------------ | ----------------------------------------------------------------- | ------------------------------------------------------------ |
-| RTL 单元     | `xmake test -v`                                                   | Verilator：测量通路与复位/DRP 语义                           |
-| 顶层 AXI     | `sim/run_xsim.sh`                                                 | xsim：寄存器读写、中断、结果锁存、输入源切换                 |
-| MMCM 联调    | `sim/run_handoff_tb.sh`                                           | xsim：真实 MMCM 行为模型，80 点相位/频率比对                 |
-| 协议与换算   | `uv run pytest -q`、`uv run python spec/selftest_spec.py`         | 上位机单测、C/Python/金标准三方一致性自检                    |
-| 离线验收演练 | `bash ps/tools/onboard_accept_sim.sh`                             | C 验证台经 pty 跑完整验收流程（80 点扫描）                   |
-| 综合实现签核 | `uv run dpm-vivado-flow` + `build/vivado` 下的时序报告              | 450MHz：WNS +0.271ns / WHS +0.026ns / 0 失败端点（6/6 稳定性一致） |
-| 上板验收     | `uv run python ps/tools/onboard_accept.py --port /dev/ttyUSB0`    | JTAG 冷启动 + 串口链路 + 协议 + 80 点扫描                    |
+| 层次         | 入口                                                           | 说明                                                               |
+| ------------ | -------------------------------------------------------------- | ------------------------------------------------------------------ |
+| RTL 单元     | `xmake test -v`                                                | Verilator：测量通路与复位/DRP 语义                                 |
+| 顶层 AXI     | `sim/run_xsim.sh`                                              | xsim：寄存器读写、中断、结果锁存、输入源切换                       |
+| MMCM 联调    | `sim/run_handoff_tb.sh`                                        | xsim：真实 MMCM 行为模型，80 点相位/频率比对                       |
+| 协议与换算   | `uv run pytest -q`、`uv run python spec/selftest_spec.py`      | 上位机单测、C/Python/金标准三方一致性自检                          |
+| 离线验收演练 | `bash ps/tools/onboard_accept_sim.sh`                          | C 验证台经 pty 跑完整验收流程（80 点扫描）                         |
+| 综合实现签核 | `uv run dpm-vivado-flow` + `build/vivado` 下的时序报告         | 450MHz：WNS +0.271ns / WHS +0.026ns / 0 失败端点（6/6 稳定性一致） |
+| 上板验收     | `uv run python ps/tools/onboard_accept.py --port /dev/ttyUSB0` | JTAG 冷启动 + 串口链路 + 协议 + 80 点扫描                          |
 
 > 上表的综合实现签核与上板验收是 2026-10-19 的记录；2026-10-23 的可读性重构（提交 `0a93c2a`）改了
 > 生成 RTL 的内部命名与同步链 `ASYNC_REG` 的打包形式，尚未重跑综合/实现与上板——交付新的

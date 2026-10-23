@@ -37,7 +37,7 @@ vivado -mode batch -source vivado/query_runs.tcl        # 查看 run 的策略/�
 `build/chisel/DigitalPhaseMeterTop/`，`package_ip.tcl` 的 `rtl_dir` 就指这里）；复位同步是纯 RTL 的
 `ResetSynchronizer`，产物里没有 XPM 原语，Verilator 与 xsim / Vivado 编译的是同一份文件。
 IP 打包同样按 `filelist.f` 取文件，因此生成模块名/文件名变化（例如 `EdgeDetector` 按 `desiredName`
-生成 `EdgeDetectorRisingA.sv`）不需要改 Tcl；但这类改动会让旧 XSA/bitstream 过期，需要重跑流程。
+生成 `EdgeDetectorRising.sv`）不需要改 Tcl；但这类改动会让旧 XSA/bitstream 过期，需要重跑流程。
 
 ## 增量流程（dpm-vivado-flow）
 

@@ -88,7 +88,7 @@ Verilator 与 xsim / Vivado 都能直接编译。
 - 新模块没有出现在 `filelist.f` 中，说明生成没有跑到，或产物目录不对（见上一节的 `--` 陷阱）。
 - 文件顺序即 firtool 的拓扑顺序，`filelist.f` 就是权威列表。
 - **生成目录名、filelist 中的文件名与模块名不一定相同**：模块可用 `override def desiredName` 改名，
-  例如 `EdgeDetector` 按配置生成 `EdgeDetectorRisingA`/`EdgeDetectorBothA`——`filelist.f` 里列的是
+  例如 `EdgeDetector` 按配置生成 `EdgeDetectorRising`/`EdgeDetectorBoth`——`filelist.f` 里列的是
   后者，而目录仍叫 `build/chisel/EdgeDetector/`。消费方一律按 `filelist.f` 取文件与模块，不要按目录名
   推导；新增消费方时同样只认 `filelist.f`。
 - **内层包装只影响内部名，不改变顶层端口名**：`MmcmDrpController` 用外层 `RawModule` +
