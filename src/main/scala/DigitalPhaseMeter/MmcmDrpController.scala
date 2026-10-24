@@ -116,7 +116,8 @@ class MmcmDrpControllerImpl extends Module with InlineInstance {
     // LOAD 是写 1 触发，不落寄存器；用字节选通合并后的值
     prefix("wrImpl") {
         when(axiLiteSlave.wr.fire && inWindow) {
-            import axiLiteSlave.wr.bits._
+            val wrBits = axiLiteSlave.wr.bits
+            import wrBits._
             switch(addr(indexWidth + 1, 2)) {
                 is(iClkFbOut.asUInt) { clkFbOut := ByteStrobe.merge(clkFbOut, data, strb) }
                 is(iClkFbOut2.asUInt) { clkFbOut2 := ByteStrobe.merge(clkFbOut2, data, strb) }
@@ -137,7 +138,7 @@ class MmcmDrpControllerImpl extends Module with InlineInstance {
     private val drpLastRead = RegNext(io.drp_dout, 0.U)
 
     // 读数据：窗口外读回 0。寄存器的数据只用低 16 位，高 16 位恒 0。
-    private val versionValue = Cat("DPM".map(_.U(8.W)) :+ 3.U(8.W))
+    private val versionValue = Cat("DPM".map(_.toInt.U(8.W)) :+ 3.U(8.W))
     private val statusValue = Cat(drpLastRead, 13.U(13.W), busy, busy, lockedSync)
     private val indexMap = Seq(
         iVersion -> versionValue,

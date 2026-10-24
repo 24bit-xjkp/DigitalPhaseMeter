@@ -78,7 +78,7 @@ class ControlRegs(
     import RegIndex._
     private val indexWidth = RegIndex.getWidth
     // 版本号："DPM2"，末尾 02 表示数据经寄存器（GPIO 式）传递
-    private val versionValue = Cat("DPM".map(_.U(8.W)) :+ 2.U(8.W))
+    private val versionValue = Cat("DPM".map(_.toInt.U(8.W)) :+ 2.U(8.W))
     // 能力寄存器：每条结果 4 个字、结果深度 1 条、数据通道为寄存器（而非 BRAM 突发口）、
     // b17 表示带片内信号源与输入选择寄存器
     private val hasSignalSource = true.B
