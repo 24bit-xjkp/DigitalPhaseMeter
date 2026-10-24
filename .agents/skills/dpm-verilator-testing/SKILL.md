@@ -1,14 +1,14 @@
 ---
 name: dpm-verilator-testing
-description: 'Use when: 为 DigitalPhaseMeter 的 Chisel 模块编写、修改、运行或调试 Verilator C++ 测试（test/<Name>.cpp），或需要解读测试目标的注册方式、运行目录与覆盖率/波形产物。覆盖测试目标的自动注册、运行入口、时间精度陷阱、未初始化寄存器、set_base_name 与多 bit 端口等本项目实测的坑。'
-argument-hint: '要测试的模块或用例（如 Controller 的相位测量精度）'
+description: 'Use when: 为 DigitalPhaseMeter 的 Chisel 模块或顶层 IP 编写、修改、运行或调试 Verilator C++ 测试（test/<Name>.cpp），或需要解读测试目标的注册方式、运行目录与覆盖率/波形产物。覆盖测试目标的自动注册、运行入口、顶层 IP（AXI4-Lite 寄存器通路）测试、时间精度陷阱、未初始化寄存器、set_base_name 与多 bit 端口等本项目实测的坑。'
+argument-hint: '要测试的模块或用例（如 Controller 的相位测量精度、DigitalPhaseMeterTop 的寄存器通路）'
 ---
 
 # DigitalPhaseMeter 的 Verilator 单元测试
 
 ## 适用场景
 
-- 在 `test/` 下新增或修改 C++ 测试。
+- 在 `test/` 下新增或修改 C++ 测试（模块单元测试或顶层 IP 测试）。
 - 运行测试、传 doctest 参数、看波形与覆盖率产物。
 - 排查"频率/周期与设定不符""读到随机值""覆盖率文件互相覆盖""端口宽度不匹配"之类的问题。
 
@@ -35,6 +35,8 @@ argument-hint: '要测试的模块或用例（如 Controller 的相位测量精�
   且不传 `--top-module`，由 Verilator 自动选目录里唯一的顶层模块，所以 `test/EdgeDetector.cpp` 里的
   `<EdgeDetectorVerilator.h>` 与 `EdgeDetectorVerilator` 类型仍然成立。前提是每个生成目录只有一个
   顶层模块；若同一目录将输出多个顶层模块，必须显式指定顶层并同步改 `.cpp`。
+- **顶层 IP 的 `DigitalPhaseMeterTop` 目标也按上述规则注册**：编译顶层生成产物，用 AXI4-Lite
+  BFM 按真实基地址驱动，覆盖寄存器堆到测量通路的整条通路（见下文「顶层 IP 测试」）。
 
 ## 运行入口
 
@@ -132,9 +134,12 @@ ctx.add_task(generate_reset(port.dst_reset, port.dst_clock));   // 目的域自�
 反过来，只要测试全绿就说明该域的复位确实被撤销了——这是行为测试相对静态检查的价值所在。
 
 **逐目标的 Verilator 检查豁免**写在 `test/xmake.lua` 的 `extra_verilator_options` 里，并必须写清为什么
-（当前两条：`MmcmDrpController` 的 `UNUSEDSIGNAL` 是 AXI4-Lite 接口固有未使用位；`Controller` 的
-`SYNCASYNCNET` 是"同一根 `reset` 既做同步复位又做同步链异步端"这一复位同步器固有结构）。豁免只针对
-单个检查，其余 `-Wall` 检查全部保留，不要用 `-Wno-fatal` 之类的整体开关。
+（当前三个目标有关闭项：`MmcmDrpController` 的 `UNUSEDSIGNAL` 是 AXI4-Lite 接口固有未使用位；`Controller` 的
+`SYNCASYNCNET` 是"同一根 `reset` 既做同步复位又做同步链异步端"这一复位同步器固有结构；
+`DigitalPhaseMeterTop` 同时有 `UNUSEDSIGNAL`（AXI4-Lite 接口固有未使用位）、`SYNCASYNCNET`
+（`ResetSynchronizer` 结构）与 `SYMRSVDWORD`（顶层端口名 `interrupt` 命中 C++ 常用词，Verilator
+把它改名为 `__SYM__interrupt`，是端口命名约定带来的固有告警）。豁免只针对单个检查，其余 `-Wall`
+检查全部保留，不要用 `-Wno-fatal` 之类的整体开关。
 
 ### 7. 波形与仿真结束
 
@@ -148,14 +153,43 @@ AXI 互连**不剥离基地址**，从口看到的是完整 32 位地址。测 A
 `MmcmDrpController` 早期按 `addr[31:6] == 0` 判窗口，Verilator 用例按裸偏移能过，
 上板时真实地址 `0x43C1_0008` 被判为窗口外，所有 DRP 读写被丢弃、`SET_SIG` 恒回 `ERR_BUSY`。
 现在 `test/MmcmDrpController.cpp` 用 `kIpBase + word*4` 驱动，并有一条专门的地址译码用例。
+顶层用例同理：`test/DigitalPhaseMeterTop.cpp` 用 BD 里 `dpm_top` 的地址段 `0x43C0_0000` 作基地址
+加偏移驱动，而不是裸偏移。
 
 ### 9. AXI BFM 的握手采样顺序
 
 从口在握手那一拍的下一个周期就会拉低 `awready`/`wready`（地址/数据被锁存），因此
 **不能**写成「等 AW 握手 → 等 W 握手」：第二个 `while (!(wvalid && wready))` 会永远等不到。
 要么把两个通道同拍举起、在 `@(posedge clk)` **之前**判断握手，要么按
-`sim/tb_digital_phase_meter_top.sv` 的顺序（AW 握手 → 撤销 → W 握手 → 撤销 → 等 B）。
-本项目 `sim/tb_src_handoff.sv` 早期版本因为这条把整条联调卡死在第一笔写。
+`test/DigitalPhaseMeterTop.cpp` 的顺序（下降沿驱动、上升沿之后评估采样：AW 握手 → 撤销 →
+W 握手 → 撤销 → 等 B）。本项目 `sim/tb_src_handoff.sv` 早期版本因为这条把整条联调卡死在第一笔写。
+
+## 顶层 IP 测试（`test/DigitalPhaseMeterTop.cpp`）
+
+`DigitalPhaseMeterTop` 目标是**寄存器堆到测量通路的守门人**：其它用例直接驱动子模块端口，不经过
+AXI 从口与 `ControlRegs`，只有这个目标能抓到「寄存器堆往下游的输出接错/被优化掉」这类缺陷。
+
+- 用 AXI4-Lite BFM 按 BD 里的**真实基地址** `0x43C0_0000 + 偏移` 驱动（不是裸偏移），与上板时
+  PS 看到的地址一致。
+- 覆盖：复位期间从口不握手与释放后寄存器默认值；`GATE_TARGET` 写数据先到与字节选通；测量启动的
+  `busy` / `resultValid` / 中断时序与 `gateCnt` / `edgeCnt` / `phaseCnt` 结果校验；`IRQ_STATUS`
+  W1C 与只读寄存器写忽略；第二次更短闸门测量；结果只保留最新一条与 `LOST_COUNT`；`CTRL.clear`
+  复位结果区与序号；中断使能门控；目标闸门在启动拍锁存；busy 期间重复 start 被忽略；片内源
+  （用 `generate_clock` 产生的 640ns/160ns 理想时钟代替 MMCM 输出）与外部输入（400ns/120ns）
+  切换；busy 期间 `CTRL.clear` 当拍生效而在途测量继续跑完；第二次复位回到默认值。
+- 理想信号源直接用 `generate_clock(port.sig, period, offset)`：第三个参数是**起始延时**，两路之间
+  的延时差就是相位差；不要为周期信号另写方波 helper。带上误差容限的判据用 `verilator_utils::approx`
+  表达（与 `test/Controller.cpp` 的闸门/边沿/相位容限同一套写法）。
+- 改 `Axi*.scala` / `ControlRegs.scala` / `DigitalPhaseMeterTop.scala` 时必须跑 `xmake test -v`，
+  并把新寄存器纳入这个用例（读回、字节选通、复位默认值、以及「配置真的改变了测量结果」）。
+
+该目标在 `test/xmake.lua` 里有三条逐目标 Verilator 豁免（每条都写明理由，其余 `-Wall` 检查照常）：
+
+| 豁免 | 理由 |
+| --- | --- |
+| `UNUSEDSIGNAL` | AXI4-Lite 接口固有未使用位（`awprot` / `arprot` / `wstrb` 高位等） |
+| `SYNCASYNCNET` | 复位同步器结构：同一根复位线既做本域同步复位、又做同步链的异步复位端 |
+| `SYMRSVDWORD` | 顶层端口名 `interrupt` 命中 C++ 常用词，Verilator 把它改名为 `__SYM__interrupt`；属端口命名约定的固有告警 |
 
 ## 验证取向：把被测模块当仪表，而不是复刻它的时序
 

@@ -21,7 +21,7 @@ uv sync                                                 # 一次性：把 dpm-vi
 uv run dpm-vivado-flow                                  # 官方增量流程（IP → BD → 综合/实现/XSA）
 uv run dpm-vivado-flow --status                         # 只读查看 stamp/指纹/DCP/报告状态
 uv run dpm-vivado-flow --force                          # 需要时全量重建
-sim/run_xsim.sh                                         # xsim 顶层仿真（同一份生成产物）
+sim/run_handoff_tb.sh                                   # xsim 联调：真实 MMCM 行为模型（同一份生成产物）
 vivado -mode batch -source vivado/impl_stability.tcl -tclargs 6  # 同策略 6 次独立实现（签核）
 vivado -mode batch -source vivado/impl_multi.tcl -tclargs 6      # 换 place/route directive 扫策略（调优）
 vivado -mode batch -source vivado/query_runs.tcl        # 查看 run 的策略/步骤/增量参数（排障）
@@ -127,38 +127,43 @@ IP 打包同样按 `filelist.f` 取文件，因此生成模块名/文件名变�
 - PS 串口是参数：`create_bd.tcl` 用 `-uart uart0|uart1|none`（默认 uart1）与 `-baud` 配置并回读校验，
   详见 `docs/bringup.md`。
 
-## xsim 仿真（sim/run_xsim.sh）
+## xsim 仿真（sim/run_handoff_tb.sh）
 
-命令行三段式，脚本已封装：
+xsim 的职责只有**真实 MMCM 联调**：`tb_src_handoff.sv` 把 BD 里真实用的三个单元接起来
+（`dpm_mmcm_src` + `MmcmDrpController` + `DigitalPhaseMeterTop`），验证 MMCM 寄存器编码与整条
+测量通路。命令行三段式，脚本已封装：
 
 ```bash
-xvlog --sv --work work -f <补全成绝对路径的 filelist.f>
-xvlog --sv --work work sim/tb_*.sv
-xelab --debug typical --timescale 1ns/1ps <tb_top> -s <snapshot>
+xvlog --sv --work work <filelist.f 补全成绝对路径> vivado/rtl/dpm_mmcm_src.v <Vivado>/data/verilog/src/glbl.v
+xvlog --sv --work work sim/tb_src_handoff.sv
+xelab --debug typical --timescale 1ns/1ps tb_src_handoff glbl -s <snapshot> -L unisims_ver
 xsim <snapshot> -runall
 ```
 
 - `xelab` **没有** `--work` 选项；工作库用 `-L work` 或默认 `work`。
-- 被测 RTL 取生成产物目录 `build/chisel/DigitalPhaseMeterTop/`。
-- **只有用到厂商原语时才需要额外源码库**：顶层激励不含厂商原语，`run_xsim.sh` 不需要
-  `xpm_cdc.sv` / `glbl`；仿真真实 MMCM 的 `run_handoff_tb.sh` 仍要 `glbl.v`（unisim）。
-- 判定成败不要只看 xsim 退出码（`$fatal` 也可能返回 0），要在日志里找激励打印的通过标记。
-- 测试激励约定：
-  - 在**下降沿驱动**激励、在**上升沿采样**握手，握手后回到下降沿再撤销信号；
-  - BFM 按通道顺序实现即可（AW 与 W 互相独立），但要专门覆盖「写数据先到」的偏斜；
-  - 每个用例结束前多等几个周期再 `$finish`，看门狗用 `initial #<超时>; $fatal`；
-  - **「闸门计数」类容限按被测信号周期给**：余量是「等到被测信号的下一个上升沿」，最多一个信号
-    周期；写死 `gate_target + 8` 这类常数在片内源 640ns 周期（32 个低速周期）上会误判。
-    现行 `check_record` 按 `$ceil(signal_period / CLOCK_PERIOD) + 8` 计算。
+- 被测 RTL 取生成产物目录 `build/chisel/DigitalPhaseMeterTop/` 与 `build/chisel/MmcmDrpController/`，
+  另加手写的 `vivado/rtl/dpm_mmcm_src.v`。
+- **仿真真实 MMCM 必须带厂商库**：编译 `glbl.v`（unisim 的全局复位/时序模型），`xelab` 时
+  `-L unisims_ver` 并把 `glbl` 一起作顶层；**不要**加 `-L unisim`（VHDL 版 unisim 与 Verilog 版
+  unisims_ver 冲突）。
+- 判定成败不要只看 xsim 退出码（`$fatal` 也可能返回 0），要看日志里的
+  `HANDOFF_SUMMARY ... fails=0`，且 `HANDOFF_MEAS` 行数 = 2×点数。
+- 激励约定：
+  - 在**下降沿驱动**激励、在**上升沿之后评估采样**握手，握手后回到下降沿再撤销信号；
+  - AXI4-Lite BFM 按 AW → W → B 顺序（与 `test/DigitalPhaseMeterTop.cpp` 同一套）；
+  - 每个用例结束前多等几个周期再 `$finish`，看门狗用「仿真时间内没有进展就 `$fatal`」；
   - **仿真真实 MMCM 的联调激励要把时基选成整数比**：`tb_src_handoff.sv` 取
     `T_MAIN=18900ps` / `T_DSP=2100ps`（严格 9:1，18900 能被频点表全部 MULT 整除），
-    详见 `sim/README.md`。
-  - `run_handoff_tb.sh` 默认每次用 sbtn 重新生成 RTL（与 `run_xsim.sh` 一致）；
+    详见 `sim/README.md`；
+  - 按**真实地址**（`0x43C0_0000` / `0x43C1_0000` + 偏移）驱动 AXI，不要给裸偏移；
+  - `run_handoff_tb.sh` 默认每次用 sbtn 重新生成 RTL（与其它生成入口一致）；
     确认产物最新时用 `--no-gen`。
-- **顶层 xsim 用例是寄存器堆通路的唯一守门人**：`test/` 下的 Verilator 单测直接驱动
-  `Controller` 的端口，不经过 AXI 从口与 `ControlRegs`。本仓库实测过一次「寄存器堆往测量域的
-  配置输出被 firtool 优化成常量 0」的缺陷——Verilator 全绿、只有顶层 xsim 用例能抓到。
-  因此**动 AXI 寄存器通路必须跑 `sim/run_xsim.sh`**，并把新寄存器纳入激励（读回、字节选通、
+- **顶层 AXI 寄存器通路的守门人是 Verilator 顶层用例 `test/DigitalPhaseMeterTop.cpp`**：它用
+  AXI4-Lite BFM 按真实基地址 `0x43C0_0000 + 偏移` 驱动，覆盖复位/寄存器默认值、写数据先到与
+  字节选通、测量启动与中断/W1C 时序、结果锁存与 `CTRL.clear`、输入源切换等。本仓库实测过一次
+  「寄存器堆往测量域的配置输出被 firtool 优化成常量 0」的缺陷——Verilator 单元测试全绿、
+  只有经过寄存器堆的顶层用例能抓到。因此**动 AXI 寄存器通路必须跑 `xmake test -v`**（含
+  `DigitalPhaseMeterTop`），并把新寄存器纳入 `test/DigitalPhaseMeterTop.cpp`（读回、字节选通、
   复位默认值、以及「配置真的改变了测量结果」这类有区分度的断言）。
 
 ## 片内信号源：裸 MMCM + 极简 DRP 控制器（当前实现）
@@ -372,7 +377,7 @@ run 的 methodology 报告：有未 waive 的 Critical Warning 直接 `error`；
 
 ## 交付前
 
-- 报告里写清实际跑到哪一步：IP 打包通过、`validate_bd_design` 通过、xsim 用例数与结果、
+- 报告里写清实际跑到哪一步：IP 打包通过、`validate_bd_design` 通过、xsim 联调点数与结果、
   综合实现是否 100%、时序 WNS/WHS（高速域单独给出域内 WNS）、bitstream/XSA 是否生成。
 - 告警类改动要把**清理前后的条数**都给出，并说明哪些是改设计消掉的、哪些是屏蔽/waiver 的（附理由
   文件）；给出所有 run 的 `runme.log` 计数与 methodology 报告的 `Checks found / Checks waived`。

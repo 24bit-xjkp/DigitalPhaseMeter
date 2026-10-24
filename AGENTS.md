@@ -15,7 +15,7 @@
 ```text
 ├── src/main/scala/DigitalPhaseMeter/   # Chisel RTL：每个模块一个 .scala，附 Emit<Name> 生成主类
 ├── test/                               # Verilator C++ 测试：每个 <Name>.cpp 自动注册一个测试目标
-├── sim/                                # xsim 的 SystemVerilog 测试激励与运行脚本（AXI4 接口/顶层 IP/MMCM 联调）
+├── sim/                                # xsim 的 SystemVerilog 激励与运行脚本（只做真实 MMCM 联调）
 ├── vivado/                             # IP 打包、block design、综合实现脚本与顶层约束
 ├── ps/                                 # PS 侧裸机 C 服务端（串口协议、AXI/DRP 驱动、startup/linker）
 ├── host/                               # PC 侧 Python 上位机（协议、CLI、PySide6 GUI、仿真后端）
@@ -34,15 +34,15 @@
 
 按职责选择入口，三者不可互相替代：
 
-| 入口               | 职责                                                                   |
-| ------------------ | ---------------------------------------------------------------------- |
-| `sbtn`             | 运行 Chisel，生成 SystemVerilog 到 `build/chisel/<Name>/`              |
-| `xmake`            | 构建 Verilator 测试目标、运行测试（测量通路）                          |
-| Verilator          | 由 xmake 的目标规则调用，编译生成的 SystemVerilog                      |
-| `sim/run_xsim.sh`  | 用 Vivado xsim 跑 `sim/` 下的 SystemVerilog 激励（AXI4 接口与顶层 IP） |
+| 入口                     | 职责                                                                                          |
+| ------------------------ | --------------------------------------------------------------------------------------------- |
+| `sbtn`                   | 运行 Chisel，生成 SystemVerilog 到 `build/chisel/<Name>/`                                     |
+| `xmake`                  | 构建 Verilator 测试目标、运行测试（测量通路与顶层 IP）                                        |
+| Verilator                | 由 xmake 的目标规则调用，编译生成的 SystemVerilog                                             |
+| `sim/run_handoff_tb.sh`  | 用 Vivado xsim 跑依赖 MMCM 原语的联调激励（真实 `MMCME2_ADV` 行为模型）                       |
 | `uv run dpm-vivado-flow` | 增量打包 IP、创建/刷新 block design、综合实现与导出 XSA（`vivado/flow/`；Tcl 脚本是其执行层） |
-| `bash ps/build.sh` | 交叉编译 PS 侧裸机程序，并构建宿主机验证台                             |
-| `uv run pytest`    | PC 侧 Python 测试（`host/tests`，pytest 原生写法）与 GUI 冒烟测试入口  |
+| `bash ps/build.sh`       | 交叉编译 PS 侧裸机程序，并构建宿主机验证台                                                    |
+| `uv run pytest`          | PC 侧 Python 测试（`host/tests`，pytest 原生写法）与 GUI 冒烟测试入口                         |
 
 - 本项目使用 clang 工具链。gcc 在编译带 C++20 模块的测试代码时会产生编译器内部错误（ICE）——该结论沿用 `verilator_utils` 系列项目的记录：不要用 gcc 配置、构建或做"可移植性验证"。
 - 各入口的具体命令、选项与已知陷阱写在对应 skill 中（见下表），本文件不重复。

@@ -89,17 +89,20 @@ scalafmt                               # 格式化；scalafmt --test 只检查�
 
 ## 3. 回归测试
 
-按改动范围选择回归入口，改了 AXI4 接口或顶层就要两条都跑：
+按改动范围选择回归入口，改了 AXI4 接口或顶层就要把 Verilator 全量（含顶层用例）跑齐：
 
 ```bash
-xmake test -v          # Verilator：测量通路与复位同步（Controller / EdgeDetector / ResetSynchronizer / MmcmDrpController）
-sim/run_xsim.sh        # xsim：AXI4 接口与顶层 IP（SystemVerilog 激励，详见 dpm-vivado-ip）
+xmake test -v              # Verilator：测量通路、复位同步与顶层 IP 的 AXI 寄存器通路
+sim/run_handoff_tb.sh      # xsim：真实 MMCM 联调（SystemVerilog 激励，详见 dpm-vivado-ip）
 ```
 
 - 改了 `Axi*.scala`、`ControlRegs.scala`、`DigitalPhaseMeterTop.scala` 时，
-  **必须**跑 `sim/run_xsim.sh`（脚本默认会先跑生成入口）：这些通路只有 xsim 覆盖得到。
+  **必须**跑 `xmake test -v`（含 `DigitalPhaseMeterTop` 顶层用例）：这些通路只有经过 AXI 从口与
+  寄存器堆的顶层用例覆盖得到，并把新寄存器纳入该用例。
 - 只改了测量通路（`Controller` / `PhaseMeter` / `EdgeDetector` / `DspCounter`）时，
-  重新生成产物后跑 `xmake test -v` 即可；但顶层的端口或行为变了也要顺带跑 xsim。
+  重新生成产物后跑 `xmake test -v` 即可；但顶层的端口或行为变了也要把顶层用例跑齐。
+- 改了 MMCM 寄存器编码（`MmcmDrpController` / `ps/include/dpm_regs.h`）或片内源联调通路时，
+  还要跑 `sim/run_handoff_tb.sh`。
 - 改了 `vivado/` 下的脚本、约束或 `vivado/rtl/dpm_mmcm_src.v` 时，至少重新执行对应阶段并确认
   没有 ERROR / CRITICAL WARNING；官方入口是 `uv run dpm-vivado-flow`（`--force` 强制全量）。
   它按内容哈希判断复用，改了 BD 源文件会触发全量重建；只手工跑综合/实现会复用旧 IP/旧 BD。
@@ -115,10 +118,11 @@ sim/run_xsim.sh        # xsim：AXI4 接口与顶层 IP（SystemVerilog 激励�
   否则「一份产物」的前提就不成立。注意 `xmake test` **不会**替你生成产物：改了 RTL 仍要先跑生成入口。
 
 - 必须是**全量**：只跑单个目标或用例（`xmake run <Name> ...`）不能作为回归证据，它只用于定位问题。
-- 运行参数是用例级配置（`test/xmake.lua` 中 `add_tests` 的 `runargs`，本项目为 `+verilator+rand+reset+2` 与 `-fc`），只有 `xmake test` 会应用：`xmake run` 走的是 target 级 `runargs`，本项目没有设置。因此"寄存器初值随机"这类只在带 plusargs 时出现的行为，在 `xmake run` 下可能被掩盖——两个入口结果不一致时以 `xmake test` 为准。
+- 运行参数（本项目为 `+verilator+rand+reset+2` 与 `-fc`）同时登记在 `test/xmake.lua` 的 target 级 `set_runargs` 与用例级 `add_tests` 的 `runargs` 里，`xmake run` 与 `xmake test` 都会带上。回归证据仍要用 `xmake test`（它会先构建目标并跑全部目标与用例）；`xmake run` 只用于定位单个目标或用例。
 - 改动过 RTL 时，先重新生成 SystemVerilog 再跑测试（见 `dpm-chisel-rtl`）；只改了测试代码则不需要重新生成。
-- `xmake test -v` 的通过判据是末尾的 `100% tests passed`；xsim 的通过判据是日志里出现
-  `==== 测试通过`（xsim 的退出码不足以判定，`$fatal` 也可能返回 0）。
+- `xmake test -v` 的通过判据是末尾的 `100% tests passed`；MMCM 联调的通过判据是日志里
+  `HANDOFF_SUMMARY ... fails=0` 且 `HANDOFF_MEAS` 行数 = 2×点数（xsim 的退出码不足以判定，
+  `$fatal` 也可能返回 0）。
 - 报告里写明实际跑的目标、用例数与断言数（doctest 结尾会打印 `test cases / assertions / Status`）。
 
 ### Python（`host/` 上位机、`spec/` 校验脚本）

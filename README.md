@@ -2,7 +2,7 @@
 
 基于 **Chisel** 的数字相位计：测量两路同频信号的相位差。测量通路运行在高速时钟域（DSP 域，**450MHz**，由 PL 内 MMCM 从 50MHz 倍频得到），控制、闸门计数与 AXI4-Lite 接口运行在低速时钟域（50MHz）。
 
-**工程状态：已完成并通过实测验收（2026-10-19）。** 测量与控制 RTL、PS↔PL 互联（AXI4-Lite 控制/状态与结果寄存器 + 测量完成中断）、Vivado IP 打包与 block design、PS 侧裸机软件与 PC 侧上位机均已实现；Verilator 单元测试、Vivado xsim 顶层/联调仿真、综合实现签核与上板验收均已跑通。本文件只描述当前设计与用法，历史验证记录不随仓库保留。
+**工程状态：已完成并通过实测验收（2026-10-19）。** 测量与控制 RTL、PS↔PL 互联（AXI4-Lite 控制/状态与结果寄存器 + 测量完成中断）、Vivado IP 打包与 block design、PS 侧裸机软件与 PC 侧上位机均已实现；Verilator 单元测试与顶层用例、Vivado xsim 联调仿真、综合实现签核与上板验收均已跑通。本文件只描述当前设计与用法，历史验证记录不随仓库保留。
 
 ## 测量原理
 
@@ -139,8 +139,8 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
 
 ```text
 src/main/scala/DigitalPhaseMeter/   Chisel 源码，每个模块一个文件，附 Emit<Name> 生成主类
-test/                               Verilator C++ 测试（测量通路），每个 <Name>.cpp 自动注册一个测试目标
-sim/                                Vivado xsim 的 SystemVerilog 测试激励与运行脚本（AXI4 接口/顶层 IP/MMCM 联调）
+test/                               Verilator C++ 测试（测量通路与顶层 IP），每个 <Name>.cpp 自动注册一个测试目标
+sim/                                Vivado xsim 的 SystemVerilog 激励与运行脚本（只做真实 MMCM 联调）
 vivado/                             Vivado IP 打包、block design、综合实现脚本与顶层约束
 build/chisel/<Name>/                Chisel 生成的 SystemVerilog 与 filelist.f（构建产物，不入库）
 ps/                                 PS 侧裸机 C 服务端（串口协议、AXI/DRP 驱动、startup/linker）
@@ -156,7 +156,7 @@ spec/                               金标准向量、独立仿真服务端、�
 | ---------------------------------------- | ----------------------------------------------- |
 | JDK + sbtn                               | 由 Chisel 生成 SystemVerilog                    |
 | xmake ≥ 3.1.1                            | 构建 Verilator 测试目标、运行测试               |
-| Verilator ≥ 5.050                        | 编译生成的 SystemVerilog（测量通路单元测试）    |
+| Verilator ≥ 5.050                        | 编译生成的 SystemVerilog（测量通路与顶层测试）  |
 | clang（支持 C++20 模块，本项目用 C++26） | 编译测试代码，**不支持 gcc**                    |
 | Vivado（本项目在 2025.2 上验证）         | 打包 IP、创建 block design、xsim 仿真、综合实现 |
 | uv + Python ≥ 3.12                       | PC 侧上位机与 spec/ 验证脚本                    |
@@ -167,7 +167,7 @@ spec/                               金标准向量、独立仿真服务端、�
 
 ```bash
 sbtn -batch "runMain DigitalPhaseMeter.EmitController"                    # 测量通路，供 Verilator 测试
-sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop"          # 顶层 IP，供 xsim 与 Vivado
+sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop"          # 顶层 IP，供 Verilator 测试、xsim 联调与 Vivado
 sbtn -batch "runMain DigitalPhaseMeter.EmitMmcmDrpController"             # 片内源的 DRP 控制器 IP
 ```
 
@@ -179,7 +179,7 @@ sbtn -batch "runMainCached DigitalPhaseMeter.EmitController"              # 未�
 
 它使用 sbt 2 的 ActionCache（磁盘缓存，`sbtn` 会话重启后仍有效），实现见 `project/RunMainCached.scala`。缓存还带一层产物检查：`Emit<Name>` 入口点的约定产物 `build/chisel/<Name>/filelist.f` 不在时会重新生成；`sbtn clean` 不会清掉缓存，需要无条件重跑时改用 `runMain`。
 
-每个模块只生成**一份**产物：复位同步由纯 RTL 的 `ResetSynchronizer` 实现，Verilator、xsim 与综合共用同一份 RTL，没有 `--type=sim|syn` 的差别。改完 RTL 要先跑生成入口再跑测试——`xmake test` 与 `sim/run_xsim.sh` 都不会替你生成。生成入口的调用形式与陷阱见 [`.agents/skills/dpm-chisel-rtl`](.agents/skills/dpm-chisel-rtl/SKILL.md)。
+每个模块只生成**一份**产物：复位同步由纯 RTL 的 `ResetSynchronizer` 实现，Verilator、xsim 与综合共用同一份 RTL，没有 `--type=sim|syn` 的差别。改完 RTL 要先跑生成入口再跑测试——`xmake test` 与 `sim/run_handoff_tb.sh` 都不会替你生成。生成入口的调用形式与陷阱见 [`.agents/skills/dpm-chisel-rtl`](.agents/skills/dpm-chisel-rtl/SKILL.md)。
 
 模块名可以用 `override def desiredName` 与类名不同（例如 `EdgeDetector` 按边沿类型/同步方式生成 `EdgeDetectorRising` / `EdgeDetectorBoth`）：`build/chisel/<Name>/` 下的文件名与 `filelist.f` 中的模块名以生成结果为准，`xmake`、xsim 与 Vivado 都按 `filelist.f` 取文件，不按目录名推导。
 
@@ -193,24 +193,23 @@ scalafmt --test                # 格式检查（scalafmt 就地修复）
 
 Scalafix 只作用于 `src/main/scala`；`build.sbt` / `project/*.scala` 是 sbt 2 的构建定义（Scala 3），不在规则范围内，其告警要手工修复。规则内容、有意关闭的检查项与验证报告要求见 [`.agents/skills/dpm-pre-delivery-check`](.agents/skills/dpm-pre-delivery-check/SKILL.md)。
 
-### Verilator 单元测试（测量通路）
+### Verilator 测试（测量通路与顶层 IP）
 
 ```bash
 xmake test -v                             # 全部测试
 xmake run Controller                      # 单个测试目标（定位问题用）
 ```
 
-覆盖 `Controller`（复位、闸门/相位计数、窗口跟随、连续测量一致性）、`EdgeDetector`、`ResetSynchronizer`、`DspCounter` 与 `MmcmDrpController`。测试目标的注册方式、时间精度与常见陷阱见 [`.agents/skills/dpm-verilator-testing`](.agents/skills/dpm-verilator-testing/SKILL.md)。
+覆盖 `Controller`（复位、闸门/相位计数、窗口跟随、连续测量一致性）、`EdgeDetector`、`ResetSynchronizer`、`DspCounter`、`MmcmDrpController`，以及顶层 IP 的 `DigitalPhaseMeterTop`：用 AXI4-Lite BFM 按真实基地址 `0x43C0_0000 + 偏移` 驱动，覆盖复位/寄存器默认值、写数据先到与字节选通、测量启动与中断时序、W1C 与只读寄存器写忽略、结果锁存与 `LOST_COUNT`、`CTRL.clear`、目标闸门锁存，以及片内源/外部输入切换。**顶层 AXI 寄存器通路由它守门**：动 `Axi*.scala`、`ControlRegs.scala` 或 `DigitalPhaseMeterTop.scala` 必须跑 `xmake test -v`，并把新寄存器纳入 [`test/DigitalPhaseMeterTop.cpp`](test/DigitalPhaseMeterTop.cpp)。测试目标的注册方式、时间精度与常见陷阱见 [`.agents/skills/dpm-verilator-testing`](.agents/skills/dpm-verilator-testing/SKILL.md)。
 
-### xsim 仿真（AXI4 接口 / 顶层 IP / MMCM 联调）
+### xsim 仿真（MMCM 联调）
 
 ```bash
-sim/run_xsim.sh                # 顶层 AXI4-Lite 与寄存器通路（默认先跑 sbtn 生成）
-sim/run_xsim.sh --no-gen       # 跳过 sbtn 生成
 sim/run_handoff_tb.sh          # 片内源 ↔ 测量通路联调（真实 MMCM 行为模型 + 80 个测量点）
+sim/run_handoff_tb.sh --no-gen # 跳过 sbtn 生成（RTL 已是最新时）
 ```
 
-判定依据是日志里出现 `==== 测试通过` / `HANDOFF_SUMMARY ... fails=0`（xsim 的退出码不足以判定失败）。激励覆盖内容与实测陷阱见 [`sim/README.md`](sim/README.md)。
+`sim/` 只保留依赖厂商 MMCM 原语（unisims_ver 的 `MMCME2_ADV`）的联调激励，判定依据是日志里出现 `HANDOFF_SUMMARY ... fails=0`（xsim 的退出码不足以判定失败）。激励覆盖内容与实测陷阱见 [`sim/README.md`](sim/README.md)。
 
 ### Vivado：打包 IP、创建 BD、综合实现
 
@@ -245,7 +244,7 @@ uv run python -m dpm_host gui             # PySide6 GUI
 | 层次         | 入口                                                           | 说明                                                               |
 | ------------ | -------------------------------------------------------------- | ------------------------------------------------------------------ |
 | RTL 单元     | `xmake test -v`                                                | Verilator：测量通路与复位/DRP 语义                                 |
-| 顶层 AXI     | `sim/run_xsim.sh`                                              | xsim：寄存器读写、中断、结果锁存、输入源切换                       |
+| 顶层 AXI     | `xmake test -v`                                                | Verilator：顶层 IP 的寄存器读写、中断、结果锁存、输入源切换        |
 | MMCM 联调    | `sim/run_handoff_tb.sh`                                        | xsim：真实 MMCM 行为模型，80 点相位/频率比对                       |
 | 协议与换算   | `uv run pytest -q`、`uv run python spec/selftest_spec.py`      | 上位机单测、C/Python/金标准三方一致性自检                          |
 | 离线验收演练 | `bash ps/tools/onboard_accept_sim.sh`                          | C 验证台经 pty 跑完整验收流程（80 点扫描）                         |

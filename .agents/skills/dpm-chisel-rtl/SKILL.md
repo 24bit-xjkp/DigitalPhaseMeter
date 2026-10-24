@@ -82,7 +82,7 @@ Verilator 与 xsim / Vivado 都能直接编译。
 | 消费方 | 读的目录 | 入口 |
 | --- | --- | --- |
 | Verilator 单元测试 | `build/chisel/<Name>/` | `test/xmake.lua` 的 `on_load`（逐行读 `filelist.f`） |
-| xsim 顶层仿真 | `build/chisel/DigitalPhaseMeterTop/` | `sim/run_xsim.sh`、`sim/run_handoff_tb.sh` |
+| xsim 联调（真实 MMCM） | `build/chisel/DigitalPhaseMeterTop/`、`build/chisel/MmcmDrpController/` | `sim/run_handoff_tb.sh` |
 | IP 打包 / 综合实现 | `build/chisel/<Name>/` | `vivado/package_ip.tcl`、`vivado/package_src_ip.tcl` |
 
 **新增厂商原语前要先确认 Verilator 与 xsim 两侧都拿得到它的模型**，否则「一份产物」的前提就不成立
@@ -148,9 +148,8 @@ Verilator 与 xsim / Vivado 都能直接编译。
   综合器会把未读的寄存器高位 trim 掉并报 `[Synth 8-3936]`。新增/修改 AXI 从口时按下游实际译码
   位宽传参：本仓库 `dpm_top` 只译码 `addr[5:2]`（`addrUsedWidth=6`），`dpm_src_drp` 用
   `addr[11:0]`、写数据只用低 16 位（`addrUsedWidth=12` / `dataUsedWidth=16`）。行为等价性：
-  `MmcmDrpController` 的 Verilator 用例覆盖「真实基地址 + 页内偏移」；`dpm_top` 没有 Verilator
-  顶层用例，xsim 顶层激励用的是页内偏移地址，真实基地址下 `dpm_top` 的等价性靠静态理由
-  （译码只消费 `addr[5:2]`，高位/低位本来就不参与逻辑）。
+  `MmcmDrpController` 的 Verilator 用例覆盖「真实基地址 + 页内偏移」；`dpm_top` 由顶层
+  Verilator 用例 `test/DigitalPhaseMeterTop.cpp` 按真实基地址 `0x43C0_0000 + 偏移` 驱动覆盖。
 - **Chisel 7 有现成的位宽/方向表意写法，不必手写 helper**：内部命令总线用 `EnqIO`（等价
   `DecoupledIO`，从口产出命令）与 `DeqIO`（等价 `Flipped(DecoupledIO)`，寄存器堆消费命令）；
   位宽剪裁用 `take(n)`（取低 n 位）、零扩展用 `pad(w)`（`w` 不大于原位宽时返回原值，否则高位补 0）。
@@ -210,7 +209,7 @@ Verilator 与 xsim / Vivado 都能直接编译。
   统一加一级 `RegNext` 后：检测器输出只驱动本地触发器，FSM 输入来自寄存器，本设计里相关路径
   余量 > +0.7ns。因为四路整体晚 1 个高速周期，`pulseSig1Valid` / `pulseSig2Valid` / `phaseCntEnable`
   之间的相对时序与相位计数窗口长度不变，握手只是多 1 拍；计数器停止后冻结、慢域握手完成后才锁存，
-  读数不变（xsim 顶端用例与加流水前逐条 diff 为空、Verilator Controller 用例全过）。
+  读数不变（顶层用例与加流水前逐条 diff 为空、Verilator Controller 用例全过）。
 - **派生运算放到低速域，高速域只留「取寄存器 → 比较/计数」**：只要一个值在配置期算得出来，
   就不要留到高速域的每拍路径上（「取配置 → 减法 → 比较器 → 计数器」这种链在高速域必违约）。
   需要更低频率时把职责交回 MMCM 或换外部手段，不要在测量域里做数字分频。
@@ -220,7 +219,7 @@ Verilator 与 xsim / Vivado 都能直接编译。
   全部优化掉**，顶层实例化里连端口都不剩。表现很有迷惑性：寄存器读写回读完全正常（`SIG_CTRL` 读回 3），
   但下游一直用默认配置（选择位恒 0）；而只测下游模块、绕过寄存器堆的 Verilator 单测**全绿**。
   防御手段有两个：生成后 `grep` 一下顶层 SV 里目标模块还有没有那组端口；以及**寄存器堆到下游的
-  通路必须有 xsim 顶层用例覆盖**（见 `dpm-vivado-ip`）。
+  通路必须由顶层 Verilator 用例覆盖**（`test/DigitalPhaseMeterTop.cpp`，见 `dpm-verilator-testing`）。
 - **独立生成给 Verilator 单测的模块要能过 `-Wall`**：`test/xmake.lua` 用 `-Wall` 编译
   `build/chisel/<Name>/`，警告即失败（`%Error: Exiting due to N warning(s)`）。两类常见告警都来自
   「共享数据结构 + 只关心一部分」：

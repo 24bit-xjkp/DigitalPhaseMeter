@@ -1,7 +1,7 @@
 // 片内信号源 ↔ 测量通路联调激励（方案 A：裸 MMCM + 极简 DRP 控制器）
 //
-// 与 `tb_digital_phase_meter_top.sv` 的区别：那份激励用**理想信号源**驱动 dpm_top 的
-// intSig_sig1/intSig_sig2（只覆盖测量通路）；本激励把 **BD 里真实用的三个单元**接起来：
+// 顶层 IP 的 AXI4-Lite 寄存器通路与理想信号源激励由 Verilator 用例
+// `test/DigitalPhaseMeterTop.cpp` 覆盖；本激励把 **BD 里真实用的三个单元**接起来：
 //
 //     dpm_mmcm_src（裸 MMCME2_ADV + BUFGCE 安全启动）
 //        ▲ DRP 口
@@ -207,7 +207,7 @@ module tb_src_handoff;
         dpm_bready = 0; dpm_araddr = 0; dpm_arvalid = 0; dpm_rready = 0;
     endtask
 
-    // AXI4-Lite BFM（与 sim/tb_digital_phase_meter_top.sv 同一套握手顺序：AW → W → B）。
+    // AXI4-Lite BFM（与 `test/DigitalPhaseMeterTop.cpp` 同一套握手顺序：AW → W → B）。
     //
     // 注意握手判据必须在**下降沿之后**采样：从口的 awready/wready 在握手那一拍的下一个
     // 周期就会拉低（awHeld/wHeld 锁存），在 `@(posedge clock)` 之后再读 ready 会永远看不到

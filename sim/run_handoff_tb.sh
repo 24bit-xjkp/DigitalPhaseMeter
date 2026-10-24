@@ -65,7 +65,7 @@ for tool in "${XVLOG}" "${XELAB}" "${XSIM}"; do
 done
 
 if [[ ${do_gen} -eq 1 ]]; then
-    # 与 `sim/run_xsim.sh` 一致：默认每次都重新生成，避免源文件改过而 build/chisel/ 里
+    # 与其它生成入口一致：默认每次都重新生成，避免源文件改过而 build/chisel/ 里
     # 还是旧产物（只判断目录是否存在会跳过生成，用旧 RTL 跑出来的结论不可信）。
     for entry in "EmitDigitalPhaseMeterTop:${TOP_RTL_DIR}" "EmitMmcmDrpController:${DRP_RTL_DIR}"; do
         main="${entry%%:*}"

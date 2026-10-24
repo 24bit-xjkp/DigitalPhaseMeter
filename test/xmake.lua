@@ -15,9 +15,15 @@ local chisel_dir = path.join(os.scriptdir(), "..", "build", "chisel")
 -- Verilator 的 -Wall 因此报 SYNCASYNCNET。这是复位同步器的固有结构——异步端按定义与本地
 -- 时钟无关（链的 ASYNC_REG 打包负责把释放沿的亚稳态风险压到可接受范围），不是缺陷，所以
 -- 只对该目标关掉这一条检查（其余 -Wall 检查全部保留）。
+--
+-- DigitalPhaseMeterTop 是上面两种结构的组合（AXI4-Lite 从口 + ResetSynchronizer），因此同样
+-- 关掉 UNUSEDSIGNAL 与 SYNCASYNCNET；另外它的中断端口名是 IP 接口规定的 `interrupt`，命中
+-- Verilator 的「C++ 常用词」检查（SYMRSVDWORD，生成代码里改名为 `__SYM__interrupt`），
+-- 端口名由 IP-XACT/BD 接口约定决定、不能为测试改 RTL，所以也关掉这一条。
 local extra_verilator_options = {
     ["MmcmDrpController"] = { "-Wno-UNUSEDSIGNAL" },
-    ["Controller"] = { "-Wno-SYNCASYNCNET" }
+    ["Controller"] = { "-Wno-SYNCASYNCNET" },
+    ["DigitalPhaseMeterTop"] = { "-Wno-UNUSEDSIGNAL", "-Wno-SYNCASYNCNET", "-Wno-SYMRSVDWORD" }
 }
 
 for _, file in ipairs(os.files("*.cpp")) do
