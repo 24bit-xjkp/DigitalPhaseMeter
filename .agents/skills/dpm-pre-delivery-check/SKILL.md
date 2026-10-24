@@ -22,7 +22,7 @@ argument-hint: '本次要交付的改动'
 | C++ | `clang-format -i <改动的 .cpp>`（配置 `.clang-format`，`ColumnLimit = 130`、4 空格缩进） |
 | Scala | `scalafmt`（就地格式化）；`scalafmt --test` 只检查、不改文件 |
 
-`scalafmt --test` 检查 `src/main/scala/**/*.scala`、`build.sbt`、`project/*.scala` 与 `project/*.sbt`，是提交前的最低要求；`build/`、`target/` 由 `.scalafmt.conf` 的 `project.excludeFilters` 排除（sbt 2 的 BSP 会在 `build/tmp-bsp-src` 解压构建定义源码，不排除会让 `scalafmt --test` 把这些生成文件当成未格式化的源文件）。格式化用 `scalafmt` 就地修复。
+格式化范围包括 `src/main/scala/**/*.scala` 与 Mill 构建定义 `build.mill`（Scala 3 语法，按 Scala 3 方言格式化）；`build/`、`target/`、`out/` 等构建缓存/产物目录不参与格式检查。`scalafmt --test` 只检查不改文件，是提交前的最低要求；就地修复用 `scalafmt`。
 
 ## 2. 静态检查
 
@@ -58,33 +58,27 @@ const auto& result{after_reset.value()};  // NOLINT(bugprone-unchecked-optional-
 
 ### Scala：Scalafix + 编译器 lint
 
-工具链分两层：sbt-scalafix（插件声明在 `project/plugins.sbt`，规则与配置在 `.scalafix.conf`）负责语义级 lint 与自动修复；编译器 lint 由 `build.sbt` 的 `scalacOptions` 打开。检查入口是 sbt 命令别名 `scalaLint`：
+工具链分两层：Mill 的 Scalafix 插件（`com.goyeau::mill-scalafix`，规则与配置在 `.scalafix.conf`）负责语义级 lint 与自动修复；编译器 lint 由 `build.mill` 的 `scalacOptions` 打开。检查入口是构建系统的两个任务，标准都是 0 warning：
 
 ```bash
-sbtn -batch scalaLint                  # = scalafixAll --check + compile（带 -Werror），标准是 0 warning
+./mill fix --check                     # 只跑 Scalafix 规则检查
+./mill compile                         # 只跑编译器 lint（-Werror 让告警变成构建失败）
 ```
 
-也可以分开跑：
+自动修复与格式化（就地改文件，改完重新跑 `fix --check` 与 `compile`）：
 
 ```bash
-sbtn -batch "scalafixAll --check"      # 只跑 Scalafix 规则检查
-sbtn -batch compile                    # 只跑编译器 lint（-Werror 让告警变成构建失败）
-```
-
-自动修复与格式化（就地改文件，改完重新跑 `scalaLint`）：
-
-```bash
-sbtn -batch "scalafixAll"              # 导入排序、删除未使用导入等可自动修的规则
+./mill fix                             # 导入排序、删除未使用导入等可自动修的规则
 scalafmt                               # 格式化；scalafmt --test 只检查不改文件
 ```
 
 - **Scalafix 规则**（`.scalafix.conf`）：`OrganizeImports`（按 `groups` 分组排序并删除未使用导入，删除功能依赖编译器 `-Wunused:imports`）、`DisableSyntax`（禁 `var` / `throw` / `null` / `while` / `return` / `finalize` / XML）、`NoAutoTupling`、`NoValInForComprehension`、`LeakingImplicitClassVal`。
-- **编译器规则**（`build.sbt` 的 `scalacOptions`）：`-Xlint:_,-infer-structural`、`-Wunused:imports,privates,locals,patvars,implicits,explicits`、`-Wdead-code`、`-Werror`。硬件描述代码里的 `var` / `while` / `return` 要么不可综合、要么容易写出与预期不符的时序，统一用 Chisel 的 `Reg` / `Wire` / `require` 等价写法替代。
+- **编译器规则**（`build.mill` 的 `scalacOptions`）：`-Xlint:_,-infer-structural`、`-Wunused:imports,privates,locals,patvars,implicits,explicits`、`-Wdead-code`、`-Werror`。硬件描述代码里的 `var` / `while` / `return` 要么不可综合、要么容易写出与预期不符的时序，统一用 Chisel 的 `Reg` / `Wire` / `require` 等价写法替代。
 - **有意关闭 / 不启用的检查，不要加回来**：
   - `-infer-structural` 关闭（即 `-Xlint:_,-infer-structural`）：Chisel 每个模块的 `io` 都是匿名 `Bundle`，访问其成员会合法触发「推断结构类型 / reflective call」告警。
   - 不启用 `-Wvalue-discard` 与 `-Wnonunit-statement`：Chisel 的 `when(...)` 返回 `WhenContext` 且几乎总在语句位置，这两条会把所有条件赋值误报成 unused value。
 - **误报的处理约定**：确属误报时用行内 `// scalafix:off <Rule>` / `// scalafix:on <Rule>` 精确抑制并写清原因；编译器告警用 `@nowarn` 精确抑制，不要整体关闭规则或检查项。本仓库当前没有需要抑制的告警。
-- **覆盖范围**：Scalafix 只作用于 `src/main/scala`（sbt 项目源码）。`build.sbt` / `project/*.scala` 是 sbt 2 的构建定义（由 sbt 自己用 Scala 3 编译），不在 Scalafix 规则范围内；sbt reload / 编译时出现的构建定义告警要手工修复（例如本次把 `cross CrossVersion.full` 改成 `.cross(CrossVersion.full)`）。
+- **覆盖范围**：Scalafix 只作用于 `src/main/scala`（Mill 模块源码）。`build.mill` 是 Mill 构建定义（Scala 3 语法，由 Mill 自己编译），不在 Scalafix 规则范围内，其编译错误与格式问题要单独处理。
 - 当前代码里已按下述方式处理过这类告警，改动时不要重新引入：5 处未使用 import 已删除，导入分组顺序统一交给 `OrganizeImports` 维护；`CdcToggleHandShake.Sender.send` 改成显式空参列表的 `def send(): Unit`（原 nullary-unit 写法容易被误当纯函数调用）；`EdgeDetector` 对 `Enumeration` 的 match 补 `case _` 覆盖 `both`（`Type` 不是 sealed 类型，行为不变）。
 
 ## 3. 回归测试
@@ -164,7 +158,7 @@ git status --short    # 确认没有把不该提交的东西带进来
 ```
 
 - 逐项确认 `git status --short` 里的文件都是本次改动**有意**产生的；哪些目录属于构建产物、不要提交，见仓库根目录 `AGENTS.md` 的"修改边界"。
-- 特别注意仓库根目录有没有散落生成的 `.sv` / `filelist.f`：用 sbtn 生成 SystemVerilog 时若参数形式写错，产物会落到仓库根而不是 `build/chisel/<Name>/`（见 `dpm-chisel-rtl`）。
+- 特别注意仓库根目录有没有散落生成的 `.sv` / `filelist.f`：生成入口的产物固定落在 `build/chisel/<Name>/`，出现散落文件说明生成调用方式（模块名/参数）不对，这次生成不能作为依据（见 `dpm-chisel-rtl`）。
 
 ## 5. 报告
 

@@ -66,7 +66,7 @@ def read_filelist(rtl_dir: Path) -> list[Path]:
     rtl_dir = Path(rtl_dir)
     filelist = rtl_dir / "filelist.f"
     if not filelist.is_file():
-        raise FlowError(f"找不到 {filelist}：请先运行 sbtn 生成对应的 SystemVerilog")
+        raise FlowError(f"找不到 {filelist}：请先运行 ./mill emit 生成对应的 SystemVerilog")
     files: list[Path] = []
     for line in filelist.read_text(encoding="utf-8").splitlines():
         item = line.strip()

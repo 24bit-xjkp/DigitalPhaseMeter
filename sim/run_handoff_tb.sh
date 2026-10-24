@@ -19,7 +19,7 @@
 # 用法：
 #   sim/run_handoff_tb.sh                # 跑点表里的全部点（10 个频点 × 逐频点相位点 = 80 个点）
 #   sim/run_handoff_tb.sh --clean        # 先清 build/xsim_handoff
-#   sim/run_handoff_tb.sh --no-gen       # 不重新生成 Chisel RTL（跳过 sbtn）
+#   sim/run_handoff_tb.sh --no-gen       # 不重新走生成入口（跳过 Mill 生成，RTL 已是最新时）
 #
 # 整轮约 17s 墙钟（点表里每点 ≈ 40µs 闸门的仿真时间）。验收判据是日志里的
 # `HANDOFF_SUMMARY points=80 ... fails=0` 且 HANDOFF_MEAS 行数 = 2×points。
@@ -65,13 +65,11 @@ for tool in "${XVLOG}" "${XELAB}" "${XSIM}"; do
 done
 
 if [[ ${do_gen} -eq 1 ]]; then
-    # 与其它生成入口一致：默认每次都重新生成，避免源文件改过而 build/chisel/ 里
-    # 还是旧产物（只判断目录是否存在会跳过生成，用旧 RTL 跑出来的结论不可信）。
-    for entry in "EmitDigitalPhaseMeterTop:${TOP_RTL_DIR}" "EmitMmcmDrpController:${DRP_RTL_DIR}"; do
-        main="${entry%%:*}"
-        echo "== 生成 ${main} RTL =="
-        (cd "${ROOT_DIR}" && sbtn -batch "runMain DigitalPhaseMeter.${main}")
-    done
+    # 走构建系统的生成入口（仓库根）：Mill 的 emit 按内容判断是否需要重跑——入口点字节码
+    # 依赖闭包没变时跳过、变了才重新生成，因此不会出现「源文件改过而 build/chisel/ 里还是
+    # 旧产物」的情况。两个模块写在一条命令里即可。
+    echo "== 生成 DigitalPhaseMeterTop / MmcmDrpController RTL =="
+    (cd "${ROOT_DIR}" && ./mill emit DigitalPhaseMeterTop MmcmDrpController)
 fi
 
 for f in "${MMCM_RTL}" "${GLBL}"; do
@@ -82,7 +80,7 @@ for f in "${MMCM_RTL}" "${GLBL}"; do
 done
 for d in "${TOP_RTL_DIR}" "${DRP_RTL_DIR}"; do
     [[ -f "${d}/filelist.f" ]] || {
-        echo "缺少生成产物：${d}（先跑 sbtn）" >&2
+        echo "缺少生成产物：${d}（先跑 ./mill emit DigitalPhaseMeterTop MmcmDrpController）" >&2
         exit 1
     }
 done

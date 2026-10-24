@@ -17,9 +17,8 @@ block design（BD），完成综合、实现、bitstream 与 XSA 导出。工程
 
 ## 前提与环境
 
-1. 先用 sbtn 生成两个 IP 需要的 SystemVerilog（每个模块只有一份产物，仿真与综合共用）：
-   `sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop"`、
-   `sbtn -batch "runMain DigitalPhaseMeter.EmitMmcmDrpController"`。
+1. 先用仓库根的 `./mill emit DigitalPhaseMeterTop MmcmDrpController` 生成两个 IP 需要的
+   SystemVerilog（每个模块只有一份产物，仿真与综合共用；一条命令生成两个模块）。
 
 2. Vivado 在 PATH 中（本项目在 **Vivado 2025.2** 上验证）；**固定器件 `xc7z010clg400-1`**
    （ALINX AX7010 的芯片）。`create_bd.tcl` 建工程后与 Python 流程的 build 阶段打开工程后
@@ -72,8 +71,8 @@ vivado -mode batch -source vivado/impl_stability.tcl -tclargs 6
 vivado -mode batch -source vivado/query_runs.tcl
 ```
 
-**改了 RTL 之后**：先跑两个 `sbtn` 生成入口，再在仓库根运行 `uv run dpm-vivado-flow`。
-流程会按内容哈希只重新打包变化的 IP、原位刷新 BD（接口不变时），并只重跑受影响的
+**改了 RTL 之后**：先跑生成入口（`./mill emit DigitalPhaseMeterTop MmcmDrpController`），再在仓库根运行
+`uv run dpm-vivado-flow`。流程会按内容哈希只重新打包变化的 IP、原位刷新 BD（接口不变时），并只重跑受影响的
 OOC run / `synth_1` / `impl_1`；需要从零重建时用 `--force`。只手工重跑综合/实现而不重新
 打包 IP 仍会用到旧 IP——官方增量入口会自动处理这种依赖顺序。
 

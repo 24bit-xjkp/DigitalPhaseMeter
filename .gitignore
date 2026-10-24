@@ -1,10 +1,7 @@
-target
-# project/ 下只入库构建定义（含 sbt 版本文件与插件声明）；Metals 等工具生成的其余文件继续忽略
-project/*
-!project/*.scala
-!project/build.properties
-!project/plugins.sbt
+# Mill 的构建缓存与任务产物（根目录 out/）；build/ 下是 Chisel/Vivado 产物
+out
 build
+# 编辑器 / IDE / BSP（Metals 通过 Mill 的 BSP 提供语义信息）
 .vscode
 .metals
 .bloop

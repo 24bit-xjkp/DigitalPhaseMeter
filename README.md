@@ -154,7 +154,7 @@ spec/                               金标准向量、独立仿真服务端、�
 
 | 依赖                                     | 用途                                            |
 | ---------------------------------------- | ----------------------------------------------- |
-| JDK + sbtn                               | 由 Chisel 生成 SystemVerilog                    |
+| JDK + Mill                               | 由 Chisel 生成 SystemVerilog（用仓库根 `./mill`；使用系统 PATH 上的 JDK，Mill 版本在 `build.mill` 头部固定） |
 | xmake ≥ 3.1.1                            | 构建 Verilator 测试目标、运行测试               |
 | Verilator ≥ 5.050                        | 编译生成的 SystemVerilog（测量通路与顶层测试）  |
 | clang（支持 C++20 模块，本项目用 C++26） | 编译测试代码，**不支持 gcc**                    |
@@ -166,18 +166,13 @@ spec/                               金标准向量、独立仿真服务端、�
 ### 生成 SystemVerilog（产物在 `build/chisel/<Name>/`）
 
 ```bash
-sbtn -batch "runMain DigitalPhaseMeter.EmitController"                    # 测量通路，供 Verilator 测试
-sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop"          # 顶层 IP，供 Verilator 测试、xsim 联调与 Vivado
-sbtn -batch "runMain DigitalPhaseMeter.EmitMmcmDrpController"             # 片内源的 DRP 控制器 IP
+./mill emit                                  # 全部 Emit<Name>（测量通路、顶层 IP、DRP 控制器等）
+./mill emit Controller DigitalPhaseMeterTop  # 只生成指定模块（多个模块名写在一条命令里）
+./mill emit --force Controller               # 强制重新生成（--force 必须写在模块名之前）
+./mill runMain DigitalPhaseMeter.EmitController  # 无条件运行单个主类
 ```
 
-迭代时用 `runMainCached` 代替 `runMain`：入口点及其传递依赖（按编译后的字节码依赖闭包判定）没有变化时直接跳过，变化时才执行一次（判定看编译产物，不看源码文本，不改变字节码的编辑不会触发重跑）；缓存按主类隔离，例如改 `PhaseMeter` 只会让依赖它的入口点重跑。
-
-```bash
-sbtn -batch "runMainCached DigitalPhaseMeter.EmitController"              # 未变化则跳过；需要强制重跑时改用 runMain
-```
-
-它使用 sbt 2 的 ActionCache（磁盘缓存，`sbtn` 会话重启后仍有效），实现见 `project/RunMainCached.scala`。缓存还带一层产物检查：`Emit<Name>` 入口点的约定产物 `build/chisel/<Name>/filelist.f` 不在时会重新生成；`sbtn clean` 不会清掉缓存，需要无条件重跑时改用 `runMain`。
+`emit` 按内容缓存：入口点（`Emit<Name>` 主类）及其传递依赖的字节码依赖闭包没有变化时直接跳过，变化时才执行一次（判定看编译产物、不看源码文本，不改变字节码的编辑不会触发重跑）；缓存按主类隔离，例如改 `PhaseMeter` 只会让依赖它的入口点重跑。缓存命中后还会检查约定产物 `build/chisel/<Name>/filelist.f` 是否存在，产物被删掉时会重新生成。缓存文件在 `build/chisel/.emit-cache/`，`./mill clean` 不会删 `build/chisel/`；需要无条件重跑时用上面的 `runMain`（单个主类）或 `--force`（`emit`）。构建定义与缓存实现见仓库根 `build.mill`。
 
 每个模块只生成**一份**产物：复位同步由纯 RTL 的 `ResetSynchronizer` 实现，Verilator、xsim 与综合共用同一份 RTL，没有 `--type=sim|syn` 的差别。改完 RTL 要先跑生成入口再跑测试——`xmake test` 与 `sim/run_handoff_tb.sh` 都不会替你生成。生成入口的调用形式与陷阱见 [`.agents/skills/dpm-chisel-rtl`](.agents/skills/dpm-chisel-rtl/SKILL.md)。
 
@@ -186,12 +181,13 @@ sbtn -batch "runMainCached DigitalPhaseMeter.EmitController"              # 未�
 ### 代码检查
 
 ```bash
-sbtn -batch scalaLint          # Scalafix + 编译器 lint，0 warning 门禁
-sbtn -batch "scalafixAll"      # 自动修复可修的规则（导入排序、删除未使用导入）
+./mill compile                 # 编译器 lint（-Werror），0 warning 门禁
+./mill fix --check             # Scalafix 规则检查
+./mill fix                     # 自动修复可修的规则（导入排序、删除未使用导入）
 scalafmt --test                # 格式检查（scalafmt 就地修复）
 ```
 
-Scalafix 只作用于 `src/main/scala`；`build.sbt` / `project/*.scala` 是 sbt 2 的构建定义（Scala 3），不在规则范围内，其告警要手工修复。规则内容、有意关闭的检查项与验证报告要求见 [`.agents/skills/dpm-pre-delivery-check`](.agents/skills/dpm-pre-delivery-check/SKILL.md)。
+Scalafix 通过 Mill 的 scalafix 插件执行，规则与配置仍在 `.scalafix.conf`，只作用于 `src/main/scala`。Mill 构建定义 `build.mill` 由 Mill 自己编译（Scala 3），不在 Scalafix 规则范围内，但同样要按 scalafmt 风格格式化；格式化用 scalafmt CLI，不是 Mill 任务。规则内容、有意关闭的检查项与验证报告要求见 [`.agents/skills/dpm-pre-delivery-check`](.agents/skills/dpm-pre-delivery-check/SKILL.md)。
 
 ### Verilator 测试（测量通路与顶层 IP）
 
@@ -206,7 +202,7 @@ xmake run Controller                      # 单个测试目标（定位问题用
 
 ```bash
 sim/run_handoff_tb.sh          # 片内源 ↔ 测量通路联调（真实 MMCM 行为模型 + 80 个测量点）
-sim/run_handoff_tb.sh --no-gen # 跳过 sbtn 生成（RTL 已是最新时）
+sim/run_handoff_tb.sh --no-gen # 跳过生成入口（RTL 已是最新时）
 ```
 
 `sim/` 只保留依赖厂商 MMCM 原语（unisims_ver 的 `MMCME2_ADV`）的联调激励，判定依据是日志里出现 `HANDOFF_SUMMARY ... fails=0`（xsim 的退出码不足以判定失败）。激励覆盖内容与实测陷阱见 [`sim/README.md`](sim/README.md)。

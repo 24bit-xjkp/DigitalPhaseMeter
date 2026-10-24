@@ -22,6 +22,9 @@
 ├── docs/                               # 串口协议（ps-protocol.md）与上板指南（bringup.md）
 ├── spec/                               # 金标准向量、独立仿真服务端、规格自检与验证脚本
 ├── script/                             # xmake 包定义（Lua）
+├── build.mill                          # Mill 构建定义（Scala 编译、生成入口、静态检查；Mill 版本在文件头固定，JDK 用系统 JDK）
+├── mill                                # Mill 启动脚本（仓库根执行 `./mill`）
+├── out/                                # Mill 的构建缓存与任务产物（构建产物，不入库）
 ├── build/chisel/<Name>/                # 由 Chisel 生成的 SystemVerilog 与 filelist.f（构建产物，不入库）
 ├── build/vivado/                       # 打包出的 IP、BD 工程与综合实现产物（构建产物，不入库）
 ├── .agents/skills/                     # 项目级 skill（见下文"skill 优先"）
@@ -36,7 +39,7 @@
 
 | 入口                     | 职责                                                                                          |
 | ------------------------ | --------------------------------------------------------------------------------------------- |
-| `sbtn`                   | 运行 Chisel，生成 SystemVerilog 到 `build/chisel/<Name>/`                                     |
+| `./mill`                 | 编译 Scala、运行 Chisel 生成 SystemVerilog 到 `build/chisel/<Name>/`，并执行 Scalafix 检查 |
 | `xmake`                  | 构建 Verilator 测试目标、运行测试（测量通路与顶层 IP）                                        |
 | Verilator                | 由 xmake 的目标规则调用，编译生成的 SystemVerilog                                             |
 | `sim/run_handoff_tb.sh`  | 用 Vivado xsim 跑依赖 MMCM 原语的联调激励（真实 `MMCME2_ADV` 行为模型）                       |

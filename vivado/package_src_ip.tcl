@@ -3,8 +3,7 @@
 # 用法（vivado 在 PATH 中，或写全路径）：
 #   vivado -mode batch -source vivado/package_src_ip.tcl
 #
-# 前置条件：先用 sbtn 生成 SystemVerilog：
-#   sbtn -batch "runMain DigitalPhaseMeter.EmitMmcmDrpController"
+# 前置条件：先在仓库根运行 `./mill emit MmcmDrpController` 生成 SystemVerilog：
 #
 # 产物：
 #   build/vivado/ip/dpm_src_drp/   IP 目录（component.xml + 导入的 RTL 源码）
@@ -48,7 +47,7 @@ set ip_name "dpm_src_drp"
 set ip_version "1.0"
 
 if {![file exists [file join $rtl_dir filelist.f]]} {
-    error "找不到 $rtl_dir/filelist.f，请先运行 sbtn 生成入口（见文件头注释）"
+    error "找不到 $rtl_dir/filelist.f，请先运行 ./mill emit 生成入口（见文件头注释）"
 }
 
 # 读取 filelist.f（firtool 的拓扑顺序即编译顺序）

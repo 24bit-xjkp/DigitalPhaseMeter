@@ -44,8 +44,7 @@ PS7_UART_CHECK: EN_UART1=1 IO='MIO 48 .. 49' BAUD=115200
 改了 PS 配置或 RTL 后，先重新生成 Chisel 产物，再运行官方增量入口（仓库根）：
 
 ```bash
-sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop"
-sbtn -batch "runMain DigitalPhaseMeter.EmitMmcmDrpController"
+./mill emit DigitalPhaseMeterTop MmcmDrpController   # 生成两个 IP 需要的 Chisel 产物
 uv sync                                  # 一次性：安装 dpm-vivado-flow 到根 .venv
 uv run dpm-vivado-flow                   # 自动只重打包变化的 IP、刷新 BD、重跑受影响的 run
 python3 ps/tools/check_bd_uart.py build/vivado/dpm_system.xsa   # 复验串口配置

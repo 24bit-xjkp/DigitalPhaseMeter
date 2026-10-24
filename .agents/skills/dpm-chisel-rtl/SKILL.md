@@ -39,39 +39,41 @@ object EmitFoo extends Main {
 
 ## 生成入口
 
-通过 sbtn 的运行入口执行生成主类，参数直接跟在类名之后：
+通过构建系统的代码生成入口执行生成主类（本项目当前是 Mill，命令在仓库根执行，用 `./mill` 启动脚本）：
 
 ```bash
-sbtn -batch "runMain DigitalPhaseMeter.EmitController"
+./mill emit                                  # 生成全部 Emit<Name>（按内容缓存，未变化的跳过）
+./mill emit Controller DigitalPhaseMeterTop  # 只生成指定模块
+./mill emit --force Controller               # 强制重新生成
+./mill runMain DigitalPhaseMeter.EmitController   # 无条件运行单个主类
 ```
 
-两个实测陷阱：
+Mill 专属的注意点：
 
-- **一次只跑一个生成主类**。`sbtn -batch` 的多个参数会被拼成**同一条**命令，于是
-  `sbtn -batch "runMain ...EmitA" "runMain ...EmitB"` 只会生成 A（B 那一串变成 A 的参数，
-  实测被 `ChiselStage` 忽略、不报错），表现是"以为重新生成了，实际只有第一个模块是新的"。
-  批量生成用 shell 循环：`for m in Controller DigitalPhaseMeterTop; do sbtn -batch "runMain DigitalPhaseMeter.Emit$m"; done`。
-- **`--` 是 JVM 参数与程序参数的分隔符，不会传给程序**：sbt 2 的 `runMain` / `runMainCached` 都用
-  `RunUtil.splitArgs` 把 `--` 之前的部分当 JVM 参数、之后的部分当程序参数，`--` 本身不会进入 `ChiselStage`
-  的参数列表。给生成主类传 `ChiselStage` 参数时直接跟在类名之后，不要用 `--` 做“选项结束”标记。
+- **一条命令可传多个模块名**：`emit` 的位置参数就是模块名（可写 `Controller`、`EmitController` 或主类全名），
+  需要生成多个模块时写在同一条命令里即可，不要拆成多条重复命令。
+- **`--force` 必须写在模块名之前**：模块名之后的 `--force` 不会被当作选项解析，必须写成
+  `./mill emit --force Controller`。
+- **`runMain` 的主类名是位置参数**：`./mill runMain DigitalPhaseMeter.EmitController`，其余参数原样传给主类。
+  JVM 参数由构建定义（`build.mill` 的 `forkArgs` / `forkEnv`）配置，不在命令行用 `--` 分隔。
+- **生成入口会先编译**：`emit` / `runMain` 依赖编译产物；`-Werror` 下编译失败时不会生成。
 
-### 迭代时用 `runMainCached`
+### 按内容缓存（`emit`）
 
-调用形式与 `runMain` 相同，但只在入口点或其传递依赖变化时执行一次：
-
-```bash
-sbtn -batch "runMainCached DigitalPhaseMeter.EmitController"             # 未变化则跳过；强制重跑用 runMain
-```
+`emit` 只在入口点或其传递依赖变化时执行生成：
 
 - **依赖判定取字节码闭包**：从入口主类的 `.class` 出发解析常量池里的类引用，沿项目 class 目录展开，对可达的
-  `.class` 文件求 SHA-256，再叠加依赖 classpath 摘要。判定看编译产物而不是源码文本：不改变字节码的编辑（例如在文件末尾追加注释）不会触发重跑。
+  `.class` 文件求 SHA-256，再叠加依赖 classpath 标识。判定看编译产物而不是源码文本：不改变字节码的编辑（例如在文件末尾追加注释）不会触发重跑。
 - **缓存按主类隔离**：改 `PhaseMeter` 只会让 `EmitPhaseMeter` / `EmitController` / `EmitDigitalPhaseMeterTop`
   重跑，与 `EmitSignalInputMux` 等入口点无关。
-- 缓存用 sbt 2 的 ActionCache 落盘，`sbtn` 会话重启后仍有效；`sbtn clean` 不会清掉它。`Emit<Name>` 入口点还会
-  检查约定产物 `build/chisel/<Name>/filelist.f`，缺失时重新生成（避免删掉产物后误跳过）；需要无条件重跑时直接用 `runMain`。
-- 缓存键还包含主类名、程序参数、JVM 参数与 fork 配置，改这些都会触发重跑。
-- 实现见 `project/RunMainCached.scala`（`package sbt` 以复用 sbt 内部 API）。改动摘要或缓存键的构造方式时
-  递增 `CacheFormatVersion`，避免旧缓存条目误命中。
+- **持久且不在 clean 范围**：缓存落在 `build/chisel/.emit-cache/`，跨会话有效；`./mill clean` 删的是 Mill 的
+  构建缓存/产物 `out/`，不会清掉 `build/chisel/`。
+- **带产物检查**：`Emit<Name>` 入口点还会检查约定产物 `build/chisel/<Name>/filelist.f`，缺失时重新生成
+  （避免删掉产物后误跳过）。
+- 需要无条件重跑时，用 `./mill runMain DigitalPhaseMeter.Emit<Name>`（单个主类）或
+  `./mill emit --force <模块名>`。
+- 实现见仓库根 `build.mill` 的 `emit` 任务；改动摘要或缓存键的构造方式时递增 `EmitCacheFormat`，
+  避免旧缓存条目误命中。
 
 ## 产物目录：每个模块一份
 
@@ -94,7 +96,7 @@ Verilator 与 xsim / Vivado 都能直接编译。
 `build/chisel/<Name>/` 下是 `--split-verilog` 拆出的多个 `.sv` 加一份 `filelist.f`。测试目标逐行读取 `filelist.f`（见 `test/xmake.lua` 的 `on_load`），因此：
 
 - 不要手工维护源文件列表，也不要依赖目录 glob（源文件顺序由 firtool 决定）。
-- 新模块没有出现在 `filelist.f` 中，说明生成没有跑到，或产物目录不对（见上一节的 `--` 陷阱）。
+- 新模块没有出现在 `filelist.f` 中，说明生成没有跑到，或产物目录不对（见上一节的生成入口）。
 - 文件顺序即 firtool 的拓扑顺序，`filelist.f` 就是权威列表。
 - **生成目录名、filelist 中的文件名与模块名不一定相同**：模块可用 `override def desiredName` 改名，
   例如 `EdgeDetector` 按配置生成 `EdgeDetectorRising`/`EdgeDetectorBoth`——`filelist.f` 里列的是
@@ -279,7 +281,7 @@ Verilator 与 xsim / Vivado 都能直接编译。
 ## 格式与检查
 
 - Scala 代码用 `scalafmt` 格式化（配置见 `.scalafmt.conf`，`maxColumn = 120`、4 空格缩进）：`scalafmt` 就地格式化，`scalafmt --test` 只检查。提交前保证 `scalafmt --test` 通过。
-- 静态分析工具链：sbt-scalafix（插件声明在 `project/plugins.sbt`，规则与配置在 `.scalafix.conf`）+ 编译器 lint（`build.sbt` 的 `scalacOptions`）。规则一句话：Scalafix 禁 `var` / `throw` / `null` / `while` / `return` 等语法（改用 Chisel 的 `Reg` / `Wire` / `require` 写法）并整理导入，编译器侧统一打开 `-Xlint` / `-Wunused` / `-Wdead-code`，且 `-Werror` 让告警变成构建失败。检查命令：`sbtn -batch scalaLint`（= `scalafixAll --check` + `compile`）、自动修复 `sbtn -batch "scalafixAll"`、格式检查 `scalafmt --test`；标准都是 0 warning。
+- 静态分析工具链：Mill 的 Scalafix 插件（`com.goyeau::mill-scalafix`，规则与配置在 `.scalafix.conf`）+ 编译器 lint（`build.mill` 的 `scalacOptions`）。规则一句话：Scalafix 禁 `var` / `throw` / `null` / `while` / `return` 等语法（改用 Chisel 的 `Reg` / `Wire` / `require` 写法）并整理导入，编译器侧统一打开 `-Xlint` / `-Wunused` / `-Wdead-code`，且 `-Werror` 让告警变成构建失败。检查命令：`./mill compile`（编译器 lint）、`./mill fix --check`（Scalafix 检查）、自动修复 `./mill fix`、格式检查 `scalafmt --test`；标准都是 0 warning。
 - 改完 RTL 先保证上述检查通过，再跑生成入口：`-Werror` 下任何告警都会让 `compile` 失败，带着告警去生成没有意义。新增/重命名模块、调整导入时尤其注意未使用 import、非穷尽 match 与 nullary-unit 这几类告警（检查项与有意关闭的规则见 `dpm-pre-delivery-check` 第 2 节）。
 - 注释遵循仓库根目录 `AGENTS.md` 的语言约定，风格为 Doxygen（`/** ... */`，参数用 `@param`）；公共模块类的文档注释要说明它在哪个时钟域、各参数含义。
 - 新增模块后同步补齐：生成入口（`Emit<Name>`）、必要时 `test/<Name>.cpp`，并把新踩到的坑写回本 skill。

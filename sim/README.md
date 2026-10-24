@@ -16,8 +16,8 @@ Verilator 目标覆盖（`xmake test -v`），其中顶层 IP 的守门人是
 ## 运行
 
 ```bash
-sim/run_handoff_tb.sh            # 默认重生成 RTL 后跑全部点
-sim/run_handoff_tb.sh --no-gen   # 跳过 sbtn 生成（RTL 已是最新时）
+sim/run_handoff_tb.sh            # 默认走生成入口后跑全部点
+sim/run_handoff_tb.sh --no-gen   # 跳过生成入口（RTL 已是最新时）
 sim/run_handoff_tb.sh --clean    # 先清 build/xsim_handoff
 XILINX_VIVADO=/path/to/Vivado sim/run_handoff_tb.sh   # 指定 Vivado 安装路径
 ```
@@ -66,7 +66,8 @@ XILINX_VIVADO=/path/to/Vivado sim/run_handoff_tb.sh   # 指定 Vivado 安装路�
   「200 × 1ms」这种循环写法。
 - **联调激励必须按真实地址**（`0x43C0_0000` / `0x43C1_0000` + 偏移）驱动 AXI，否则测不出地址
   译码类缺陷。
-- **默认每次重新生成 RTL**：脚本默认这样，避免源文件改过而 `build/chisel/` 里还是旧产物；
+- **默认每次走生成入口**：脚本默认调用 `./mill emit DigitalPhaseMeterTop MmcmDrpController`，
+  由构建系统的内容缓存判断是否需要重跑，避免源文件改过而 `build/chisel/` 里还是旧产物；
   确认产物已最新时用 `--no-gen` 省时间。
 - **MMCM 行为模型很慢**：锁一次约 1~2ms 仿真时间，整轮约 17s 墙钟；看门狗按「25ms 仿真时间无
   进展」判卡死。

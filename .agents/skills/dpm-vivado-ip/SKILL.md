@@ -15,8 +15,7 @@ RTL 本身的写法见 `dpm-chisel-rtl`；测量结果的判据见 `dpm-measurem
 ## 交付物与执行顺序
 
 ```text
-sbtn -batch "runMain DigitalPhaseMeter.EmitDigitalPhaseMeterTop"    # 顶层 IP RTL
-sbtn -batch "runMain DigitalPhaseMeter.EmitMmcmDrpController"       # DRP 控制器 RTL
+./mill emit DigitalPhaseMeterTop MmcmDrpController       # 顶层 IP 与 DRP 控制器 RTL（仓库根执行）
 uv sync                                                 # 一次性：把 dpm-vivado-flow 装进根 .venv
 uv run dpm-vivado-flow                                  # 官方增量流程（IP → BD → 综合/实现/XSA）
 uv run dpm-vivado-flow --status                         # 只读查看 stamp/指纹/DCP/报告状态
@@ -27,7 +26,8 @@ vivado -mode batch -source vivado/impl_multi.tcl -tclargs 6      # 换 place/rou
 vivado -mode batch -source vivado/query_runs.tcl        # 查看 run 的策略/步骤/增量参数（排障）
 ```
 
-**改了 RTL 之后**：先跑两个 `sbtn` 生成入口，再在仓库根跑 `uv run dpm-vivado-flow`。流程会按内容
+**改了 RTL 之后**：先跑生成入口（`./mill emit DigitalPhaseMeterTop MmcmDrpController`，一条命令生成两个模块），
+再在仓库根跑 `uv run dpm-vivado-flow`。流程会按内容
 哈希只重打包变化的 IP、在原工程内刷新 BD（接口不变时），并只重跑受影响的 OOC run / `synth_1` /
 `impl_1`；需要从零重建时用 `--force`。手工只重跑底层 Tcl 打包/BD 脚本仍可，但不会自动复用，
 且只重跑综合实现会用到旧 IP。
@@ -156,7 +156,7 @@ xsim <snapshot> -runall
     `T_MAIN=18900ps` / `T_DSP=2100ps`（严格 9:1，18900 能被频点表全部 MULT 整除），
     详见 `sim/README.md`；
   - 按**真实地址**（`0x43C0_0000` / `0x43C1_0000` + 偏移）驱动 AXI，不要给裸偏移；
-  - `run_handoff_tb.sh` 默认每次用 sbtn 重新生成 RTL（与其它生成入口一致）；
+  - `run_handoff_tb.sh` 默认每次走 `./mill emit` 生成入口（按内容缓存判断是否重跑，与其它生成入口一致）；
     确认产物最新时用 `--no-gen`。
 - **顶层 AXI 寄存器通路的守门人是 Verilator 顶层用例 `test/DigitalPhaseMeterTop.cpp`**：它用
   AXI4-Lite BFM 按真实基地址 `0x43C0_0000 + 偏移` 驱动，覆盖复位/寄存器默认值、写数据先到与
@@ -382,7 +382,8 @@ run 的 methodology 报告：有未 waive 的 Critical Warning 直接 `error`；
 - 告警类改动要把**清理前后的条数**都给出，并说明哪些是改设计消掉的、哪些是屏蔽/waiver 的（附理由
   文件）；给出所有 run 的 `runme.log` 计数与 methodology 报告的 `Checks found / Checks waived`。
 - 高速时钟类改动要给出**多次实现**的结果（`impl_stability.tcl`），单次通过不作为签核依据。
-- **改了 RTL 之后**：先跑两个 `sbtn` 生成入口，再在仓库根跑 `uv run dpm-vivado-flow`；它会按内容
+- **改了 RTL 之后**：先跑生成入口（`./mill emit DigitalPhaseMeterTop MmcmDrpController`），再在仓库根跑
+  `uv run dpm-vivado-flow`；它会按内容
   哈希自动只重打包变化的 IP、刷新 BD 并重跑受影响的 run。需要从零重建时用 `--force`。
 - **改了 BD 源文件（`vivado/rtl/dpm_mmcm_src.v` / `create_bd.tcl`）也必须重建工程**：BD 结构哈希
   变化会触发全量重建；如果只手工跑 build 而跳过 BD 阶段，会复用旧网表。最稳妥是
