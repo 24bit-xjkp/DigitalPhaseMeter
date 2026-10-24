@@ -52,20 +52,25 @@ xmake run Controller "-ts=Controller" "-tc=*gate count matches*"  # 一个用例
 
 ## 实测陷阱
 
-### 1. 时间精度必须能整除时钟半周期（本项目用 `ps_10`）
+### 1. 时间精度统一为 `ns`，所有等待时长必须是整数纳秒（本项目用 `ns`）
 
 ```cpp
-dut_context_t ctx{{.coverage = true, .time_precision = verilator_time_unit::ps_10}};
+constexpr dut_context_option ctx_opt{.coverage = true, .time_precision = verilator_time_unit::ns};
+dut_context_t ctx{ctx_opt};
 ```
 
-框架的 `register_wait` 把等待时长换算成时间精度单位时做的是**整数除法**（`~/verilator_utils/src/scheduler.cppm` 的 `register_wait`：`time_to_wait.rep / time_precision_fs_`）。于是任何不能整除等待时长的精度都会**静默截断**。例如 `.time_precision = ns` 时，`generate_clock(port.dsp_clock, 5_ns)` 内部按 2.5ns 半周期等待，2.5ns 被截断为 2ns，实际时钟是 **4ns / 250MHz**，而不是期望的 5ns / 200MHz。
+框架的 `register_wait` 把等待时长换算成时间精度单位时做的是**整数除法**（`~/verilator_utils/src/scheduler.cppm` 的 `register_wait`：`time_to_wait.rep / time_precision_fs_`）。于是任何不能整除等待时长的精度都会**静默截断**。本项目的测试统一把 `.time_precision` 取成 `ns`（与默认的 `time_unit` 相同），因此：
 
-危险之处在于它不报错，只会让所有"理论值 vs 实测值"的对比悄悄偏掉。
+- 传给 `generate_clock` / `wait_time` / `generate_async_reset` / `loop_until_finish` 的时间都必须是**整数纳秒**；
+- 生成 50% 占空比时钟时，`generate_clock` 内部等待的是**半个周期**，所以周期必须取整数纳秒的**偶数**：`5_ns` 的半周期 2.5ns 会被截成 2ns（实际时钟变成 4ns/250MHz），`1_ns` 的半周期会被截成 **0**（时钟根本不翻转）；
+- 在 `period/4` 等分点翻转的激励，周期还要能被 4 整除（`EdgeDetector` 与 `ResetSynchronizer` 都取 20ns）。
 
-选择原则是"精度能整除所有等待时长"：`ps`、`ps_10` 都能精确表示 2.5ns，本项目沿用 `test/EdgeDetector.cpp` 的 `.time_precision = ps_10`（10ps）。换算到飞秒要乘 `10000zu`，且 `time_in_time_precision()` 是协程 awaiter，必须 `co_await`：
+危险之处在于它不报错，只会让所有"理论值 vs 实测值"的对比悄悄偏掉。新增测试时先按"精度能整除所有等待时长"选值：本项目固定用 `ns`，并只用整数纳秒的时间常数（`Controller` / `DigitalPhaseMeterTop` 的 DSP 测试时钟取 4ns/250MHz，低速时钟取 20ns/50MHz，被测信号周期与相位差也都取整数纳秒）。
+
+`time_in_time_precision()` 返回的是**时间精度单位**下的计数（`ns` 精度下 1 个单位 = 1ns），换算到飞秒要乘 `1'000'000zu`，且它是协程 awaiter，必须 `co_await`：
 
 ```cpp
-const auto now{static_cast<std::uint64_t>(co_await time_in_time_precision()) * 10000zu};  // 10ps 单位 → fs
+const auto now{static_cast<std::uint64_t>(co_await time_in_time_precision()) * 1'000'000zu};  // ns 单位 → fs
 ```
 
 换用别的时间精度时这个乘数要跟着改。涉及周期的整数运算统一在飞秒域做，避免二次截断。

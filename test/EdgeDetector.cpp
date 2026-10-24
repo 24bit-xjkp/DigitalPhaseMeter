@@ -26,11 +26,13 @@ TEST_SUITE("EdgeDetector")
     TEST_CASE("EdgeDetector")
     {
         dut_context_t ctx{
-            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
+            {.coverage = true, .time_precision = verilator_time_unit::ns}
         };
         port_t port{ctx.dut()};
 
-        constexpr static auto period{1_ns};
+        // 时间精度为 ns，且下面的异步激励在 period/4、period/2 处翻转，因此周期必须取
+        // 4ns 的整数倍（20ns = 50MHz），才能保证这些等待时长都是整数纳秒、不被截断
+        constexpr static auto period{20_ns};
         constexpr static auto pipeline{3zu};
         // 流水线级数为3，倒数第二级表示当前信号
         constexpr static auto delay{pipeline - 1};

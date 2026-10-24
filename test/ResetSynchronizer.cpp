@@ -28,12 +28,12 @@ TEST_SUITE("ResetSynchronizer")
     TEST_CASE("reset asserts asynchronously and releases after the chain depth")
     {
         dut_context_t ctx{
-            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
+            {.coverage = true, .time_precision = verilator_time_unit::ns}
         };
         ctx.set_base_name("ResetSynchronizer.async_assert_sync_release");
         port_t port{ctx.dut()};
 
-        constexpr static auto period{10_ns};
+        constexpr static auto period{20_ns};
         ctx.add_task(generate_clock(port.clock, period));
 
         /// 释放复位：resetn 抬高后输出再保持 reset_depth 个上升沿，第 reset_depth 个上升沿之后失效

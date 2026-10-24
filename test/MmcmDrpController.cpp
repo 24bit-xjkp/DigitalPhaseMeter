@@ -39,6 +39,7 @@ namespace
     /// 完整 32 位地址。历史上这里按裸偏移（`idx * 4`）驱动，掩盖了「窗口判断误用高位地址」
     /// 的缺陷——上板时所有 DRP 读写都被丢弃、SET_SIG 恒回 ERR_BUSY。
     constexpr std::uint32_t kIpBase{0x43C1'0000u};
+
     constexpr std::uint32_t ip_addr(std::uint32_t word_index) { return kIpBase + word_index * 4u; }
 
     // 寄存器字索引（字节偏移 = idx * 4）
@@ -132,7 +133,8 @@ namespace
         co_await port.stimulate();
         if((sink != nullptr) && (port.drp_den != 0u) && (port.drp_dwe != 0u))
         {
-            sink->push_back({static_cast<std::uint32_t>(port.drp_daddr), static_cast<std::uint32_t>(port.drp_di),
+            sink->push_back({static_cast<std::uint32_t>(port.drp_daddr),
+                             static_cast<std::uint32_t>(port.drp_di),
                              static_cast<std::uint32_t>(port.mmcm_reset)});
         }
         // 等 bvalid
@@ -142,8 +144,9 @@ namespace
             co_await port.stimulate();
             if((sink != nullptr) && (port.drp_den != 0u) && (port.drp_dwe != 0u))
             {
-                sink->push_back({static_cast<std::uint32_t>(port.drp_daddr), static_cast<std::uint32_t>(port.drp_di),
-                             static_cast<std::uint32_t>(port.mmcm_reset)});
+                sink->push_back({static_cast<std::uint32_t>(port.drp_daddr),
+                                 static_cast<std::uint32_t>(port.drp_di),
+                                 static_cast<std::uint32_t>(port.mmcm_reset)});
             }
         }
         port.awvalid = 0;
@@ -205,7 +208,8 @@ namespace
             co_await port.stimulate();
             if((port.drp_den != 0u) && (port.drp_dwe != 0u))
             {
-                writes.push_back({static_cast<std::uint32_t>(port.drp_daddr), static_cast<std::uint32_t>(port.drp_di),
+                writes.push_back({static_cast<std::uint32_t>(port.drp_daddr),
+                                  static_cast<std::uint32_t>(port.drp_di),
                                   static_cast<std::uint32_t>(port.mmcm_reset)});
             }
         }
@@ -251,15 +255,14 @@ namespace
     };
 
     /// 按**字索引**（不是数组下标）取 kPattern 里的值：kPattern 从 kClkfbout 起顺序排列。
-    constexpr std::uint32_t pattern_value(std::uint32_t word_index)
-    {
-        return kPattern.at(word_index - kClkfbout).second;
-    }
+    constexpr std::uint32_t pattern_value(std::uint32_t word_index) { return kPattern.at(word_index - kClkfbout).second; }
+
+    constexpr dut_context_option ctx_opt{.coverage = true, .time_precision = verilator_time_unit::ns};
 }  // namespace
 
 TEST_CASE("MmcmDrpController：ID 与配置寄存器读写")
 {
-    dut_context_t ctx{};
+    dut_context_t ctx{ctx_opt};
     ctx.set_base_name("MmcmDrpController.regs");
     port_t port{ctx.dut()};
     ctx.add_task(generate_clock(port.clock, clock_period));
@@ -296,7 +299,7 @@ TEST_CASE("MmcmDrpController：地址译码只看页内偏移（基地址 + 偏�
     // 回归用例：地址译码必须接受「BD 基地址 + 页内偏移」的完整 32 位地址
     // （上板实测：早期实现按 addr[31:6] == 0 判断窗口，真实地址 0x43C1_0008 被判为窗口外，
     //  所有 DRP 读写被丢弃 → SET_SIG 恒回 ERR_BUSY）。同时确认页内越界偏移仍被忽略。
-    dut_context_t ctx{};
+    dut_context_t ctx{ctx_opt};
     ctx.set_base_name("MmcmDrpController.window");
     port_t port{ctx.dut()};
     ctx.add_task(generate_clock(port.clock, clock_period));
@@ -318,10 +321,7 @@ TEST_CASE("MmcmDrpController：地址译码只看页内偏移（基地址 + 偏�
         for(std::size_t i{0zu}; i != 20zu && !read_in_page_but_unmapped.has_value(); ++i)
         {
             co_await port.stimulate();
-            if((port.rvalid != 0u) && (port.rready != 0u))
-            {
-                read_in_page_but_unmapped = static_cast<std::uint32_t>(port.rdata);
-            }
+            if((port.rvalid != 0u) && (port.rready != 0u)) { read_in_page_but_unmapped = static_cast<std::uint32_t>(port.rdata); }
         }
         port.arvalid = 0;
         co_await port.stimulate();
@@ -334,10 +334,7 @@ TEST_CASE("MmcmDrpController：地址译码只看页内偏移（基地址 + 偏�
         for(std::size_t i{0zu}; i != 20zu && !read_out_of_page.has_value(); ++i)
         {
             co_await port.stimulate();
-            if((port.rvalid != 0u) && (port.rready != 0u))
-            {
-                read_out_of_page = static_cast<std::uint32_t>(port.rdata);
-            }
+            if((port.rvalid != 0u) && (port.rready != 0u)) { read_out_of_page = static_cast<std::uint32_t>(port.rdata); }
         }
         port.arvalid = 0;
         co_await eval_finish();
@@ -362,7 +359,7 @@ TEST_CASE("MmcmDrpController：地址译码只看页内偏移（基地址 + 偏�
 
 TEST_CASE("MmcmDrpController：写 LOAD 触发 8 笔 DRP 写且顺序/数据正确")
 {
-    dut_context_t ctx{};
+    dut_context_t ctx{ctx_opt};
     ctx.set_base_name("MmcmDrpController.load");
     port_t port{ctx.dut()};
     ctx.add_task(generate_clock(port.clock, clock_period));
@@ -389,7 +386,8 @@ TEST_CASE("MmcmDrpController：写 LOAD 触发 8 笔 DRP 写且顺序/数据正�
             co_await port.stimulate();
             if((port.drp_den != 0u) && (port.drp_dwe != 0u))
             {
-                after.push_back({static_cast<std::uint32_t>(port.drp_daddr), static_cast<std::uint32_t>(port.drp_di),
+                after.push_back({static_cast<std::uint32_t>(port.drp_daddr),
+                                 static_cast<std::uint32_t>(port.drp_di),
                                  static_cast<std::uint32_t>(port.mmcm_reset)});
             }
             if(port.bvalid != 0u)
@@ -432,7 +430,7 @@ TEST_CASE("MmcmDrpController：写 LOAD 触发 8 笔 DRP 写且顺序/数据正�
 
 TEST_CASE("MmcmDrpController：DEN 每笔只拉高一拍，busy 在重配置期间为 1")
 {
-    dut_context_t ctx{};
+    dut_context_t ctx{ctx_opt};
     ctx.set_base_name("MmcmDrpController.timing");
     port_t port{ctx.dut()};
     ctx.add_task(generate_clock(port.clock, clock_period));
@@ -475,7 +473,7 @@ TEST_CASE("MmcmDrpController：DEN 每笔只拉高一拍，busy 在重配置期�
 
 TEST_CASE("MmcmDrpController：locked 异步电平同步后出现在 STATUS.b0")
 {
-    dut_context_t ctx{};
+    dut_context_t ctx{ctx_opt};
     ctx.set_base_name("MmcmDrpController.locked");
     port_t port{ctx.dut()};
     ctx.add_task(generate_clock(port.clock, clock_period));

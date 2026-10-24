@@ -37,8 +37,9 @@ namespace
 
     /// 主时钟 50MHz（低速域：寄存器堆、控制 FSM、闸门计数）
     constexpr auto clock_period{20_ns};
-    /// 高速测量时钟。测试里取 200MHz；芯片实际是 450MHz，测量语义与两个时钟的周期比无关
-    constexpr auto dsp_period{5_ns};
+    /// 高速测量时钟。测试里取 250MHz；芯片实际是 450MHz，测量语义与两个时钟的周期比无关。
+    /// 时间精度为 ns，周期必须取整数纳秒的偶数，半周期才不会被截断（5_ns 会变成 4ns）
+    constexpr auto dsp_period{4_ns};
 
     /// 外部引脚上的被测信号：周期 400ns，sig2 上升沿滞后 sig1 120ns
     /// （两路都用 `generate_clock` 产生，`offset` 作为第三个参数即起始延时）
@@ -440,15 +441,15 @@ namespace
         const auto interrupted{co_await wait_interrupt(port, 4u * gate_target + 200u)};
         co_return interrupted;
     }
+
+    constexpr dut_context_option ctx_opt{.coverage = true, .time_precision = verilator_time_unit::ns};
 }  // namespace
 
 TEST_SUITE("DigitalPhaseMeterTop")
 {
     TEST_CASE("reset keeps the AXI slave idle and releases registers to their defaults")
     {
-        dut_context_t ctx{
-            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
-        };
+        dut_context_t ctx{ctx_opt};
         ctx.set_base_name("DigitalPhaseMeterTop.reset");
         port_t port{ctx.dut()};
         ctx.add_task(generate_clock(port.clock, clock_period));
@@ -535,9 +536,7 @@ TEST_SUITE("DigitalPhaseMeterTop")
 
     TEST_CASE("GATE_TARGET accepts write-data-first ordering and byte strobes")
     {
-        dut_context_t ctx{
-            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
-        };
+        dut_context_t ctx{ctx_opt};
         ctx.set_base_name("DigitalPhaseMeterTop.regs");
         port_t port{ctx.dut()};
         ctx.add_task(generate_clock(port.clock, clock_period));
@@ -574,9 +573,7 @@ TEST_SUITE("DigitalPhaseMeterTop")
 
     TEST_CASE("a measurement raises busy, sets the interrupt and latches a valid record")
     {
-        dut_context_t ctx{
-            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
-        };
+        dut_context_t ctx{ctx_opt};
         ctx.set_base_name("DigitalPhaseMeterTop.start");
         port_t port{ctx.dut()};
         ctx.add_task(generate_clock(port.clock, clock_period));
@@ -622,9 +619,7 @@ TEST_SUITE("DigitalPhaseMeterTop")
 
     TEST_CASE("clearing the interrupt keeps resultValid and writes to read-only registers are ignored")
     {
-        dut_context_t ctx{
-            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
-        };
+        dut_context_t ctx{ctx_opt};
         ctx.set_base_name("DigitalPhaseMeterTop.irq_clear");
         port_t port{ctx.dut()};
         ctx.add_task(generate_clock(port.clock, clock_period));
@@ -670,9 +665,7 @@ TEST_SUITE("DigitalPhaseMeterTop")
 
     TEST_CASE("a second measurement with a shorter gate updates the result registers")
     {
-        dut_context_t ctx{
-            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
-        };
+        dut_context_t ctx{ctx_opt};
         ctx.set_base_name("DigitalPhaseMeterTop.second");
         port_t port{ctx.dut()};
         ctx.add_task(generate_clock(port.clock, clock_period));
@@ -710,9 +703,7 @@ TEST_SUITE("DigitalPhaseMeterTop")
 
     TEST_CASE("only the latest result is kept and overwrites increment LOST_COUNT")
     {
-        dut_context_t ctx{
-            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
-        };
+        dut_context_t ctx{ctx_opt};
         ctx.set_base_name("DigitalPhaseMeterTop.lost");
         port_t port{ctx.dut()};
         ctx.add_task(generate_clock(port.clock, clock_period));
@@ -749,9 +740,7 @@ TEST_SUITE("DigitalPhaseMeterTop")
 
     TEST_CASE("CTRL.clear resets the result area and restarts the sequence")
     {
-        dut_context_t ctx{
-            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
-        };
+        dut_context_t ctx{ctx_opt};
         ctx.set_base_name("DigitalPhaseMeterTop.clear");
         port_t port{ctx.dut()};
         ctx.add_task(generate_clock(port.clock, clock_period));
@@ -801,9 +790,7 @@ TEST_SUITE("DigitalPhaseMeterTop")
 
     TEST_CASE("the interrupt pin is gated by irqEnable while the pending flag stays set")
     {
-        dut_context_t ctx{
-            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
-        };
+        dut_context_t ctx{ctx_opt};
         ctx.set_base_name("DigitalPhaseMeterTop.irq_gate");
         port_t port{ctx.dut()};
         ctx.add_task(generate_clock(port.clock, clock_period));
@@ -844,9 +831,7 @@ TEST_SUITE("DigitalPhaseMeterTop")
 
     TEST_CASE("the gate target is latched when the measurement starts")
     {
-        dut_context_t ctx{
-            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
-        };
+        dut_context_t ctx{ctx_opt};
         ctx.set_base_name("DigitalPhaseMeterTop.gate_latch");
         port_t port{ctx.dut()};
         ctx.add_task(generate_clock(port.clock, clock_period));
@@ -885,9 +870,7 @@ TEST_SUITE("DigitalPhaseMeterTop")
 
     TEST_CASE("a start request while busy is ignored")
     {
-        dut_context_t ctx{
-            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
-        };
+        dut_context_t ctx{ctx_opt};
         ctx.set_base_name("DigitalPhaseMeterTop.double_start");
         port_t port{ctx.dut()};
         ctx.add_task(generate_clock(port.clock, clock_period));
@@ -925,9 +908,7 @@ TEST_SUITE("DigitalPhaseMeterTop")
 
     TEST_CASE("the internal signal source can be selected and switched back to the external input")
     {
-        dut_context_t ctx{
-            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
-        };
+        dut_context_t ctx{ctx_opt};
         ctx.set_base_name("DigitalPhaseMeterTop.signal_source");
         port_t port{ctx.dut()};
         ctx.add_task(generate_clock(port.clock, clock_period));
@@ -982,9 +963,7 @@ TEST_SUITE("DigitalPhaseMeterTop")
 
     TEST_CASE("CTRL.clear while busy resets the result area and the in-flight measurement completes")
     {
-        dut_context_t ctx{
-            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
-        };
+        dut_context_t ctx{ctx_opt};
         ctx.set_base_name("DigitalPhaseMeterTop.busy_clear");
         port_t port{ctx.dut()};
         ctx.add_task(generate_clock(port.clock, clock_period));
@@ -1045,9 +1024,7 @@ TEST_SUITE("DigitalPhaseMeterTop")
 
     TEST_CASE("a second reset returns status and configuration to their defaults")
     {
-        dut_context_t ctx{
-            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
-        };
+        dut_context_t ctx{ctx_opt};
         ctx.set_base_name("DigitalPhaseMeterTop.second_reset");
         port_t port{ctx.dut()};
         ctx.add_task(generate_clock(port.clock, clock_period));

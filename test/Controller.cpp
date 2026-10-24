@@ -10,7 +10,7 @@ import verilator_utils.full;
 #include <verilator_bwd.hpp>
 
 // Controller 跨两个时钟域：控制 FSM 与闸门计数器运行在低速的 clock 域（50MHz），
-// PhaseMeter 运行在高速的 dspClock 域（200MHz）。测试把 Controller 当作测量仪表，
+// PhaseMeter 运行在高速的 dspClock 域（测试中取 250MHz）。测试把 Controller 当作测量仪表，
 // 用 verilator_utils 的近似比较（approx）校验测量结果与理论值的偏差是否落在容限内，
 // 而不逐周期复现内部时序。
 //
@@ -42,8 +42,9 @@ namespace
     using dut_t = ControllerVerilator;
     using dut_context_t = dut_context<dut_t, VerilatedFstC>;
 
-    /// 高速时钟周期，200MHz
-    constexpr auto dsp_period{5_ns};
+    /// 高速时钟周期，250MHz。时间精度为 ns，周期必须取整数纳秒的偶数，半周期才能精确表示：
+    /// 5_ns 这类奇数周期的半周期 2.5ns 会被截断成 2ns（实际变成 4ns）
+    constexpr auto dsp_period{4_ns};
     /// 低速时钟周期，50MHz。两个时钟周期之比为整数，相位计测量的是高速时钟域内的
     /// 参考沿到被测沿间隔，与两域周期比无关
     constexpr auto clock_period{20_ns};
@@ -173,7 +174,8 @@ namespace
         // 对齐到高速时钟下降沿后再发起请求；同时记下启动时刻，作为「启动后经过多少个低速
         // 周期再改写 targetGate」的基准——targetGate 在启动的那一拍就被 Controller 锁存
         co_await wait_stimulate(port.dsp_clock);
-        const auto start_fs{static_cast<std::uint64_t>(co_await time_in_time_precision()) * 10000zu};
+        // 时间精度为 1ns，换算到飞秒需要乘以 1e6
+        const auto start_fs{static_cast<std::uint64_t>(co_await time_in_time_precision()) * 1'000'000zu};
         port.io_in_valid = 1;
         co_await wait_stimulate(port.dsp_clock);
 
@@ -181,8 +183,7 @@ namespace
         // 信号自由运行，直到控制器给出测量结果
         while(static_cast<std::uint64_t>(port.io_out_valid) == 0u)
         {
-            // 时间精度为10ps，换算到飞秒需要乘以1e4
-            const auto now{static_cast<std::uint64_t>(co_await time_in_time_precision()) * 10000zu};
+            const auto now{static_cast<std::uint64_t>(co_await time_in_time_precision()) * 1'000'000zu};
             // 按需在启动后的指定时刻改写目标闸门计数（此时测量仍在进行中）：输入不必在测量
             // 期间保持稳定，本次测量仍应当按启动拍锁存的目标值完成
             if(option.gate_change_after_cycles.has_value() && !gate_changed)
@@ -308,15 +309,15 @@ namespace
         const auto offset_cycle_round{static_cast<double>(::std::lround(offset_cycles))};
         if(::std::abs(offset_cycles - offset_cycle_round) < 1e-9) { CHECK_EQ(result.phase_cnt, theory_phase_cnt); }
     }
+
+    constexpr dut_context_option ctx_opt{.coverage = true, .time_precision = verilator_time_unit::ns};
 }  // namespace
 
 TEST_SUITE("Controller")
 {
     TEST_CASE("reset holds the controller idle and produces no result")
     {
-        dut_context_t ctx{
-            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
-        };
+        dut_context_t ctx{ctx_opt};
         ctx.set_base_name("Controller.reset");
         port_t port{ctx.dut()};
 
@@ -380,9 +381,7 @@ TEST_SUITE("Controller")
         CAPTURE(sig1_period_ns);
         CAPTURE(sig2_period_ns);
 
-        dut_context_t ctx{
-            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
-        };
+        dut_context_t ctx{ctx_opt};
         ctx.set_base_name(::std::format("Controller.gate.{}_{}", sig1_period_ns, sig2_period_ns));
         port_t port{ctx.dut()};
 
@@ -414,9 +413,7 @@ TEST_SUITE("Controller")
         CAPTURE(sig_period_ns);
         CAPTURE(offset_ns);
 
-        dut_context_t ctx{
-            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
-        };
+        dut_context_t ctx{ctx_opt};
         ctx.set_base_name(std::format("Controller.phase.{}_{}", sig_period_ns, offset_ns));
         port_t port{ctx.dut()};
 
@@ -447,9 +444,7 @@ TEST_SUITE("Controller")
         CAPTURE(gate_cnts[1]);
         CAPTURE(gate_cnts[2]);
 
-        dut_context_t ctx{
-            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
-        };
+        dut_context_t ctx{ctx_opt};
         ctx.set_base_name("Controller.target_gate");
         port_t port{ctx.dut()};
 
@@ -482,9 +477,7 @@ TEST_SUITE("Controller")
             .sig2_period = 400_ns,
             .sig2_high = 200_ns,
         };
-        dut_context_t ctx{
-            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
-        };
+        dut_context_t ctx{ctx_opt};
         ctx.set_base_name("Controller.consecutive");
         port_t port{ctx.dut()};
 
@@ -527,9 +520,7 @@ TEST_SUITE("Controller")
             .phase_offset = offset,
         };
 
-        dut_context_t ctx{
-            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
-        };
+        dut_context_t ctx{ctx_opt};
         ctx.set_base_name("Controller.async_input");
         port_t port{ctx.dut()};
 
@@ -542,8 +533,8 @@ TEST_SUITE("Controller")
 
         ctx.loop_until_finish(20_ms);
 
-        // 两次连续测量都要与理论值一致：周期 640ns、相位差 160ns（= 90°，即 32 个
-        // 200MHz 测试时钟周期；测试使用的 DSP 时钟与芯片实际频率无关）
+        // 两次连续测量都要与理论值一致：周期 640ns、相位差 160ns（= 90°，即 40 个
+        // 250MHz 测试时钟周期；测试使用的 DSP 时钟与芯片实际频率无关）
         for(const auto& measurement: measurements)
         {
             REQUIRE(measurement.observed);
@@ -567,9 +558,7 @@ TEST_SUITE("Controller")
             .gate_change_value = changed_gate,
         };
 
-        dut_context_t ctx{
-            {.coverage = true, .time_precision = verilator_time_unit::ps_10}
-        };
+        dut_context_t ctx{ctx_opt};
         ctx.set_base_name("Controller.target_gate_latch");
         port_t port{ctx.dut()};
 
