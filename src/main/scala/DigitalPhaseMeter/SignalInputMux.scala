@@ -1,6 +1,7 @@
 package DigitalPhaseMeter
 
 import chisel3._
+import chisel3.util.experimental.InlineInstanceAllowDedup
 
 /** 测量输入选择：在外部引脚输入与片内信号源之间切换，并给片内源加使能门控
   */
@@ -29,7 +30,7 @@ object SignalInputMux {
         extSig: PhaseMeterSignalPayload,
         intSig: PhaseMeterSignalPayload
     ): PhaseMeterSignalPayload = {
-        val signalInputMux = Module(new SignalInputMux)
+        val signalInputMux = Module(new SignalInputMux with InlineInstanceAllowDedup)
         signalInputMux.io.enable := enable
         signalInputMux.io.selectInternal := selectInternal
         signalInputMux.io.extSig := extSig
