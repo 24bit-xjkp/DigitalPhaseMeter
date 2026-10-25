@@ -14,14 +14,14 @@
 
 ```text
 ├── src/main/scala/DigitalPhaseMeter/   # Chisel RTL：每个模块一个 .scala，附 Emit<Name> 生成主类
-├── test/                               # Verilator C++ 测试：每个 <Name>.cpp 自动注册一个测试目标
+├── test/                               # Verilator C++ 测试：每个 <Name>.cpp 自动注册一个测试目标（构建时自动生成对应 Chisel 产物）
 ├── sim/                                # xsim 的 SystemVerilog 激励与运行脚本（只做真实 MMCM 联调）
 ├── vivado/                             # IP 打包、block design、综合实现脚本与顶层约束
 ├── ps/                                 # PS 侧裸机 C 服务端（串口协议、AXI/DRP 驱动、startup/linker）
 ├── host/                               # PC 侧 Python 上位机（协议、CLI、PySide6 GUI、仿真后端）
 ├── docs/                               # 串口协议（ps-protocol.md）与上板指南（bringup.md）
 ├── spec/                               # 金标准向量、独立仿真服务端、规格自检与验证脚本
-├── script/                             # xmake 包定义（Lua）
+├── script/                             # xmake 包定义与规则（Lua；含 Verilator 目标构建前的自动生成规则）
 ├── build.mill                          # Mill 构建定义（Scala 编译、生成入口、静态检查；Mill 版本在文件头固定，JDK 用系统 JDK）
 ├── mill                                # Mill 启动脚本（仓库根执行 `./mill`）
 ├── out/                                # Mill 的构建缓存与任务产物（构建产物，不入库）
@@ -39,8 +39,8 @@
 
 | 入口                     | 职责                                                                                          |
 | ------------------------ | --------------------------------------------------------------------------------------------- |
-| `./mill`                 | 编译 Scala、运行 Chisel 生成 SystemVerilog 到 `build/chisel/<Name>/`，并执行 Scalafix 检查 |
-| `xmake`                  | 构建 Verilator 测试目标、运行测试（测量通路与顶层 IP）                                        |
+| `./mill`                 | 编译 Scala、运行 Chisel 生成 SystemVerilog 到 `build/chisel/<Name>/`，并执行 Scalafix 检查（也是 Verilator 测试目标构建时的自动生成入口） |
+| `xmake`                  | 构建 Verilator 测试目标、运行测试（测量通路与顶层 IP）；构建目标时自动调用 `./mill emit <模块名>` 生成/更新 SV |
 | Verilator                | 由 xmake 的目标规则调用，编译生成的 SystemVerilog                                             |
 | `sim/run_handoff_tb.sh`  | 用 Vivado xsim 跑依赖 MMCM 原语的联调激励（真实 `MMCME2_ADV` 行为模型）                       |
 | `uv run dpm-vivado-flow` | 增量打包 IP、创建/刷新 block design、综合实现与导出 XSA（`vivado/flow/`；Tcl 脚本是其执行层） |
@@ -73,6 +73,7 @@
 ## 运行约定：走工具入口，不直接执行产物
 
 - 运行测试使用构建系统提供的入口（本项目为 `xmake test` / `xmake run`），**不要**直接执行 `build/` 下的可执行文件：入口会先构建目标，并应用该目标或用例声明的运行参数与环境（例如 `xmake test` 会带上用例级 `runargs`，本项目为 `+verilator+rand+reset+2`），运行目录就是目标产物目录（波形与覆盖率文件也生成在那里）。绕过入口跑出来的不是项目约定的那次运行，结果不能作为验证证据。
+- Verilator 测试目标在构建时会自动调用代码生成入口，所以改完 RTL 直接跑测试即可，不需要手工先跑 `./mill emit`；该自动生成只覆盖被构建的 Verilator 目标，xsim 与 Vivado 侧仍按各自入口生成（详见 `dpm-verilator-testing` 与 `dpm-chisel-rtl`）。
 - 需要详细输出、传测试框架参数或挂调试器时，同样用入口表达（如 `xmake test -v`、`xmake run <target> <参数>`）。
 - 只有入口无法表达需求时（例如精确复现一次裸执行）才直接调用产物，并在报告中写明原因与命令。
 

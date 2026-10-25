@@ -139,7 +139,7 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
 
 ```text
 src/main/scala/DigitalPhaseMeter/   Chisel 源码，每个模块一个文件，附 Emit<Name> 生成主类
-test/                               Verilator C++ 测试（测量通路与顶层 IP），每个 <Name>.cpp 自动注册一个测试目标
+test/                               Verilator C++ 测试（测量通路与顶层 IP），每个 <Name>.cpp 自动注册一个测试目标（构建时自动生成对应 Chisel 产物）
 sim/                                Vivado xsim 的 SystemVerilog 激励与运行脚本（只做真实 MMCM 联调）
 vivado/                             Vivado IP 打包、block design、综合实现脚本与顶层约束
 build/chisel/<Name>/                Chisel 生成的 SystemVerilog 与 filelist.f（构建产物，不入库）
@@ -154,12 +154,14 @@ spec/                               金标准向量、独立仿真服务端、�
 
 | 依赖                                     | 用途                                            |
 | ---------------------------------------- | ----------------------------------------------- |
-| JDK + Mill                               | 由 Chisel 生成 SystemVerilog（用仓库根 `./mill`；使用系统 PATH 上的 JDK，Mill 版本在 `build.mill` 头部固定） |
-| xmake ≥ 3.1.1                            | 构建 Verilator 测试目标、运行测试               |
+| JDK + Mill                               | 由 Chisel 生成 SystemVerilog（用仓库根 `./mill`；使用系统 PATH 上的 JDK，Mill 版本在 `build.mill` 头部固定）；Verilator 测试目标构建时也会自动调用它 |
+| xmake ≥ 3.1.1                            | 构建 Verilator 测试目标、运行测试；构建目标时自动调用 `./mill emit <模块名>` 生成/更新 SV |
 | Verilator ≥ 5.050                        | 编译生成的 SystemVerilog（测量通路与顶层测试）  |
 | clang（支持 C++20 模块，本项目用 C++26） | 编译测试代码，**不支持 gcc**                    |
 | Vivado（本项目在 2025.2 上验证）         | 打包 IP、创建 block design、xsim 仿真、综合实现 |
 | uv + Python ≥ 3.12                       | PC 侧上位机与 spec/ 验证脚本                    |
+
+Verilator 测试目标在编译 SV 之前会自动调用下文「生成 SystemVerilog」里的生成入口（`script/rule.lua` 的 `mill.verilator.shared` 规则，逐目标执行 `./mill emit <模块名>`），所以跑 `xmake test` / `xmake run` 前不需要手工生成；JDK 与 Mill 因此也是跑这些测试的前提。
 
 ## 使用
 
@@ -174,7 +176,7 @@ spec/                               金标准向量、独立仿真服务端、�
 
 `emit` 按内容缓存：入口点（`Emit<Name>` 主类）及其传递依赖的字节码依赖闭包没有变化时直接跳过，变化时才执行一次（判定看编译产物、不看源码文本，不改变字节码的编辑不会触发重跑）；缓存按主类隔离，例如改 `PhaseMeter` 只会让依赖它的入口点重跑。缓存命中后还会检查约定产物 `build/chisel/<Name>/filelist.f` 是否存在，产物被删掉时会重新生成。缓存文件在 `build/chisel/.emit-cache/`，`./mill clean` 不会删 `build/chisel/`；需要无条件重跑时用上面的 `runMain`（单个主类）或 `--force`（`emit`）。构建定义与缓存实现见仓库根 `build.mill`。
 
-每个模块只生成**一份**产物：复位同步由纯 RTL 的 `ResetSynchronizer` 实现，Verilator、xsim 与综合共用同一份 RTL，没有 `--type=sim|syn` 的差别。改完 RTL 要先跑生成入口再跑测试——`xmake test` 与 `sim/run_handoff_tb.sh` 都不会替你生成。生成入口的调用形式与陷阱见 [`.agents/skills/dpm-chisel-rtl`](.agents/skills/dpm-chisel-rtl/SKILL.md)。
+每个模块只生成**一份**产物：复位同步由纯 RTL 的 `ResetSynchronizer` 实现，Verilator、xsim 与综合共用同一份 RTL，没有 `--type=sim|syn` 的差别。各消费入口对生成的处理不同：Verilator 测试目标的构建规则会在编译前自动执行 `./mill emit <模块名>`（需要时加 `--force`），所以改完 RTL 直接跑 `xmake test` / `xmake run` 即可；`sim/run_handoff_tb.sh` 默认也自带生成入口；Vivado 流程不会替你生成，改完 RTL 仍需先跑 `./mill emit DigitalPhaseMeterTop MmcmDrpController`（见 [`vivado/README.md`](vivado/README.md)）。生成入口的调用形式与陷阱见 [`.agents/skills/dpm-chisel-rtl`](.agents/skills/dpm-chisel-rtl/SKILL.md)。
 
 模块名可以用 `override def desiredName` 与类名不同（例如 `EdgeDetector` 按边沿类型/同步方式生成 `EdgeDetectorRising` / `EdgeDetectorBoth`）：`build/chisel/<Name>/` 下的文件名与 `filelist.f` 中的模块名以生成结果为准，`xmake`、xsim 与 Vivado 都按 `filelist.f` 取文件，不按目录名推导。
 
@@ -195,6 +197,8 @@ Scalafix 通过 Mill 的 scalafix 插件执行，规则与配置仍在 `.scalafi
 xmake test -v                             # 全部测试
 xmake run Controller                      # 单个测试目标（定位问题用）
 ```
+
+构建测试目标前会自动调用生成入口：每个 `<Name>Verilator` 目标先执行 `./mill emit <Name>`（只生成该目标对应的模块；`test/xmake.lua` 用 `mill.verilator.shared` 规则接入，规则定义在 `script/rule.lua`），再把 `build/chisel/<Name>/filelist.f` 列出的 SV 交给 Verilator。因此改完 RTL 不需要先手工跑 `./mill emit`；要强制重新生成时用 `./mill emit --force <Name>`。
 
 覆盖 `Controller`（复位、闸门/相位计数、窗口跟随、连续测量一致性）、`EdgeDetector`、`ResetSynchronizer`、`DspCounter`、`MmcmDrpController`，以及顶层 IP 的 `DigitalPhaseMeterTop`：用 AXI4-Lite BFM 按真实基地址 `0x43C0_0000 + 偏移` 驱动，覆盖复位/寄存器默认值、写数据先到与字节选通、测量启动与中断时序、W1C 与只读寄存器写忽略、结果锁存与 `LOST_COUNT`、`CTRL.clear`、目标闸门锁存，以及片内源/外部输入切换。**顶层 AXI 寄存器通路由它守门**：动 `Axi*.scala`、`ControlRegs.scala` 或 `DigitalPhaseMeterTop.scala` 必须跑 `xmake test -v`，并把新寄存器纳入 [`test/DigitalPhaseMeterTop.cpp`](test/DigitalPhaseMeterTop.cpp)。测试目标的注册方式、时间精度与常见陷阱见 [`.agents/skills/dpm-verilator-testing`](.agents/skills/dpm-verilator-testing/SKILL.md)。
 

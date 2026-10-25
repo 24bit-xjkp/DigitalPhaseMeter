@@ -60,20 +60,13 @@ end)
 std_harden_defines = {
     "_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_" .. (is_mode("debug") and "DEBUG" or "FAST"), "_GLIBCXX_ASSERTIONS"
 }
-function get_std_harden_options()
-    local options = {}
-    for _, define in ipairs(std_harden_defines) do
-        table.insert(options, "-D" .. define)
-    end
-    return options
-end
 
 ---@diagnostic disable-next-line
 package("verilator_utils", function ()
     set_homepage("https://github.com/24bit-xjkp/verilator_utils")
     set_description("基于Verilator和Doctest的RTL测试框架")
     add_urls("https://github.com/24bit-xjkp/verilator_utils.git")
-    add_deps("clean_std_heads >=1.1", "doctest_module", "verilator >=5.050", "cpptrace")
+    add_deps("doctest_module", "verilator >=5.050", "cpptrace")
     add_configs("main", { description = "启用main函数支持", default = true, type = "boolean" })
     add_configs("fst", { description = "启用FST波形记录支持", default = true, type = "boolean" })
     add_configs("std_harden", { description = "启用C++标准库硬化支持", default = true, type = "boolean" })

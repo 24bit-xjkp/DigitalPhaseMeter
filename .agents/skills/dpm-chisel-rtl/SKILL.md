@@ -1,6 +1,6 @@
 ---
 name: dpm-chisel-rtl
-description: 'Use when: 在本仓库（DigitalPhaseMeter）新增、修改或重构 Chisel RTL（src/main/scala/DigitalPhaseMeter/*.scala），或需要生成、更新供 Verilator 测试与综合使用的 SystemVerilog。覆盖模块与 Emit 主类写法、生成入口的正确调用形式、产物目录（每个模块一份，仿真与综合共用）、filelist.f 的消费方式、时钟域与复位分配约定，以及 Chisel 信号名到 SV 端口名的映射。'
+description: 'Use when: 在本仓库（DigitalPhaseMeter）新增、修改或重构 Chisel RTL（src/main/scala/DigitalPhaseMeter/*.scala），或需要生成、更新供 Verilator 测试与综合使用的 SystemVerilog。覆盖模块与 Emit 主类写法、生成入口的正确调用形式（Verilator 测试目标构建时会自动调用）、产物目录（每个模块一份，仿真与综合共用）、filelist.f 的消费方式、时钟域与复位分配约定，以及 Chisel 信号名到 SV 端口名的映射。'
 argument-hint: '要新增或修改的 RTL 模块（如 Controller、PhaseMeter）'
 ---
 
@@ -57,6 +57,10 @@ Mill 专属的注意点：
 - **`runMain` 的主类名是位置参数**：`./mill runMain DigitalPhaseMeter.EmitController`，其余参数原样传给主类。
   JVM 参数由构建定义（`build.mill` 的 `forkArgs` / `forkEnv`）配置，不在命令行用 `--` 分隔。
 - **生成入口会先编译**：`emit` / `runMain` 依赖编译产物；`-Werror` 下编译失败时不会生成。
+- **Verilator 测试目标会自动调用生成入口**：`xmake` 构建 `<Name>Verilator` 目标时先执行
+  `./mill emit <Name>`（`script/rule.lua` 的 `mill.verilator.shared` 规则；需要时带 `--force`），
+  因此跑 `xmake test` / `xmake run` 前不需要手工生成。手工跑生成入口用于：单独生成某个模块、
+  为 xsim / Vivado 准备产物，或强制重生成。
 
 ### 按内容缓存（`emit`）
 
@@ -83,7 +87,7 @@ Verilator 与 xsim / Vivado 都能直接编译。
 
 | 消费方 | 读的目录 | 入口 |
 | --- | --- | --- |
-| Verilator 单元测试 | `build/chisel/<Name>/` | `test/xmake.lua` 的 `on_load`（逐行读 `filelist.f`） |
+| Verilator 单元测试 | `build/chisel/<Name>/` | `script/rule.lua` 的 `mill.verilator.shared` 规则（构建前先跑 `./mill emit <Name>`，再逐行读 `filelist.f`） |
 | xsim 联调（真实 MMCM） | `build/chisel/DigitalPhaseMeterTop/`、`build/chisel/MmcmDrpController/` | `sim/run_handoff_tb.sh` |
 | IP 打包 / 综合实现 | `build/chisel/<Name>/` | `vivado/package_ip.tcl`、`vivado/package_src_ip.tcl` |
 
@@ -93,7 +97,7 @@ Verilator 与 xsim / Vivado 都能直接编译。
 
 ## 生成结果的消费方式
 
-`build/chisel/<Name>/` 下是 `--split-verilog` 拆出的多个 `.sv` 加一份 `filelist.f`。测试目标逐行读取 `filelist.f`（见 `test/xmake.lua` 的 `on_load`），因此：
+`build/chisel/<Name>/` 下是 `--split-verilog` 拆出的多个 `.sv` 加一份 `filelist.f`。Verilator 测试目标由 `mill.verilator.shared` 规则逐行读取 `filelist.f`（见 `script/rule.lua`），因此：
 
 - 不要手工维护源文件列表，也不要依赖目录 glob（源文件顺序由 firtool 决定）。
 - 新模块没有出现在 `filelist.f` 中，说明生成没有跑到，或产物目录不对（见上一节的生成入口）。
@@ -222,13 +226,13 @@ Verilator 与 xsim / Vivado 都能直接编译。
   但下游一直用默认配置（选择位恒 0）；而只测下游模块、绕过寄存器堆的 Verilator 单测**全绿**。
   防御手段有两个：生成后 `grep` 一下顶层 SV 里目标模块还有没有那组端口；以及**寄存器堆到下游的
   通路必须由顶层 Verilator 用例覆盖**（`test/DigitalPhaseMeterTop.cpp`，见 `dpm-verilator-testing`）。
-- **独立生成给 Verilator 单测的模块要能过 `-Wall`**：`test/xmake.lua` 用 `-Wall` 编译
-  `build/chisel/<Name>/`，警告即失败（`%Error: Exiting due to N warning(s)`）。两类常见告警都来自
-  「共享数据结构 + 只关心一部分」：
+- **Verilator 单测当前按默认告警集编译**：`test/xmake.lua` 只传
+  `--trace-fst --x-assign unique --x-initial unique --coverage -Wno-SYMRSVDWORD`，没有 `-Wall`，
+  也没有逐目标豁免表。下面两类告警因此不挡构建，但设计上仍要知道它们（临时加 `-Wall` 排查时会碰到）：
   - `UNUSEDSIGNAL`：两类来源。一是**接口固有未使用位**（`MmcmDrpController` 的 AXI4-Lite
     `awprot` / `wstrb` 高字节等，本设计不用保护级与 >16 位数据）；二是**声明了域端口但纯组合**——
     `SignalInputMux` 是 `RawModule`，显式声明了 `clock` / `resetn` 作域标记却不消费它们。
-    两者都不是 RTL 缺陷，做法是在 `test/xmake.lua` 的逐目标豁免里关掉这一条并写清原因，
+    两者都不是 RTL 缺陷，临时开 `-Wall` 时按需关掉这一条并写清原因，
     不要用 `-Wno-fatal` 之类的整体开关。
   - `Bits of signal are not used: '_phaseShifted_T'[30:0]`：只用中间信号的最高位，其余位成了
     「未使用信号」。寄存器（`Reg`）的部分位不被使用不会告警，**`wire` 会**。做法是把「相位差值比较
@@ -282,6 +286,6 @@ Verilator 与 xsim / Vivado 都能直接编译。
 
 - Scala 代码用 `scalafmt` 格式化（配置见 `.scalafmt.conf`，`maxColumn = 120`、4 空格缩进）：`scalafmt` 就地格式化，`scalafmt --test` 只检查。提交前保证 `scalafmt --test` 通过。
 - 静态分析工具链：Mill 的 Scalafix 插件（`com.goyeau::mill-scalafix`，规则与配置在 `.scalafix.conf`）+ 编译器 lint（`build.mill` 的 `scalacOptions`）。规则一句话：Scalafix 禁 `var` / `throw` / `null` / `while` / `return` 等语法（改用 Chisel 的 `Reg` / `Wire` / `require` 写法）并整理导入，编译器侧统一打开 `-Xlint` / `-Wunused` / `-Wdead-code`，且 `-Werror` 让告警变成构建失败。检查命令：`./mill compile`（编译器 lint）、`./mill fix --check`（Scalafix 检查）、自动修复 `./mill fix`、格式检查 `scalafmt --test`；标准都是 0 warning。
-- 改完 RTL 先保证上述检查通过，再跑生成入口：`-Werror` 下任何告警都会让 `compile` 失败，带着告警去生成没有意义。新增/重命名模块、调整导入时尤其注意未使用 import、非穷尽 match 与 nullary-unit 这几类告警（检查项与有意关闭的规则见 `dpm-pre-delivery-check` 第 2 节）。
+- 改完 RTL 先保证上述检查通过：`-Werror` 下任何告警都会让 `compile` 失败，带着告警去生成没有意义。跑 `xmake test` 时构建目标会自动调用生成入口；单独生成、或为 xsim / Vivado 准备产物时再手工跑 `./mill emit`。新增/重命名模块、调整导入时尤其注意未使用 import、非穷尽 match 与 nullary-unit 这几类告警（检查项与有意关闭的规则见 `dpm-pre-delivery-check` 第 2 节）。
 - 注释遵循仓库根目录 `AGENTS.md` 的语言约定，风格为 Doxygen（`/** ... */`，参数用 `@param`）；公共模块类的文档注释要说明它在哪个时钟域、各参数含义。
 - 新增模块后同步补齐：生成入口（`Emit<Name>`）、必要时 `test/<Name>.cpp`，并把新踩到的坑写回本 skill。

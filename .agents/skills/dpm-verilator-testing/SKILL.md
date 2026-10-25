@@ -1,6 +1,6 @@
 ---
 name: dpm-verilator-testing
-description: 'Use when: 为 DigitalPhaseMeter 的 Chisel 模块或顶层 IP 编写、修改、运行或调试 Verilator C++ 测试（test/<Name>.cpp），或需要解读测试目标的注册方式、运行目录与覆盖率/波形产物。覆盖测试目标的自动注册、运行入口、顶层 IP（AXI4-Lite 寄存器通路）测试、时间精度陷阱、未初始化寄存器、set_base_name 与多 bit 端口等本项目实测的坑。'
+description: 'Use when: 为 DigitalPhaseMeter 的 Chisel 模块或顶层 IP 编写、修改、运行或调试 Verilator C++ 测试（test/<Name>.cpp），或需要解读测试目标的注册方式、构建前的自动生成、运行目录与覆盖率/波形产物。覆盖测试目标的自动注册与自动生成、运行入口、顶层 IP（AXI4-Lite 寄存器通路）测试、时间精度陷阱、未初始化寄存器、set_base_name 与多 bit 端口等本项目实测的坑。'
 argument-hint: '要测试的模块或用例（如 Controller 的相位测量精度、DigitalPhaseMeterTop 的寄存器通路）'
 ---
 
@@ -20,18 +20,20 @@ argument-hint: '要测试的模块或用例（如 Controller 的相位测量精�
 
 | 目标 | 作用 |
 | --- | --- |
-| `<Name>Verilator` | 用 `verilator.shared` 规则编译 `build/chisel/<Name>/filelist.f` 列出的 SystemVerilog |
+| `<Name>Verilator` | 用 `mill.verilator.shared` 规则：构建时先 `./mill emit <Name>` 生成该模块的 SV，再编译 `build/chisel/<Name>/filelist.f` 列出的文件 |
 | `<Name>` | 编译 `<Name>.cpp`，链接 `verilator_utils`（组件 `main`，提供 doctest main）与 `doctest_module`（组件 `core`），依赖 `<Name>Verilator` |
 
 要点：
 
 - **新增测试通常只需新增 `test/<Name>.cpp`**，不要为每个测试手工加目标；`<Name>` 必须与 `build/chisel/<Name>/` 的目录名一致（即 Chisel 模块名）。
 - 测试用例通过 `add_tests("rtl", { runargs = { "+verilator+rand+reset+2", "-fc" } })` 声明；`-fc` 让 doctest 强制彩色输出。
-- SV 编译选项含 `-Wall --trace-fst --x-assign unique --x-initial unique --coverage`：波形为 FST，**寄存器在复位前的取值是随机的**（见下文"未初始化寄存器"）。
-- 源文件来自 `filelist.f`，所以必须先跑生成入口（见 `dpm-chisel-rtl`），否则构建失败。
+- **SV 编译选项**是 `--trace-fst --x-assign unique --x-initial unique --coverage -Wno-SYMRSVDWORD`（没有开 `-Wall`，生效的是 Verilator 默认告警集；`SYMRSVDWORD` 是默认开启的告警，顶层端口 `interrupt` 命中 C++ 常用词，所以全局关掉这一条）：波形为 FST，**寄存器在复位前的取值是随机的**（见下文"未初始化寄存器"）。
+- **源文件由构建规则自动生成**：`<Name>Verilator` 目标构建时先执行 `./mill emit <Name>`（只生成该目标对应的模块；目标被重建（如 `xmake -r`）、或 `build.mill` 比 `filelist.f` 新时带 `--force`），再把 `filelist.f` 里的 `.sv` 加进编译。`emit` 自身按内容缓存，未变化时直接跳过。改完 RTL 直接跑 `xmake test` / `xmake run` 即可，不要手工先跑生成入口；生成入口本身的用法见 `dpm-chisel-rtl`。
+- **没有逐目标告警豁免表**：接口固有未使用位（`awprot` / `wstrb` 高位等）与复位同步器结构（同一根复位既做本域同步复位、又做同步链的异步复位端）在默认告警集下不会报出，因此不需要按目标关闭检查项。若临时加 `-Wall` 排查，先按 `dpm-chisel-rtl` 的说明处理这两类告警，不要用 `-Wno-fatal` 之类的整体开关。
 - **目录名、目标名与生成模块名可能不同**：模块可用 `desiredName` 改名（`EdgeDetector` 生成
   `EdgeDetectorRising`/`EdgeDetectorBoth`），`build/chisel/EdgeDetector/filelist.f` 里是后者，但
-  target 仍按 `.cpp` 文件名 `EdgeDetector` 注册。`verilator.shared` 规则用 `--prefix <Name>Verilator`
+  target 仍按 `.cpp` 文件名 `EdgeDetector` 注册。`verilator.shared` 规则（由 `mill.verilator.shared`
+  接入）用 `--prefix <Name>Verilator`
   且不传 `--top-module`，由 Verilator 自动选目录里唯一的顶层模块，所以 `test/EdgeDetector.cpp` 里的
   `<EdgeDetectorVerilator.h>` 与 `EdgeDetectorVerilator` 类型仍然成立。前提是每个生成目录只有一个
   顶层模块；若同一目录将输出多个顶层模块，必须显式指定顶层并同步改 `.cpp`。
@@ -138,14 +140,6 @@ ctx.add_task(generate_reset(port.dst_reset, port.dst_clock));   // 目的域自�
 这类"模块自己产生复位"的结构一旦极性接反（见 `dpm-chisel-rtl` 的极性陷阱），表现是所有用例超时；
 反过来，只要测试全绿就说明该域的复位确实被撤销了——这是行为测试相对静态检查的价值所在。
 
-**逐目标的 Verilator 检查豁免**写在 `test/xmake.lua` 的 `extra_verilator_options` 里，并必须写清为什么
-（当前三个目标有关闭项：`MmcmDrpController` 的 `UNUSEDSIGNAL` 是 AXI4-Lite 接口固有未使用位；`Controller` 的
-`SYNCASYNCNET` 是"同一根 `reset` 既做同步复位又做同步链异步端"这一复位同步器固有结构；
-`DigitalPhaseMeterTop` 同时有 `UNUSEDSIGNAL`（AXI4-Lite 接口固有未使用位）、`SYNCASYNCNET`
-（`ResetSynchronizer` 结构）与 `SYMRSVDWORD`（顶层端口名 `interrupt` 命中 C++ 常用词，Verilator
-把它改名为 `__SYM__interrupt`，是端口命名约定带来的固有告警）。豁免只针对单个检查，其余 `-Wall`
-检查全部保留，不要用 `-Wno-fatal` 之类的整体开关。
-
 ### 7. 波形与仿真结束
 
 - 激励最后用 `wait_stimulate` 多等几个周期再 `eval_finish()`，避免波形被截断。
@@ -188,13 +182,8 @@ AXI 从口与 `ControlRegs`，只有这个目标能抓到「寄存器堆往下�
 - 改 `Axi*.scala` / `ControlRegs.scala` / `DigitalPhaseMeterTop.scala` 时必须跑 `xmake test -v`，
   并把新寄存器纳入这个用例（读回、字节选通、复位默认值、以及「配置真的改变了测量结果」）。
 
-该目标在 `test/xmake.lua` 里有三条逐目标 Verilator 豁免（每条都写明理由，其余 `-Wall` 检查照常）：
-
-| 豁免 | 理由 |
-| --- | --- |
-| `UNUSEDSIGNAL` | AXI4-Lite 接口固有未使用位（`awprot` / `arprot` / `wstrb` 高位等） |
-| `SYNCASYNCNET` | 复位同步器结构：同一根复位线既做本域同步复位、又做同步链的异步复位端 |
-| `SYMRSVDWORD` | 顶层端口名 `interrupt` 命中 C++ 常用词，Verilator 把它改名为 `__SYM__interrupt`；属端口命名约定的固有告警 |
+该目标不需要逐目标 Verilator 豁免：`test/xmake.lua` 只全局关掉 `SYMRSVDWORD`（顶层端口名
+`interrupt`，理由见上文「测试目标的注册方式」），其余按 Verilator 默认告警集编译。
 
 ## 验证取向：把被测模块当仪表，而不是复刻它的时序
 

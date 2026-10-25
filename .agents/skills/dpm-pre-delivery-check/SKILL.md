@@ -90,11 +90,15 @@ xmake test -v              # Verilator：测量通路、复位同步与顶层 IP
 sim/run_handoff_tb.sh      # xsim：真实 MMCM 联调（SystemVerilog 激励，详见 dpm-vivado-ip）
 ```
 
+- `xmake test` / `xmake run` 构建 `<Name>Verilator` 目标时会自动调用生成入口（`./mill emit <Name>`，
+  见 `script/rule.lua` 的 `mill.verilator.shared`）：改完 RTL 不需要手工先跑 `./mill emit`；为 xsim /
+  Vivado 准备产物时仍按各自入口生成（`sim/run_handoff_tb.sh` 自带生成入口，Vivado 流程需要先手工跑
+  `./mill emit DigitalPhaseMeterTop MmcmDrpController`）。
 - 改了 `Axi*.scala`、`ControlRegs.scala`、`DigitalPhaseMeterTop.scala` 时，
   **必须**跑 `xmake test -v`（含 `DigitalPhaseMeterTop` 顶层用例）：这些通路只有经过 AXI 从口与
   寄存器堆的顶层用例覆盖得到，并把新寄存器纳入该用例。
 - 只改了测量通路（`Controller` / `PhaseMeter` / `EdgeDetector` / `DspCounter`）时，
-  重新生成产物后跑 `xmake test -v` 即可；但顶层的端口或行为变了也要把顶层用例跑齐。
+  直接跑 `xmake test -v` 即可（构建测试目标时会自动生成产物）；但顶层的端口或行为变了也要把顶层用例跑齐。
 - 改了 MMCM 寄存器编码（`MmcmDrpController` / `ps/include/dpm_regs.h`）或片内源联调通路时，
   还要跑 `sim/run_handoff_tb.sh`。
 - 改了 `vivado/` 下的脚本、约束或 `vivado/rtl/dpm_mmcm_src.v` 时，至少重新执行对应阶段并确认
@@ -109,11 +113,12 @@ sim/run_handoff_tb.sh      # xsim：真实 MMCM 联调（SystemVerilog 激励，
 - **每个模块只有一份产物**：`build/chisel/<Name>/`（见 `dpm-chisel-rtl`）。Verilator、xsim 与
   Vivado 消费的是同一份 RTL（复位同步是纯 RTL 的 `ResetSynchronizer`，没有 XPM 原语），因此各
   流水线可以按任意顺序交替跑。**新增厂商原语前先确认 Verilator 与 xsim 两侧都有它的仿真模型**，
-  否则「一份产物」的前提就不成立。注意 `xmake test` **不会**替你生成产物：改了 RTL 仍要先跑生成入口。
+  否则「一份产物」的前提就不成立。`xmake test` 会在构建测试目标时自动调用生成入口（只生成被构建的
+  Verilator 目标对应的模块），因此改了 RTL 直接跑测试即可；xsim / Vivado 侧仍按各自入口生成。
 
 - 必须是**全量**：只跑单个目标或用例（`xmake run <Name> ...`）不能作为回归证据，它只用于定位问题。
 - 运行参数（本项目为 `+verilator+rand+reset+2` 与 `-fc`）同时登记在 `test/xmake.lua` 的 target 级 `set_runargs` 与用例级 `add_tests` 的 `runargs` 里，`xmake run` 与 `xmake test` 都会带上。回归证据仍要用 `xmake test`（它会先构建目标并跑全部目标与用例）；`xmake run` 只用于定位单个目标或用例。
-- 改动过 RTL 时，先重新生成 SystemVerilog 再跑测试（见 `dpm-chisel-rtl`）；只改了测试代码则不需要重新生成。
+- 改动过 RTL 时直接跑测试即可（`xmake test` 构建目标时会自动生成，见 `script/rule.lua` 的 `mill.verilator.shared`）；只改了测试代码则不需要重新生成。
 - `xmake test -v` 的通过判据是末尾的 `100% tests passed`；MMCM 联调的通过判据是日志里
   `HANDOFF_SUMMARY ... fails=0` 且 `HANDOFF_MEAS` 行数 = 2×点数（xsim 的退出码不足以判定，
   `$fatal` 也可能返回 0）。
