@@ -11,13 +11,16 @@ object AxiResp extends ChiselEnum { val okay, exOkay, slvErr, decErr = Value }
   *
   * 方向以「本模块是从设备」为准：地址、数据与 valid 为输入，ready 与响应为输出。 该 bundle 同时用于顶层 IP 与内部从口模块，两侧方向约定一致。
   *
+  * 本仓库的 `Axi4LiteSlave` 固定使用 32 位地址 / 32 位数据，实例化时总是传 32/32；这里的位宽参数只用于描述 AXI 协议本身。
+  *
   * @param addrWidth
   *   地址宽度
   * @param dataWidth
   *   数据宽度，必须为 8 的整数倍
   */
-class Axi4LiteSlavePorts(val addrWidth: Int = 32, val dataWidth: Int = 32) extends Bundle {
-    require(dataWidth % 8 == 0)
+class Axi4LiteSlavePorts extends Bundle {
+    val addrWidth = 32
+    val dataWidth = 32
     // 写地址通道
     val awaddr = Input(UInt(addrWidth.W))
     val awprot = Input(UInt(3.W))
@@ -70,12 +73,13 @@ object ByteStrobe {
 
 /** AXI4-Lite 写命令：地址、数据与字节选通
   *
-  * 作为从口与寄存器堆之间的内部总线负载，写命令只持续一个周期。
+  * 作为从口与寄存器堆之间的内部总线负载，写命令只持续一个周期。这里的宽度是下游实际使用的宽度， 可能小于 AXI4-Lite 端口固定的 32 位（由 `Axi4LiteSlave` 的 `addrUsedWidth` /
+  * `dataUsedWidth` 截断）。
   *
   * @param addrWidth
-  *   地址宽度
+  *   下游实际使用的地址宽度，可能小于 AXI 端口的 32 位
   * @param dataWidth
-  *   数据宽度
+  *   下游实际使用的数据宽度，必须为 8 的整数倍，可能小于 AXI 端口的 32 位
   */
 class AxiLiteWritePayload(val addrWidth: Int = 32, val dataWidth: Int = 32) extends Bundle {
     require(dataWidth % 8 == 0)
@@ -86,7 +90,9 @@ class AxiLiteWritePayload(val addrWidth: Int = 32, val dataWidth: Int = 32) exte
 
 /** AXI4-Lite 读命令：地址
   *
+  * 宽度是下游实际使用的地址宽度，可能小于 AXI4-Lite 端口固定的 32 位（由 `Axi4LiteSlave` 的 `addrUsedWidth` 截断）。
+  *
   * @param addrWidth
-  *   地址宽度
+  *   下游实际使用的地址宽度，可能小于 AXI 端口的 32 位
   */
 class AxiLiteReadPayload(val addrWidth: Int = 32) extends Bundle { val addr = UInt(addrWidth.W) }

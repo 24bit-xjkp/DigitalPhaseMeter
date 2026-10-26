@@ -44,9 +44,9 @@ import chisel3.util._
   *   - 配置在测量进行中同样会立即生效（切换信号源会让本次结果无效），因此应在 `STATUS.busy = 0` 时配置。
   *
   * @param addrWidth
-  *   AXI 地址宽度
+  *   来自 AXI4-Lite 从口的命令总线地址宽度（已由从口截断到实际译码位宽，本寄存器堆用 6 位，即 `addr[5:2]` 加字内偏移与对齐位）
   * @param dataWidth
-  *   数据宽度，当前只支持 32
+  *   命令总线数据宽度，当前只支持 32
   * @param gateCntWidth
   *   闸门计数器宽度，与 `Controller` 一致
   * @param edgeCntWidth
@@ -77,6 +77,8 @@ class ControlRegs(
     }
     import RegIndex._
     private val indexWidth = RegIndex.getWidth
+    // 地址译码用 addr[indexWidth+1:2]，因此命令总线至少要能容纳寄存器索引与字内偏移
+    require(addrWidth >= indexWidth + 2, "addrWidth 必须能容纳寄存器索引与字内偏移")
     // 版本号："DPM2"，末尾 02 表示数据经寄存器（GPIO 式）传递
     private val versionValue = Cat("DPM".map(_.toInt.U(8.W)) :+ 2.U(8.W))
     // 能力寄存器：每条结果 4 个字、结果深度 1 条、数据通道为寄存器（而非 BRAM 突发口）、
@@ -168,12 +170,12 @@ class ControlRegs(
     // response.valid 时撤销，因此请求只会在 Controller idle 且 busy=0 的周期出现
     io.request.valid := startPulse && !busy
     io.request.bits.targetGate := targetGate.take(gateCntWidth)
-    when(io.request.valid) { busy := true.B }
+    when(io.request.fire) { busy := true.B }
 
     // ---- 结果锁存：只保留最新一条，被覆盖的旧结果计入丢失 ----
     // 本块写在写通道之后：同一拍 IRQ_STATUS 的 W1C 与新结果竞争时新结果优先（后写优先）；
     // CTRL.clear 写在更后面，同拍清零优先
-    when(io.response.valid) {
+    when(io.response.fire) {
         result.waiveAllAs[ControllerOutPayload] :<= io.response.bits
         // 先保存本次的序号，再自增给下一条结果：首条结果序号为 0
         result.seqCnt := seq

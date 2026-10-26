@@ -337,9 +337,9 @@ run 的 methodology 报告：有未 waive 的 Critical Warning 直接 `error`；
    - `clk_wiz` 的 `PRIM_SOURCE` 改 `No_buffer`（消 `TIMING-4`/`TIMING-27` 两条 Critical）；
    - `vivado/rtl/dpm_mmcm_src.v`：`BUFGCE` 显式 `SIM_DEVICE("7SERIES")`（消 `Netlist 29-345`）；
      `reset | drpReset` 在 DCLK 域同步两拍后再驱动 MMCM.RST 与启动移位寄存器 CLR（消 `LUTAR-1`）；
-   - `Axi4LiteSlave` 只锁存实际使用的地址/数据位（`addrUsedWidth`/`dataUsedWidth`，高位在 payload
-     零扩展），消**自研 IP** OOC 综合的 `Synth 8-3936`（awAddr 32→6 / 32→12、wData 32→16、
-     wStrb 4→2；厂商 IP run 内部另有 INFO 级同名提示，不是告警）；
+   - `Axi4LiteSlave` 的 AXI4-Lite 端口固定 32 位，只把下游实际使用的地址/数据位交给命令总线
+     （`addrUsedWidth`/`dataUsedWidth`，高位在从口处丢弃、不再零扩展），消**自研 IP** OOC 综合的
+     `Synth 8-3936`（awAddr 32→6 / 32→12、wData 32→16、wStrb 4→2；厂商 IP run 内部另有 INFO 级同名提示，不是告警）；
    - `clk_wiz` 的 `USE_LOCKED=false`（端口无消费者）。
    - IP/run 属性写错静默失效 → `create_bd.tcl` 回读校验 `part` / `PRIM_SOURCE` / `USE_LOCKED`，
      不匹配直接 `error`；`dpm-vivado-flow` 的 build 阶段再回读校验 `part`。

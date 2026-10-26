@@ -365,9 +365,10 @@ void dpm_irq_handler(void)
   两条 **Critical Warning**（内部 pin 上重复定义主时钟），DSP 时钟树回到 `clk_fpga_0` 下。
 - `vivado/rtl/dpm_mmcm_src.v`：`BUFGCE` 显式写 `SIM_DEVICE("7SERIES")`（消 `Netlist 29-345`）；
   `reset | drpReset` 先在 DCLK 域同步两拍再驱动 MMCM.RST 与启动移位寄存器 CLR（消 `LUTAR-1`）。
-- `Axi4LiteSlave` 内部只锁存实际使用的地址/数据位（`addrUsedWidth`/`dataUsedWidth`），高位在
-  payload 上零扩展：消掉**自研 IP** OOC 综合的 `Synth 8-3936`×4（dpm_top 的 awAddr 32→6、dpm_src_drp 的
-  awAddr 32→12 / wData 32→16 / wStrb 4→2；厂商 IP 内部仍有 3 条 INFO 级同名提示，不是告警）。
+- `Axi4LiteSlave` 的 AXI4-Lite 端口固定 32 位，只把下游实际使用的地址/数据位交给命令总线
+  （`addrUsedWidth`/`dataUsedWidth`），高位在从口处丢弃、不再零扩展：消掉**自研 IP** OOC 综合的
+  `Synth 8-3936`×4（dpm_top 的 awAddr 32→6、dpm_src_drp 的 awAddr 32→12 / wData 32→16 / wStrb 4→2；
+  厂商 IP 内部仍有 3 条 INFO 级同名提示，不是告警）。
 - `clk_wiz_0` 的 `USE_LOCKED=false`（端口无消费者的既有修复）。
 - IP/run 属性写错会**静默失效**，因此 `create_bd.tcl` 对 `part` / `PRIM_SOURCE` / `USE_LOCKED`
   回读校验，不生效直接 `error`。

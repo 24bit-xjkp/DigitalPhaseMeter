@@ -105,7 +105,11 @@ Verilator 与 xsim / Vivado 都能直接编译。
 - **生成目录名、filelist 中的文件名与模块名不一定相同**：模块可用 `override def desiredName` 改名，
   例如 `EdgeDetector` 按配置生成 `EdgeDetectorRising`/`EdgeDetectorBoth`——`filelist.f` 里列的是
   后者，而目录仍叫 `build/chisel/EdgeDetector/`。消费方一律按 `filelist.f` 取文件与模块，不要按目录名
-  推导；新增消费方时同样只认 `filelist.f`。
+  推导；新增消费方时同样只认 `filelist.f`。**参数不同会改变端口宽度的共享子模块必须把参数编进
+  `desiredName`**：`Axi4LiteSlave` 现在按 `Axi4LiteSlave_<addrUsedWidth>_<dataUsedWidth>` 命名
+  （如顶层 `Axi4LiteSlave_6_32`、DRP 控制器 `Axi4LiteSlave_12_16`）。否则两个 IP 的生成文件
+  被编进同一个仿真库时（`sim/run_handoff_tb.sh` 会把两个 `filelist.f` 一起交给 xvlog）同名模块
+  互相覆盖，xelab 报 `[VRFC 10-3091] actual bit length ... differs from formal ...`、仿真行为全错。
 - **内层包装只影响内部名，不改变顶层端口名**：`MmcmDrpController` 用外层 `RawModule` +
   内层 `MmcmDrpControllerImpl extends Module with InlineInstance`（配 `FlatIO`）压平层次，端口仍是
   `clock`/`resetn`/`s_axi_lite_*`/`drp_*`/`mmcm_reset`；但内部寄存器带内层实例名前缀
@@ -148,14 +152,17 @@ Verilator 与 xsim / Vivado 都能直接编译。
 - **AXI 从口在复位期间必须拉低所有 ready**：模块内可以直接读隐式复位
   （`io.axi.arready := (...) && !reset.asBool`）。否则会出现「已握手却等不到响应」——
   主机发请求、从口收下地址，但 `rvalid` 被复位压住，主机永久挂起。
-- **AXI 内部锁存寄存器只按实际使用位宽声明**：`Axi4LiteSlave` 的 `awAddr/wData/wStrb` 用
-  `addrUsedWidth` / `dataUsedWidth` 参数只锁存下游真正消费的低位，交回 payload 时再零扩展
-  （参数取 0 表示全宽；Scala 2 的默认参数不能引用前面的构造参数，所以用 0 作哨兵值）。不这样做，
-  综合器会把未读的寄存器高位 trim 掉并报 `[Synth 8-3936]`。新增/修改 AXI 从口时按下游实际译码
-  位宽传参：本仓库 `dpm_top` 只译码 `addr[5:2]`（`addrUsedWidth=6`），`dpm_src_drp` 用
-  `addr[11:0]`、写数据只用低 16 位（`addrUsedWidth=12` / `dataUsedWidth=16`）。行为等价性：
-  `MmcmDrpController` 的 Verilator 用例覆盖「真实基地址 + 页内偏移」；`dpm_top` 由顶层
-  Verilator 用例 `test/DigitalPhaseMeterTop.cpp` 按真实基地址 `0x43C0_0000 + 偏移` 驱动覆盖。
+- **AXI4-Lite 端口固定 32 位，命令总线按下游实际使用位宽截断**：`Axi4LiteSlave` 的
+  `addrWidth` / `dataWidth` 不可配置（固定 32 位地址 / 32 位数据），只保留 `addrUsedWidth` /
+  `dataUsedWidth`（默认 32，即全宽）描述下游真正消费的位宽。写命令与读命令总线本身就按这些低位声明
+  （`AxiLiteWritePayload` / `AxiLiteReadPayload` 的地址、数据、字节选通都是截断宽度），AXI 高位在从口处
+  直接丢弃、不再零扩展回 32 位；读数据 `rdData` 仍保持 32 位（AXI `rdata` 全宽）。不这样做，综合器会把
+  未读的寄存器高位 trim 掉并报 `[Synth 8-3936]`。新增/修改 AXI 从口时按下游实际译码位宽传参：本仓库
+  `dpm_top` 只译码 `addr[5:2]`（`addrUsedWidth=6` / `dataUsedWidth=32`），`dpm_src_drp` 用
+  `addr[11:0]`、写数据只用低 16 位（`addrUsedWidth=12` / `dataUsedWidth=16`）；下游模块的 payload
+  宽度必须与从口参数一致（顶层 `ControlRegs` 按 6 位地址实例化，`MmcmDrpController` 的地址窗口译码只看
+  `addr[11:0]`）。行为等价性：`MmcmDrpController` 的 Verilator 用例覆盖「真实基地址 + 页内偏移」；
+  `dpm_top` 由顶层 Verilator 用例 `test/DigitalPhaseMeterTop.cpp` 按真实基地址 `0x43C0_0000 + 偏移` 驱动覆盖。
 - **Chisel 7 有现成的位宽/方向表意写法，不必手写 helper**：内部命令总线用 `EnqIO`（等价
   `DecoupledIO`，从口产出命令）与 `DeqIO`（等价 `Flipped(DecoupledIO)`，寄存器堆消费命令）；
   位宽剪裁用 `take(n)`（取低 n 位）、零扩展用 `pad(w)`（`w` 不大于原位宽时返回原值，否则高位补 0）。

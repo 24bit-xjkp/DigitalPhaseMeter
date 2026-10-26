@@ -6,10 +6,8 @@ import chisel3.util._
 import chisel3.util.experimental.InlineInstance
 
 class MmcmDrpControllerBundle extends Bundle {
-    val addrWidth = 32
-    val dataWidth = 32
-    // AXI4-Lite 从口
-    val s_axi_lite = new Axi4LiteSlavePorts(addrWidth, dataWidth)
+    // AXI4-Lite 从口（固定 32 位地址 / 32 位数据）
+    val s_axi_lite = new Axi4LiteSlavePorts
     // MMCM 动态重配置口
     val drp_daddr = Output(UInt(7.W))
     val drp_di = Output(UInt(16.W))
@@ -63,8 +61,6 @@ class MmcmDrpControllerBundle extends Bundle {
   */
 class MmcmDrpControllerImpl extends Module with InlineInstance {
     val io = IO(new MmcmDrpControllerBundle)
-    private val addrWidth = io.addrWidth
-    private val dataWidth = io.dataWidth
 
     // ---- 软件可写的 MMCM 寄存器镜像 ----
     // 复位值取 clk_wiz Write DRP 在同一工作点（50MHz 参考、D=40、相位 0/90°）
@@ -84,10 +80,12 @@ class MmcmDrpControllerImpl extends Module with InlineInstance {
     // ---- AXI4-Lite 从口 ----
     // 寄存器空间只有 11 个字、读写都一拍完成：就地吸收命令，不给 AXI 挂起。
     // 地址译码只看页内偏移 addr[11:0]（[11:6] 窗口、[5:2] 寄存器索引、[1:0] 对齐），
-    // 写数据与字节选通只用低 16 位 / 低 2 字节，因此 AXI 从口内部只锁存这些低位，
-    // 其余位零扩展回 32 位 payload。行为与全宽锁存完全一致，只是不再产生
+    // 写数据与字节选通只用低 16 位 / 低 2 字节，因此 AXI 从口只把这些低位交给下游：
+    // 命令总线本身就是 drpAddrUsedWidth 位地址 / 16 位写数据 / 2 位字节选通，其余 AXI 高位在从口处丢弃，
+    // 不再零扩展回 32 位。行为与全宽锁存完全一致，只是不再产生
     // 「未读寄存器位被 trim」的 Synth 8-3936 告警。
-    private val axiLiteSlave = Axi4LiteSlave(addrWidth, dataWidth, addrUsedWidth = 12, dataUsedWidth = 16)
+    private val drpAddrUsedWidth = 12
+    private val axiLiteSlave = Axi4LiteSlave(addrUsedWidth = drpAddrUsedWidth, dataUsedWidth = 16)
     axiLiteSlave.wr.ready := true.B
     axiLiteSlave.rd.ready := true.B
 
@@ -97,9 +95,9 @@ class MmcmDrpControllerImpl extends Module with InlineInstance {
     private val loadPending = RegInit(false.B)
     // 调试计数：记录收到多少次写、多少次 LOAD（读寄存器 15 可查看）
 
-    // 地址译码：BD 把本 IP 映射到 4KB 段（0x43C1_0000）
-    // `addr[11:6]` 必须为 0（寄存器区只有 0x00..0x28）、`addr[1:0]` 必须为 0（32 位对齐）。
-    // 高 20 位由 BD 的地址段（M01_AXI → 0x43C1_0000）保证。
+    // 地址译码：BD 把本 IP 映射到 4KB 段（0x43C1_0000）。
+    // 地址在从口处已截断到页内偏移 addr[11:0]：`addr[11:6]` 必须为 0（寄存器区只有 0x00..0x28）、
+    // `addr[1:0]` 必须为 0（32 位对齐）；AXI 的高位不参与译码，由 BD 的地址段保证只有本段传输到达本 IP。
     private object RegIndex extends ChiselEnum {
         val iVersion, iStatus, iClkFbOut, iClkFbOut2, iClkOut0, iClkOut0_2, iClkOut1, iClkOut1_2, iDivClk, iPower,
             iLoadPending = Value
@@ -107,8 +105,8 @@ class MmcmDrpControllerImpl extends Module with InlineInstance {
     private val indexWidth = RegIndex.getWidth
     import RegIndex._
     def inWindowOf(addr: UInt): Bool = {
-        val rest = Cat(addr.tail(20) >> indexWidth + 2, addr.take(2))
-        rest === 0.U
+        // 从口已把地址截断到低 drpAddrUsedWidth 位，只需检查窗口内偏移
+        Cat(addr(drpAddrUsedWidth - 1, indexWidth + 2), addr(1, 0)) === 0.U
     }
     private val inWindow = inWindowOf(axiLiteSlave.wr.bits.addr)
     private val inWindowRd = inWindowOf(axiLiteSlave.rd.bits.addr)
