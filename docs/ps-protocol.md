@@ -80,6 +80,17 @@
   测量**：busy 期间写入时，正在跑的那次测量完成后仍会照常锁存结果并拉中断（记录序号从 0 重来）。
   因此 PS 固件先等 `STATUS.busy = 0` 再写 clear，等待超时回 `ERR_BUSY`；上位机应把 `CLEAR` 的
   `ERR_BUSY` 当作「忙、可重试」而不是致命错误。
+  另外，`CTRL.clear` **不会复位测量 FSM**：它不能中止已经卡住的测量（见下一条）。
+- **测量卡在 busy 时的恢复**：相位计必须等到被测信号的两个上升沿，因此选中的源没有边沿时
+  测量永不完成、`STATUS.busy` 一直为 1（`GET_RESULT.valid = 0` 是这种状态的正常表达，见下）。
+  PL 没有中止在途测量的寄存器：`CTRL.clear` 不清 busy，`START` 在 busy 期间被忽略，
+  `SET_SIG` 又要求 idle（卡住时只会回 `ERR_BUSY`）。因此**唯一可用的软件恢复路径是
+  `SET_SOURCE` 切到另一路有边沿的源**：`SET_SOURCE` 不要求 idle，写 `SIG_CTRL` 当拍生效，
+  新源的下一个边沿会让在途测量完成，随后按正常流程 `CLEAR` 即可。两路源都没有可用边沿时，
+  只能复位 PL/PS。固件检测到长时间 busy 时应按此顺序处理，不要反复 `START`。
+- **`SET_SIG` 成功后清结果区**：重配置会更换片内源，重配置前的旧结果已失效，固件在
+  `SET_SIG` 成功后写一次 `CTRL.clear`（只清结果区与标志，不清 busy）。需要保留旧结果时先读走
+  再改源；即使随后因 `sourceReady` 未恢复返回 `ERR_BUSY`，这次 clear 也已经写入。
 - **结果就绪的权威探针是 `GET_RESULT.valid`（或 `GET_MEAS` 的序号变化）**，
   不是 `STATUS.resultValid`：仿真后端的事件驱动模型里，结果锁存与状态位更新可能落在
   同一条命令内部的两次 AXI 读之间，只轮询 `STATUS` 可能看不到 valid 恰好为 1 的那一拍。
@@ -243,7 +254,7 @@ MMCM 的结构：`VCO = f_in * MULT / DIVCLK`，`f_clkoutN = VCO / D_N`。
 | 偏移 | 名称      | 说明                                               |
 | ---- | --------- | -------------------------------------------------- |
 | 0x00 | ID        | 只读，固定 `0x44 50 4D 03`（"DPM3"）               |
-| 0x04 | STATUS    | b0 = MMCM `locked`、b1/b2 = 重配置进行中           |
+| 0x04 | STATUS    | b0 = MMCM `locked`、b1/b2 = 重配置进行中，其余位读 0 |
 | 0x08 | CLKFBOUT  | MMCM DADDR 0x14（ClkReg1）                         |
 | 0x0C | CLKFBOUT2 | MMCM DADDR 0x15（ClkReg2）                         |
 | 0x10 | CLKOUT0   | MMCM DADDR 0x08（clk_out1，参考输出）              |

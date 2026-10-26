@@ -35,19 +35,19 @@ class MmcmDrpControllerBundle extends Bundle {
   *
   * ==寄存器映射（AXI4-Lite，字节偏移）==
   *
-  * | 偏移   | 名称        | 属性  | 说明                              |
-  * |:-----|:----------|:----|:--------------------------------|
-  * | 0x00 | ID        | 只读  | 固定 0x44504D03（"DPM3"）           |
-  * | 0x04 | STATUS    | 只读  | b0 = MMCM locked、b1/b2 = 重配置进行中 |
-  * | 0x08 | CLKFBOUT  | 读写  | MMCM 寄存器 0x14 的值                |
-  * | 0x0C | CLKFBOUT2 | 读写  | MMCM 寄存器 0x15 的值                |
-  * | 0x10 | CLKOUT0   | 读写  | MMCM 寄存器 0x08 的值（参考输出）          |
-  * | 0x14 | CLKOUT0_2 | 读写  | MMCM 寄存器 0x09 的值                |
-  * | 0x18 | CLKOUT1   | 读写  | MMCM 寄存器 0x0A 的值（移相输出）          |
-  * | 0x1C | CLKOUT1_2 | 读写  | MMCM 寄存器 0x0B 的值                |
-  * | 0x20 | DIVCLK    | 读写  | MMCM 寄存器 0x16 的值                |
-  * | 0x24 | POWER     | 读写  | MMCM 寄存器 0x28 的值（复位值 0xFFFF）    |
-  * | 0x28 | LOAD      | W1S | 写 1 触发一次完整重配置                   |
+  * | 偏移   | 名称        | 属性  | 说明                                      |
+  * |:-----|:----------|:----|:----------------------------------------|
+  * | 0x00 | ID        | 只读  | 固定 0x44504D03（"DPM3"）                   |
+  * | 0x04 | STATUS    | 只读  | b0 = MMCM locked、b1/b2 = 重配置进行中（其余位读 0） |
+  * | 0x08 | CLKFBOUT  | 读写  | MMCM 寄存器 0x14 的值                        |
+  * | 0x0C | CLKFBOUT2 | 读写  | MMCM 寄存器 0x15 的值                        |
+  * | 0x10 | CLKOUT0   | 读写  | MMCM 寄存器 0x08 的值（参考输出）                  |
+  * | 0x14 | CLKOUT0_2 | 读写  | MMCM 寄存器 0x09 的值                        |
+  * | 0x18 | CLKOUT1   | 读写  | MMCM 寄存器 0x0A 的值（移相输出）                  |
+  * | 0x1C | CLKOUT1_2 | 读写  | MMCM 寄存器 0x0B 的值                        |
+  * | 0x20 | DIVCLK    | 读写  | MMCM 寄存器 0x16 的值                        |
+  * | 0x24 | POWER     | 读写  | MMCM 寄存器 0x28 的值（复位值 0xFFFF）            |
+  * | 0x28 | LOAD      | W1S | 写 1 触发一次完整重配置                           |
   *
   * 地址译码只看**页内偏移** `addr[11:0]`（BD 把本 IP 映射在 `0x43C1_0000` 的 4KB 段上， 而 AXI 互连不剥离基地址）：`addr[11:6] == 0` 且
   * `addr[1:0] == 0` 才响应，高位不参与译码。 仿真激励必须按真实地址驱动（基地址 + 偏移），否则测不到这条路径——上板时曾因此 让 DRP 读写全部被丢弃。
@@ -89,11 +89,9 @@ class MmcmDrpControllerImpl extends Module with InlineInstance {
     axiLiteSlave.wr.ready := true.B
     axiLiteSlave.rd.ready := true.B
 
-    private val busy = RegInit(false.B)
     // 软件写 LOAD=1 置起本标志；状态机在 IDLE 看到它就开始重配置并清除。
     // 用「寄存器」而不是单拍脉冲，避免组合脉冲宽度依赖 AXI 握手时序。
     private val loadPending = RegInit(false.B)
-    // 调试计数：记录收到多少次写、多少次 LOAD（读寄存器 15 可查看）
 
     // 地址译码：BD 把本 IP 映射到 4KB 段（0x43C1_0000）。
     // 地址在从口处已截断到页内偏移 addr[11:0]：`addr[11:6]` 必须为 0（寄存器区只有 0x00..0x28）、
@@ -125,19 +123,22 @@ class MmcmDrpControllerImpl extends Module with InlineInstance {
                 is(iClkOut1_2.asUInt) { clkOut1_2 := ByteStrobe.merge(clkOut1_2, data, strb) }
                 is(iDivClk.asUInt) { divClk := ByteStrobe.merge(divClk, data, strb) }
                 is(iPower.asUInt) { power := ByteStrobe.merge(power, data, strb) }
-                is(iLoadPending.asUInt) { when(data(0)) { loadPending := true.B } }
+                is(iLoadPending.asUInt) { when(strb(0) && data(0)) { loadPending := true.B } }
             }
         }
     }
 
-    // drp_dout：本设计不需要读-改-写（软件给的是完整寄存器值），
-    // 但仍把上一次 DRP 访问读回的内容放进 STATUS 的高 16 位作为诊断信息，
-    // 便于上板核对 MMCM 寄存器的实际内容。
-    private val drpLastRead = RegNext(io.drp_dout, 0.U)
+    // DRP 的 DOUT（`io.drp_dout`）本设计不消费：控制器只做 DRP 写（软件给的是完整寄存器值，
+    // 不存在读-改-写），而 MMCM 的 DOUT 只在读访问的 DRDY 有效。端口保留以匹配
+    // `dpm_mmcm_src` 的 DRP 接口；STATUS 的高 16 位改为保留 0（见下）。
+
+    // 「重配置进行中」状态位在 DRP 状态机一节按状态派生（见 `busy :=`），这里先用 Wire 占位。
+    private val busy = Wire(Bool())
 
     // 读数据：窗口外读回 0。寄存器的数据只用低 16 位，高 16 位恒 0。
     private val versionValue = Cat("DPM".map(_.toInt.U(8.W)) :+ 3.U(8.W))
-    private val statusValue = Cat(drpLastRead, 13.U(13.W), busy, busy, lockedSync)
+    // STATUS：b0 = locked、b1/b2 = 重配置进行中，其余位保留读 0。
+    private val statusValue = Cat(0.U(16.W), 0.U(13.W), busy, busy, lockedSync)
     private val indexMap = Seq(
         iVersion -> versionValue,
         iStatus -> statusValue,
@@ -169,6 +170,9 @@ class MmcmDrpControllerImpl extends Module with InlineInstance {
     import StateEnum._
     private val state = RegInit(sIdle)
     private val isIdle = state === sIdle
+    // 「重配置进行中」状态位：由状态派生（不在 IDLE，或已收到 LOAD 但状态机还没进
+    // sResetHold），不需要独立寄存器；LOAD 写入的下一拍即置位，避免 STATUS 出现一拍假空闲。
+    busy := !isIdle || loadPending
     private val idxCntEnable = state === sWait && io.drp_drdy
     private val holdCntEnable = state.isOneOf(sResetHold, sRelease)
     private val (idx, idxTrigger) = Counter(0 until 8, idxCntEnable, isIdle)
@@ -191,15 +195,16 @@ class MmcmDrpControllerImpl extends Module with InlineInstance {
     prefix("fsm") {
         switch(state) {
             is(sIdle) {
-                busy := false.B
                 holdCnt := 0.U
                 when(loadPending) {
                     loadPending := false.B
-                    busy := true.B
                     state := sResetHold
                 }
             }
-            // 复位至少要按住几拍（MMCM 数据手册要求 RST 有效宽度；这里取 8 个 CLK）
+            // 复位至少要按住几拍（MMCM 数据手册要求 RST 有效宽度；这里取 8 个 CLK）。
+            // holdCnt 在 sResetHold 数到 7 后停住；进入 sRelease 时第一拍即回卷并触发，
+            // 因此 sRelease 实际只有 1 个 DCLK 的延迟（把 RST 释放与回 IDLE 隔开一拍），
+            // 不是 8 拍等待。重配置是否真正完成由 MMCM 的 locked 反映，不依赖这段等待。
             is(sResetHold) { when(holdCntTrigger) { state := sWrite } }
             is(sWrite) { state := sWait }
             is(sWait) { when(io.drp_drdy) { state := Mux(idxTrigger, sRelease, sWrite) } }

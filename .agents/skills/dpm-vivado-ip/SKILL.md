@@ -237,11 +237,14 @@ PHASE_MUX  = m & 0x7       # 相位码的小数部分（1/8 VCO 周期）
 
 目标频率由 `create_bd.tcl` 的第一个参数给出，**默认 450MHz**（450 = 50 × 9，clk_wiz 选小数倍频：
 `MMCM_CLKFBOUT_MULT_F=20.250`、`MMCM_DIVCLK_DIVIDE=1`、`MMCM_CLKOUT0_DIVIDE_F=2.250` →
-VCO 1012.5MHz、输出 450MHz）。当前签核结果（xc7z010clg400-1、Vivado 2025.2）：
-**全设计 WNS +0.271ns / WHS +0.026ns / WPWS +0.067ns、0 失败端点**；同一份网表用
-`impl_stability.tcl` 做 6 次独立实现，结果完全一致（6/6 PASS）。整体 WNS 仍由 **clk_wiz 的
-Safe Clock Startup 内部路径**（`seq_reg1[7] → BUFGCE CE0`）决定；测量域自身最差 setup 路径
-余量 +0.541ns，DSP 域 hold 最差 +0.121ns。
+VCO 1012.5MHz、输出 450MHz）。当前签核结果（xc7z010clg400-1、Vivado 2025.2，
+2026-10-26 用 HEAD 的 RTL 重跑单次实现）：**全设计 WNS +0.271ns / WHS +0.060ns /
+WPWS +0.067ns、0 失败端点，methodology 0 新问题（13 条已 waive）、DRC 0、日志 0 warning**。
+整体 WNS 仍由 **clk_wiz 的 Safe Clock Startup 内部路径**（`seq_reg1[7] → BUFGCE CE0`）决定；
+测量域自身最差 setup 路径余量在 +0.5~0.6ns 量级（2026-10-26 实测 +0.553ns：
+`dspReset` 释放链 → 边沿检测链复位脚；纯数据/控制脚路径 ≥ +0.65ns），DSP 域 hold 最差 +0.149ns。
+**稳定性**：`impl_stability.tcl 6` 的 6/6 PASS 结论对应 2026-10-19 网表；RTL 再改动后必须重跑
+该脚本，不能沿用旧结论。
 频率参数同时是 IP 侧 `dspClock` 的 `FREQ_HZ` 声明值来源（`package_ip.tcl` 里写死为 450MHz，改频率时同步改）。
 
 **`CONFIG.PRIM_SOURCE` 必须是 `No_buffer`**（输入时钟来自 fabric 上的 FCLK_CLK0，不是器件引脚）。

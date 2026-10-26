@@ -635,9 +635,10 @@ static uint32_t handle_set_sig(dpm_cmd_ctx_t* c, const uint8_t* payload, uint8_t
     }
     rc = dpm_sig_apply(c, &sig);
     if(rc != 0) { return cmd_reply_err(c, DPM_RESP_ERR_BUSY, out, cap); }
-    /* 改完片内源必须复位测量 FSM：DRP 一改，正在等 extSig_sig2 上升沿的窗口就再也等不到
-     * （源被重新配置，边沿关系变了），表现为 STATUS.busy 恒 1、GET_RESULT 永远
-     * ERR_BUSY。上板实测踩到过；这里显式写 CTRL 的 clear 位（与 CLEAR 命令同一路径）。 */
+    /* 重配置前的旧结果/标志已失效（源被重新配置），写一次 CTRL.clear 把结果区清掉。
+     * 注意 CTRL.clear 只清结果区与标志，**不清 busy、也不复位测量 FSM**；上面的
+     * wait_idle 已经保证 PL 空闲，因此这里的写入不会取消任何在途测量。
+     * 测量卡在 busy（源没有边沿）时的恢复路径见 docs/ps-protocol.md §3.0。 */
     dpm_reg_wr(c->io, c->io_ctx, DPM_REG_CTRL, (c->irq_enable != 0u ? DPM_CTRL_IRQ_ENABLE : 0u) | DPM_CTRL_CLEAR);
     /* 内源在用时要确认 sourceReady 已恢复（协议 §4） */
     if(c->source == DPM_SRC_INTERNAL && (dpm_cmd_sig_status(c) & DPM_SIGST_READY) == 0u)

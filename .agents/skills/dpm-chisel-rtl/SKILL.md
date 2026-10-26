@@ -27,10 +27,10 @@ object EmitFoo extends Main {
 - `Main`（定义在 `Utils.scala`）提供 `emitSystemVerilog`：创建输出目录、调用 `ChiselStage.emitSystemVerilogFile`；程序收到的参数原样转交给 `ChiselStage`（不再有 `--type` 之类被 `Main` 摘掉的选项，见下文）。
 - 输出目录为 `build/chisel/<Name>/`（**每个模块只有一份产物**），`<Name>` 由主类名剥离 `Emit` 前缀得到（`EmitFoo` → `Foo`）。需要与类名不同的目录名时显式传第二个参数。
 - 传给 firtool 的固定选项是 `-disable-all-randomization`、`-default-layer-specialization=enable` 与
-  `--lowering-options=emittedLineLength=120,locationInfoStyle=wrapInAtSquareBracket`；`--split-verilog`
-  与 `--target-dir` 由 `emitSystemVerilog` 自动追加。两个 lowering 选项只改输出格式（位置注释从
-  `// src/...` 变成 `// @[src/...]`、单行代码上限放宽到 120 字符），不改变逻辑，也不是改善标识符
-  可读性的手段——要改善生成物的可读性，得从命名与层次入手。
+  `--lowering-options=emittedLineLength=120`；`--split-verilog` 与 `--target-dir` 由
+  `emitSystemVerilog` 自动追加。`emittedLineLength` 只改输出格式（单行代码上限放宽到 120 字符），
+  不改变逻辑；位置注释保持 firtool 默认的 `// <源文件> <行列>` 形式（没有开
+  `locationInfoStyle=wrapInAtSquareBracket`）。要改善生成物的可读性，得从命名与层次入手。
 - 参数合法性用 `require` 校验（elaboration 期，如 `require(n >= 2)`、`require(dataWidth % 8 == 0)`）；
   不要用 `assert`（那是硬件断言：常量条件会被优化掉，检查时机也不同）。现有模块统一用 `require`，
   例如 `DspCounter` 的位宽上限、`ResetSynchronizer` 的级数下限。
@@ -106,8 +106,8 @@ Verilator 与 xsim / Vivado 都能直接编译。
   例如 `EdgeDetector` 按配置生成 `EdgeDetectorRising`/`EdgeDetectorBoth`——`filelist.f` 里列的是
   后者，而目录仍叫 `build/chisel/EdgeDetector/`。消费方一律按 `filelist.f` 取文件与模块，不要按目录名
   推导；新增消费方时同样只认 `filelist.f`。**参数不同会改变端口宽度的共享子模块必须把参数编进
-  `desiredName`**：`Axi4LiteSlave` 现在按 `Axi4LiteSlave_<addrUsedWidth>_<dataUsedWidth>` 命名
-  （如顶层 `Axi4LiteSlave_6_32`、DRP 控制器 `Axi4LiteSlave_12_16`）。否则两个 IP 的生成文件
+  `desiredName`**：`Axi4LiteSlave` 现在按 `Axi4LiteSlaveA<addrUsedWidth>D<dataUsedWidth>` 命名
+  （如顶层 `Axi4LiteSlaveA6D32`、DRP 控制器 `Axi4LiteSlaveA12D16`，注意文件名里没有下划线）。否则两个 IP 的生成文件
   被编进同一个仿真库时（`sim/run_handoff_tb.sh` 会把两个 `filelist.f` 一起交给 xvlog）同名模块
   互相覆盖，xelab 报 `[VRFC 10-3091] actual bit length ... differs from formal ...`、仿真行为全错。
 - **内层包装只影响内部名，不改变顶层端口名**：`MmcmDrpController` 用外层 `RawModule` +
@@ -202,10 +202,10 @@ Verilator 与 xsim / Vivado 都能直接编译。
 - `Fill(n, value)` 是两个参数；`MuxCase(default, Seq(cond -> value))` 里的条件必须是 `Bool`
   （写 `(mode === 1.U) -> addr` 而不是 `mode -> addr`）。
 - **高速域（当前 450MHz）只放「边沿检测 + 计数器/比较器 + 二级 FSM」**：频率/相位全部交给 MMCM，
-  高速域不要放配置运算或分频逻辑。450MHz 下测量域自身最差 setup 路径余量 **+0.541ns**
-  （2026-10-19 签核的生成物里是 `stateReg[0] → sig_reg`；重构后对应信号为 `state[0] → validHandShaker`，
-  这一版尚未重新综合签核）；**整体 WNS 受 clk_wiz Safe Clock Startup 内部路径限制（+0.271ns）**，
-  不要拿整体 WNS 判断测量逻辑还剩多少优化空间。
+  高速域不要放配置运算或分频逻辑。450MHz 下测量域自身最差 setup 路径余量在 **+0.5~0.6ns 量级**
+  （2026-10-26 当前 RTL 实测 **+0.553ns**：`dspReset` 释放链 → 边沿检测链复位脚；纯数据/控制脚
+  路径余量 ≥ +0.65ns，同类路径随布局布线浮动，具体以最新签核报告为准）；**整体 WNS 受 clk_wiz
+  Safe Clock Startup 内部路径限制（+0.271ns）**，不要拿整体 WNS 判断测量逻辑还剩多少优化空间。
 - **450MHz 的 32 位计数器用 DSP48E1，不要用 fabric 进位链**：fabric 32 位计数器（8 个 CARRY4 串联）
   与「16 位低段 + 16 位高段」的分段计数器在该器件上都收敛不到正余量，固定开销在
   「FF → LUT → CARRY4 的 S 输入」与计数器 Q 的远端布线。DSP48E1 在 -1 速度等级的 FMAX 是
@@ -236,11 +236,10 @@ Verilator 与 xsim / Vivado 都能直接编译。
 - **Verilator 单测当前按默认告警集编译**：`test/xmake.lua` 只传
   `--trace-fst --x-assign unique --x-initial unique --coverage -Wno-SYMRSVDWORD`，没有 `-Wall`，
   也没有逐目标豁免表。下面两类告警因此不挡构建，但设计上仍要知道它们（临时加 `-Wall` 排查时会碰到）：
-  - `UNUSEDSIGNAL`：两类来源。一是**接口固有未使用位**（`MmcmDrpController` 的 AXI4-Lite
-    `awprot` / `wstrb` 高字节等，本设计不用保护级与 >16 位数据）；二是**声明了域端口但纯组合**——
-    `SignalInputMux` 是 `RawModule`，显式声明了 `clock` / `resetn` 作域标记却不消费它们。
-    两者都不是 RTL 缺陷，临时开 `-Wall` 时按需关掉这一条并写清原因，
-    不要用 `-Wno-fatal` 之类的整体开关。
+  - `UNUSEDSIGNAL`：主要是**接口固有未使用位**（`MmcmDrpController` 的 AXI4-Lite `awprot` /
+    `wstrb` 高字节、截断后的地址高位等，本设计不用保护级与 >16 位数据，`SignalInputMux` 已内联、
+    不再有未消费的域端口）。临时开 `-Wall` 时按需关掉这一条并写清原因，不要用 `-Wno-fatal`
+    之类的整体开关。
   - `Bits of signal are not used: '_phaseShifted_T'[30:0]`：只用中间信号的最高位，其余位成了
     「未使用信号」。寄存器（`Reg`）的部分位不被使用不会告警，**`wire` 会**。做法是把「相位差值比较
     半个周期」改成两个独立累加器（`phase1` / `phase2`，初值 `-phaseWord`），而不是
@@ -256,9 +255,9 @@ Verilator 与 xsim / Vivado 都能直接编译。
   拿主时钟域的复位去释放高速域寄存器，会让释放沿落在 `dspClock` 的建立/保持窗口里。**曾经踩过**——
   把 `dspReset` 也接到 `clock` 域的同步器上（照抄上一行），生成 RTL 表面完全正常，实际是跨域释放。
   DSP 域复位**由谁产生**还会影响 `dspClock` 域复位分配网络的布局与余量；当前 450MHz 设计把链的
-  异步端接在 `mainReset` 上。2026-10-19 轮次测量域最差 setup 路径是 `stateReg[0] → sig_reg`
-  （+0.541ns；重构后对应信号为 `state[0] → validHandShaker`，尚未重新签核），整体 WNS 由
-  clk_wiz Safe Clock Startup 内部路径决定（+0.271ns）。
+  异步端接在 `mainReset` 上。2026-10-26 当前 RTL 实测测量域最差 setup 路径是
+  `dspReset` 释放链 → 边沿检测链复位脚（+0.553ns；同类路径随布局布线在 0.5~0.6ns 量级浮动），
+  整体 WNS 由 clk_wiz Safe Clock Startup 内部路径决定（+0.271ns）。
 - `ResetSynchronizer` 是 `RawModule`，自己显式声明 `clock` / `resetn` / `reset`；复位链直接复用
   `MyShiftRegister(false.B, n, true.B)`（`ShiftRegister.scala`），并且例化在
   `withClockAndReset(clock, (!resetn).asAsyncReset)` 里，因此链上寄存器是**异步复位**的：置位立即生效，
@@ -272,10 +271,11 @@ Verilator 与 xsim / Vivado 都能直接编译。
   复用它，不要在别处另写裸移位链。
   该属性只在**综合/实现期**起作用（工具据此把链上触发器放近、按异步输入处理），Verilator 与 xsim
   完全看不见——所以"属性还在不在"只能靠生成后 grep 生成的 SV，或综合后查
-  `get_property ASYNC_REG [get_cells -hier -filter {ASYNC_REG == 1}]`。父版本的逐位写法曾实测 OOC
-  综合后 4 个链触发器都是 `ASYNC_REG=1`；当前向量写法是 Xilinx 常见写法，但改成向量后尚未做过
-  综合后复核，交付签核时要确认**每一位**链触发器都是 1。行为本身由 `test/ResetSynchronizer.cpp`
-  覆盖（异步置位 + 恰好 n 拍释放）。
+  `get_property ASYNC_REG [get_cells -hier -filter {ASYNC_REG == 1}]`。当前向量写法已在
+  **2026-10-26 的 routed DCP 上逐位复核**：67 个同步链触发器（4 条边沿检测链、3 条复位链、
+  2 处 `locked` 同步链、厂商 clk_wiz/MMCM 启动链）全部 `ASYNC_REG=1`，向量写法没有丢属性；
+  后续 RTL 改动交付前按同样方式再复核一次。行为本身由 `test/ResetSynchronizer.cpp` 覆盖
+  （异步置位 + 恰好 n 拍释放）。
 - 跨域的控制信号沿用现有的握手约定（`Controller` 用 `request` / `response` 的 valid-ready 加 `EdgeDetector` 做脉冲展宽），不要新增裸的跨域电平信号。
 - **软件写的配置位不要跨域**：`SIG_CTRL` 的使能/选择位与「输入门控 + 二选一」都放在主时钟域
   （和写它的寄存器堆同域，见 `SignalInputMux`），因此写寄存器与切换同拍生效，不需要任何跨域通路。

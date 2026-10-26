@@ -78,7 +78,7 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
     private val dspReset = ResetSynchronizer(dspClock, !reset.asBool)
     private val phaseMeter = withClockAndReset(dspClock, dspReset) { PhaseMeter(edgeCntWidth, phaseCntWidth) }
 
-    // io.extSig_sig2 由上级在本域做完使能门控与二选一后送来，这里直接进测量核心的异步采样链
+    // io.sig 由上级在本域做完使能门控与二选一后送来，这里直接进测量核心的异步采样链
     phaseMeter.sig := io.sig
 
     private val request = CdcToggleHandShake.send(phaseMeter.request)

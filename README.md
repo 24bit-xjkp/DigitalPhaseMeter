@@ -98,7 +98,7 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
                     interrupt
 ```
 
-**DSP 域时钟 450MHz**：Zynq-7000 的 PS `FCLK` 上限 250MHz（在 BD 里请求更高会被静默降到 250MHz），因此测量核心的高速时钟由 **PL 内的 `clk_wiz`** 从 `FCLK_CLK0`(50MHz) 倍频得到（VCO 1012.5MHz）。「MMCM 锁定前不来时钟」由 **clk_wiz 自带的 Safe Clock Startup** 保证。当前签核结果（xc7z010clg400-1，Vivado 2025.2）：**WNS = +0.271ns、WHS = +0.026ns、WPWS = +0.067ns，TNS = THS = 0、0 个失败端点**；同一份网表 6 次独立实现结果一致。整体 WNS 的限制者仍是 clk_wiz 内部 Safe Clock Startup 路径，测量域自身最差 setup 路径余量 +0.541ns。详细策略、告警清理与签核方式见 [`vivado/README.md`](vivado/README.md) 与 [`.agents/skills/dpm-vivado-ip`](.agents/skills/dpm-vivado-ip/SKILL.md)。
+**DSP 域时钟 450MHz**：Zynq-7000 的 PS `FCLK` 上限 250MHz（在 BD 里请求更高会被静默降到 250MHz），因此测量核心的高速时钟由 **PL 内的 `clk_wiz`** 从 `FCLK_CLK0`(50MHz) 倍频得到（VCO 1012.5MHz）。「MMCM 锁定前不来时钟」由 **clk_wiz 自带的 Safe Clock Startup** 保证。当前签核结果（xc7z010clg400-1，Vivado 2025.2，2026-10-26 用 HEAD 的 RTL 增量重跑）：**WNS = +0.271ns、WHS = +0.060ns、WPWS = +0.067ns，TNS = THS = 0、0 个失败端点**；methodology 0 新问题（13 条已 waive）、DRC 0、综合实现日志 0 warning。整体 WNS 的限制者仍是 clk_wiz 内部 Safe Clock Startup 路径；测量域自身最差 setup 路径余量在 +0.5ns 量级（2026-10-26 实测 +0.553ns）。`impl_stability.tcl` 的 6/6 稳定性结论对应 2026-10-19 网表，RTL 改动后需重跑后再引用。详细策略、告警清理与签核方式见 [`vivado/README.md`](vivado/README.md) 与 [`.agents/skills/dpm-vivado-ip`](.agents/skills/dpm-vivado-ip/SKILL.md)。
 
 - **所有数据都走 AXI4-Lite 寄存器（GPIO 式）**：一次测量的结果只有 4 个字，PL 侧直接把最新结果锁存在只读寄存器里，PS 收到中断后连续读 4 个寄存器即可拿到一条完整结果。IP 内部没有任何片内存储，对外也只有一个 AXI 从口。
 - **中断**：结果锁存完成（或上一次结果被覆盖而丢失）后拉起 `interrupt`（高电平），经 `IRQ_F2P[0]` 通知 PS；软件写 `IRQ_STATUS` 清中断。
@@ -248,11 +248,11 @@ uv run python -m dpm_host gui             # PySide6 GUI
 | MMCM 联调    | `sim/run_handoff_tb.sh`                                        | xsim：真实 MMCM 行为模型，80 点相位/频率比对                       |
 | 协议与换算   | `uv run pytest -q`、`uv run python spec/selftest_spec.py`      | 上位机单测、C/Python/金标准三方一致性自检                          |
 | 离线验收演练 | `bash ps/tools/onboard_accept_sim.sh`                          | C 验证台经 pty 跑完整验收流程（80 点扫描）                         |
-| 综合实现签核 | `uv run dpm-vivado-flow` + `build/vivado` 下的时序报告         | 450MHz：WNS +0.271ns / WHS +0.026ns / 0 失败端点（6/6 稳定性一致） |
+| 综合实现签核 | `uv run dpm-vivado-flow` + `build/vivado` 下的时序报告         | 450MHz：WNS +0.271ns / WHS +0.060ns / 0 失败端点（稳定性需按 RTL 版本复跑） |
 | 上板验收     | `uv run python ps/tools/onboard_accept.py --port /dev/ttyUSB0` | JTAG 冷启动 + 串口链路 + 协议 + 80 点扫描                          |
 
-> 上表的综合实现签核与上板验收是 2026-10-19 的记录；2026-10-23 的可读性重构（提交 `0a93c2a`）改了
-> 生成 RTL 的内部命名与同步链 `ASYNC_REG` 的打包形式，尚未重跑综合/实现与上板——交付新的
-> bitstream/XSA 前需重跑 `uv run dpm-vivado-flow` 并重新签核（见 [`vivado/README.md`](vivado/README.md)）。
+> 上表的**综合实现签核**已于 2026-10-26 用当前 HEAD 的 RTL 重跑（单次实现，数据见
+> [`vivado/README.md`](vivado/README.md)）；**上板验收**仍是 2026-10-19 的记录。
+> `impl_stability.tcl 6` 的 6/6 稳定性结论对应 2026-10-19 网表，RTL 改动后需重跑后再引用。
 
 报告验证结果时请注明实际运行的目标与配置、区分「已验证」与「未验证」，详见 [`.agents/skills/dpm-pre-delivery-check`](.agents/skills/dpm-pre-delivery-check/SKILL.md)。

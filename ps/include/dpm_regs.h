@@ -107,7 +107,7 @@
  * | 偏移 | 名称        | 属性 | 说明                                     |
  * | ---- | ----------- | ---- | ---------------------------------------- |
  * | 0x00 | ID          | 只读 | 固定 0x44504D03（"DPM3"）                  |
- * | 0x04 | STATUS      | 只读 | b0 = MMCM locked、b1/b2 = 重配置进行中     |
+ * | 0x04 | STATUS      | 只读 | b0 = MMCM locked、b1/b2 = 重配置进行中，其余位读 0 |
  * | 0x08 | CLKFBOUT    | 读写 | MMCM 寄存器 0x14 的值                     |
  * | 0x0C | CLKFBOUT2   | 读写 | MMCM 寄存器 0x15 的值                     |
  * | 0x10 | CLKOUT0     | 读写 | MMCM 寄存器 0x08 的值（参考输出）           |
@@ -122,7 +122,7 @@
 
 /** 关键寄存器偏移（字节）。 */
 #define DPM_DRP_OFF_ID 0x00u        /**< 只读，应为 0x44504D03 */
-#define DPM_DRP_OFF_STATUS 0x04u    /**< b0 = locked、b1/b2 = busy */
+#define DPM_DRP_OFF_STATUS 0x04u    /**< b0 = locked、b1/b2 = busy、其余位保留读 0 */
 #define DPM_DRP_OFF_CLKFBOUT 0x08u  /**< MMCM 0x14 */
 #define DPM_DRP_OFF_CLKFBOUT2 0x0Cu /**< MMCM 0x15 */
 #define DPM_DRP_OFF_CLKOUT0 0x10u   /**< MMCM 0x08（参考输出） */
@@ -134,7 +134,8 @@
 #define DPM_DRP_OFF_LOAD 0x28u      /**< W1S：写 1 触发重配置 */
 
 #define DPM_DRP_ID_VALUE 0x44504D03u /**< ID 寄存器的固定值 */
-/** 状态寄存器偏移（与 ID 同处本地寄存器区，不是 MMCM 镜像的一部分）。 */
+/** 状态寄存器偏移（与 ID 同处本地寄存器区，不是 MMCM 镜像的一部分）。
+ *  b0 = locked、b1/b2 = busy（b2 是 b1 的镜像，历史兼容）、b3..b31 读 0。 */
 #define DPM_DRP_STATUS_OFF 0x04u
 #define DPM_DRP_STATUS_LOCKED (1u << 0) /**< MMCM 已锁定 */
 #define DPM_DRP_STATUS_BUSY (1u << 1)   /**< 重配置进行中 */

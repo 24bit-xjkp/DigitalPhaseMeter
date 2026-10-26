@@ -129,7 +129,7 @@ dpm-vivado-flow（Python，根 .venv）
 | ---------------------------- | ------------------------------------------------------------------------------------------------- |
 | 无改动重跑                   | **约 0.1–0.2 s**，不启动 Vivado；IP/BD/DCP/bit/XSA mtime 不变                                      |
 | 单 IP（`dpm_top`）RTL 变化   | 只重打包 dpm_top + 原位刷新 BD + 重跑 dpm_top/auto_pc/synth_1/impl_1；**约 2 min 15 s**             |
-| `--force` 全量               | **约 3–4 min**（8 个 IP OOC 与 impl 并行，WNS +0.271 / WHS +0.026 / 0 失败端点）                   |
+| `--force` 全量               | **约 3–4 min**（8 个 IP OOC 与 impl 并行；时序见下方签核表）                                       |
 | `--report-only`              | 约 13 s，只打开 `impl_1` 重出报告/XSA                                                              |
 
 增量综合/实现的默认值是 `off`，实测结论：
@@ -142,7 +142,8 @@ dpm-vivado-flow（Python，根 .venv）
   22 s），没有收益。因此保持默认 off。
 - 需要继续试验时用 `--incremental-synth/impl on|auto`；默认值只有在重新测量并通过判据后才改。
 - 签核/调优脚本（`impl_stability.tcl` / `impl_multi.tcl`）每次都显式清空增量属性，始终做独立
-  非增量实现；本轮改动后 `impl_stability.tcl 6` 仍为 6/6 PASS（WNS/WHS 与改动前一致）。
+  非增量实现。`impl_stability.tcl 6` 的 6/6 PASS 结论对应 2026-10-19 网表；RTL 改动后必须在
+  新网表上重跑，不能沿用旧结论（单次实现通过也不等于签核通过）。
 
 
 ## DSP 域时钟（450MHz）与安全启动
@@ -216,18 +217,18 @@ place/route 有 run-to-run 差异，**单次通过不算签核**；反过来，�
 收敛是确定性的。用 `set_clock_uncertainty` 过约束只能用来逼工具，签核要清掉后重新出报告（本设计
 不使用过约束）。
 
-2026-10-19 的签核结果（Design State: Routed，`xc7z010clg400-1`；clk_wiz 改为 `No_buffer` 后重跑）：
+2026-10-26 的签核结果（Design State: Routed，`xc7z010clg400-1`；用 HEAD 的 RTL 增量重跑，单次实现）：
 
 | 项                                                   | 结果                                                                                                                                                                                                               |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 全设计时序                                           | **WNS +0.271ns / WHS +0.026ns / WPWS +0.067ns**，TNS = THS = 0，**0 个失败端点**                                                                                                                                   |
-| DSP 域（`clk_out1_dpm_system_clk_wiz_0_0`，2.222ns） | WNS +0.271ns / WHS +0.121ns / WPWS +0.067ns，0 个失败端点                                                                                                                                                          |
-| 整体 WNS 的限制者                                    | 仍是 clk_wiz Safe Clock Startup 内部路径 `seq_reg1[7] → clkout1_buf/CE0`（+0.271）；**测量域自身最差 setup 路径余量 +0.541ns**（`stateReg[0] → sig_reg`），DSP 域 hold 最差 +0.121ns（`responseReady` 边沿同步链） |
-| 稳定性                                               | `impl_stability.tcl 6`：**6/6 PASS**，6 次数值完全相同（WNS/WHS/DSP WNS/DSP WHS = +0.271 / +0.026 / +0.271 / +0.121）                                                                                              |
-| 其它时钟组                                           | 慢域（`clk_fpga_0`）WNS +11.898ns / WHS +0.026ns；跨域（`set_max_delay 20ns`）dsp→slow +18.172ns、slow→dsp +17.367ns                                                                                               |
-| 资源                                                 | Slice LUT 892（5.07%）、Slice Register 1460（4.15%）、DSP 2（2.50%）、Block RAM 0、BUFGCTRL 6（18.75%）、MMCME2_ADV 2（100%）                                                                                      |
+| 全设计时序                                           | **WNS +0.271ns / WHS +0.060ns / WPWS +0.067ns**，TNS = THS = 0，**0 个失败端点**                                                                                                                                   |
+| DSP 域（`clk_out1_dpm_system_clk_wiz_0_0`，2.222ns） | WNS +0.271ns / WHS +0.149ns / WPWS +0.067ns，0 个失败端点                                                                                                                                                          |
+| 整体 WNS 的限制者                                    | 仍是 clk_wiz Safe Clock Startup 内部路径 `seq_reg1[7] → clkout1_buf/CE0`（+0.271）；**测量域自身最差 setup 路径余量 +0.553ns**（`dspReset` 释放链 → 边沿检测链复位脚；纯数据/控制脚路径 ≥ +0.65ns），DSP 域 hold 最差 +0.149ns |
+| 稳定性                                               | 本次为**单次实现**（0 失败端点）；`impl_stability.tcl 6` 的 6/6 PASS 结论对应 2026-10-19 网表，RTL 改动后需按同样方式复跑                                                                                          |
+| 其它时钟组                                           | 慢域（`clk_fpga_0`）WNS +12.611ns / WHS +0.060ns；跨域（`set_max_delay 20ns`）dsp→slow +18.116ns、slow→dsp +15.750ns                                                                                               |
+| 资源                                                 | Slice LUT 878（4.99%）、Slice Register 1426（4.05%）、DSP 2（2.50%）、Block RAM 0、BUFGCTRL 6（18.75%）、MMCME2_ADV 2（100%）                                                                                      |
 | 日志                                                 | IP 打包 / BD / 综合/实现主 run 与 8 个 IP OOC run **全部 0 Warnings / 0 Critical Warnings / 0 Errors**；实现 methodology 报告 `Checks found: 0 / Checks waived: 13`，**无 Critical Warning**                       |
-| 产物                                                 | `write_bitstream` 成功，`build/vivado/dpm_system.xsa`（含 bitstream）                                                                                                                                              |
+| 产物                                                 | `write_bitstream` 成功，`build/vivado/dpm_system.xsa`（含 bitstream，2026-10-26 刷新）                                                                                                                              |
 
 `xc7z010` 的 DSP48E1 全寄存器 FMAX 为 464.25MHz（DS187），450MHz 用掉约 97%；Vivado 时序分析
 覆盖 DSP 内部与 CEP/RSTP 控制脚，实现后这些路径的余量见上表。

@@ -16,8 +16,6 @@ object EdgeType {
   *   延迟级数
   * @param edgeType
   *   边沿类型
-  * @param async
-  *   是否为异步边沿
   */
 class EdgeDetector(val n: Int = 3, val edgeType: EdgeType = EdgeType.Rising) extends Module {
     require(n >= 2)
