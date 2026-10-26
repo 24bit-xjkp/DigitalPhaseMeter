@@ -120,8 +120,10 @@ module dpm_mmcm_src #(
     // 语义：
     //   - 上电：同步寄存器初值 2'b11，MMCM 一直处于复位；FCLK_CLK0 起振且 reset 释放后两拍
     //     才放开复位（MMCM 从复位释放到锁定远长于这两拍）；
-    //   - DRP 重配置：控制器先拉高 drpReset 并保持 ≥8 个 DCLK 才发第一笔 DRP 写，RST 晚 2 拍
-    //     仍完整覆盖整个 DRP 写序列；释放也晚 2 拍，仍在控制器 sRelease 的 8 拍保持期内。
+    //   - DRP 重配置：控制器先拉高 drpReset 并保持 8 个 DCLK 才发第一笔 DRP 写，RST 经本同步链
+    //     晚 2 拍到达 MMCM，仍比第一笔写早 6 拍。控制器在最后一笔 DRDY 之后一拍撤 drpReset
+    //     （厂商参考 FSM 是 DRDY 后两拍撤 RST），本同步链把引脚上的释放再推迟 2 拍，因此 MMCM
+    //     实际在 DRDY 后第 3 个 DCLK 才看到 RST 下降，不会截断还在途的 DRP 写。
     always @(posedge drpDclk) begin
         reset_high_sync <= {reset_high_sync[0], reset | drpReset};
     end

@@ -166,7 +166,7 @@ class MmcmDrpControllerImpl extends Module with InlineInstance {
     //   * 上板实测：不拉 RST 时**分频字立即生效、相位字不生效**（写相位字段后输出
     //     相位纹丝不动），因为相位延迟单元只在复位/重新锁定时重新初始化。
     // 因此重配置的完整时序是：RST=1 → 8 笔 DRP 写 → RST=0 → MMCM 重新锁定。
-    private object StateEnum extends ChiselEnum { val sIdle, sResetHold, sWrite, sWait, sRelease = Value }
+    private object StateEnum extends ChiselEnum { val sIdle, sResetHold, sWrite, sWait = Value }
     import StateEnum._
     private val state = RegInit(sIdle)
     private val isIdle = state === sIdle
@@ -174,9 +174,9 @@ class MmcmDrpControllerImpl extends Module with InlineInstance {
     // sResetHold），不需要独立寄存器；LOAD 写入的下一拍即置位，避免 STATUS 出现一拍假空闲。
     busy := !isIdle || loadPending
     private val idxCntEnable = state === sWait && io.drp_drdy
-    private val holdCntEnable = state.isOneOf(sResetHold, sRelease)
+    private val holdCntEnable = state === sResetHold
     private val (idx, idxTrigger) = Counter(0 until 8, idxCntEnable, isIdle)
-    private val (holdCnt, holdCntTrigger) = Counter(0 until 8, holdCntEnable, isIdle)
+    private val (_, holdCntTrigger) = Counter(0 until 8, holdCntEnable, isIdle)
 
     private val daddrTable = VecInit(0x14.U, 0x15.U, 0x08.U, 0x09.U, 0x0a.U, 0x0b.U, 0x16.U, 0x28.U)
     private val diTable = VecInit(indexMap.drop(2).map { case (_, v) => v })
@@ -195,20 +195,15 @@ class MmcmDrpControllerImpl extends Module with InlineInstance {
     prefix("fsm") {
         switch(state) {
             is(sIdle) {
-                holdCnt := 0.U
                 when(loadPending) {
                     loadPending := false.B
                     state := sResetHold
                 }
             }
             // 复位至少要按住几拍（MMCM 数据手册要求 RST 有效宽度；这里取 8 个 CLK）。
-            // holdCnt 在 sResetHold 数到 7 后停住；进入 sRelease 时第一拍即回卷并触发，
-            // 因此 sRelease 实际只有 1 个 DCLK 的延迟（把 RST 释放与回 IDLE 隔开一拍），
-            // 不是 8 拍等待。重配置是否真正完成由 MMCM 的 locked 反映，不依赖这段等待。
             is(sResetHold) { when(holdCntTrigger) { state := sWrite } }
             is(sWrite) { state := sWait }
-            is(sWait) { when(io.drp_drdy) { state := Mux(idxTrigger, sRelease, sWrite) } }
-            is(sRelease) { when(holdCntTrigger) { state := sIdle } }
+            is(sWait) { when(io.drp_drdy) { state := Mux(idxTrigger, sIdle, sWrite) } }
         }
     }
 
