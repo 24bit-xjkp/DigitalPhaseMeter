@@ -53,15 +53,22 @@ object `package` extends SbtModule with ScalafixModule {
       * ./mill emit                                              # 生成全部 Emit<Name>（按内容缓存，未变化的跳过）
       * ./mill emit Controller DigitalPhaseMeterTop              # 只生成指定模块
       * ./mill emit --force Controller                           # 强制重新生成
+      * ./mill emit --check                                      # 查询全部入口点是否需要重新生成
+      * ./mill emit --check Controller DigitalPhaseMeterTop      # 只查询指定模块
       * }}}
       *
       * 缓存语义：入口点（`Emit<Name>` 主类）及其传递依赖的字节码闭包没有变化时跳过执行； 判定看编译产物而不是源码文本，因此不改变字节码的编辑（例如在文件末尾追加注释）不会 触发重跑。缓存按主类隔离：改
       * `PhaseMeter` 只会让依赖它的入口点重跑。缓存命中后还会 确认约定产物 `build/chisel/<Name>/filelist.f` 存在，产物被删掉时会重新生成。
       *
+      * `--check` 只查询：缓存判定与生成时完全一致（同一缓存键，并检查约定产物是否存在），逐模块报告是否已是最新，不生成、不写产物与缓存。全部最新时退出码为 0；有模块需要重新生成时打印汇总并以非零退出码失败（与
+      * `./mill fix --check` 的检查语义一致）。`--check` 与 `--force` 互斥。
+      *
       * 需要无条件重跑单个入口点时用 Mill 内置的 `runMain`： `./mill runMain DigitalPhaseMeter.EmitController`。
       */
-    def emit(force: Flag = Flag(false), modules: String*) = Task.Command {
+    def emit(force: Flag = Flag(false), check: Flag = Flag(false), modules: String*) = Task.Command {
         val log = Task.ctx().log
+        if check.value && force.value then Task.fail("[emit] --check 与 --force 不能同时使用：--check 只查询，不生成")
+
         val allEntries = emitEntries(allLocalMainClasses())
         val selected =
             if modules.isEmpty then allEntries
@@ -106,9 +113,8 @@ object `package` extends SbtModule with ScalafixModule {
                 classIndex.get(className).map(path => classReferences(path)).getOrElse(Seq.empty)
             )
 
-        var generated = 0
-        var skipped = 0
-        selected.foreach { case (name, mainClass) =>
+        // 生成与 `--check` 共用同一份状态判定：缓存键与产物检查只在这里算一次，避免两套实现漂移。
+        val targets = selected.map { case (name, mainClass) =>
             val cacheKey = sha256(
                 Seq(
                     EmitCacheFormat,
@@ -121,22 +127,70 @@ object `package` extends SbtModule with ScalafixModule {
                 ).mkString("\n")
             )
             val stamp = cacheDir / s"$name.sha256"
-            val outputExists = os.isFile(outputRoot / name / "filelist.f")
-            val cacheHit = !force.value && outputExists && os.exists(stamp) && os.read(stamp).trim == cacheKey
-            if cacheHit then {
-                log.info(s"[emit] $name 未变化，跳过（强制重跑：./mill emit --force $name）")
-                skipped += 1
-            } else {
-                if force.value || !outputExists then log.info(s"[emit] 生成 $name（$mainClass）")
-                else log.info(s"[emit] $mainClass 或其传递依赖发生变化，生成 $name")
-                os.makeDir.all(outputRoot / name)
-                runMainClass(javaBin, mainClass, classpath, forkArgsValue, forkEnvValue, workingDir)
-                os.makeDir.all(stamp / os.up)
-                os.write.over(stamp, cacheKey)
-                generated += 1
-            }
+            val stampValue = if os.exists(stamp) then Some(os.read(stamp).trim) else None
+            EmitTarget(
+                name = name,
+                mainClass = mainClass,
+                cacheKey = cacheKey,
+                stamp = stamp,
+                outputExists = os.isFile(outputRoot / name / "filelist.f"),
+                stampValue = stampValue
+            )
         }
-        log.info(s"[emit] 完成：生成 $generated 个，跳过 $skipped 个；产物目录 $outputRoot")
+
+        if check.value then {
+            targets.foreach { target =>
+                if target.needsEmit then log.info(s"[emit] ${target.name} 需要重新生成：${target.reason}")
+                else log.info(s"[emit] ${target.name} 已是最新（缓存命中且产物存在）")
+            }
+            val stale = targets.filter(_.needsEmit)
+            if stale.nonEmpty then Task.fail(s"[emit] 检查完成：${stale.size} 个模块需要重新生成：${stale.map(_.name).mkString(", ")}")
+            else log.info(s"[emit] 检查完成：${targets.size} 个模块均为最新，无需重新生成")
+        } else {
+            var generated = 0
+            var skipped = 0
+            targets.foreach { target =>
+                if !force.value && !target.needsEmit then {
+                    log.info(s"[emit] ${target.name} 未变化，跳过（强制重跑：./mill emit --force ${target.name}）")
+                    skipped += 1
+                } else {
+                    if force.value then log.info(s"[emit] 强制生成 ${target.name}（${target.mainClass}）")
+                    else log.info(s"[emit] 生成 ${target.name}（${target.mainClass}）：${target.reason}")
+                    os.makeDir.all(outputRoot / target.name)
+                    runMainClass(javaBin, target.mainClass, classpath, forkArgsValue, forkEnvValue, workingDir)
+                    os.makeDir.all(target.stamp / os.up)
+                    os.write.over(target.stamp, target.cacheKey)
+                    generated += 1
+                }
+            }
+            log.info(s"[emit] 完成：生成 $generated 个，跳过 $skipped 个；产物目录 $outputRoot")
+        }
+    }
+
+    /** 单个入口点的生成状态：生成与 `--check` 查询共用，只读、不产生副作用。
+      *
+      * @param outputExists
+      *   约定产物 `build/chisel/<name>/filelist.f` 是否存在
+      * @param stampValue
+      *   缓存戳内容；缓存戳不存在时为空
+      */
+    private case class EmitTarget(
+        name: String,
+        mainClass: String,
+        cacheKey: String,
+        stamp: os.Path,
+        outputExists: Boolean,
+        stampValue: Option[String]
+    ) {
+
+        /** 与 `emit` 的缓存判定等价：产物存在且缓存戳与当前缓存键一致时不需要重新生成。 */
+        def needsEmit: Boolean = !outputExists || !stampValue.contains(cacheKey)
+
+        /** 需要重新生成的原因，用于 `emit` 与 `emit --check` 的输出。 */
+        def reason: String =
+            if !outputExists then s"产物缺失（build/chisel/$name/filelist.f 不存在）"
+            else if stampValue.isEmpty then "没有缓存记录（首次生成或缓存被清理）"
+            else "入口点或其传递依赖的字节码发生变化"
     }
 
     /** 发现本项目的 `Emit<Name>` 生成主类，返回 `(产物目录名, 主类全名)`。

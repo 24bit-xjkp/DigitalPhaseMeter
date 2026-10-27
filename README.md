@@ -171,10 +171,14 @@ Verilator 测试目标在编译 SV 之前会自动调用下文「生成 SystemVe
 ./mill emit                                  # 全部 Emit<Name>（测量通路、顶层 IP、DRP 控制器等）
 ./mill emit Controller DigitalPhaseMeterTop  # 只生成指定模块（多个模块名写在一条命令里）
 ./mill emit --force Controller               # 强制重新生成（--force 必须写在模块名之前）
+./mill emit --check                          # 只查询全部 Emit<Name> 是否需要重新生成（不生成、不写缓存）
+./mill emit --check Controller               # 只查询指定模块（--check 与 --force 互斥）
 ./mill runMain DigitalPhaseMeter.EmitController  # 无条件运行单个主类
 ```
 
 `emit` 按内容缓存：入口点（`Emit<Name>` 主类）及其传递依赖的字节码依赖闭包没有变化时直接跳过，变化时才执行一次（判定看编译产物、不看源码文本，不改变字节码的编辑不会触发重跑）；缓存按主类隔离，例如改 `PhaseMeter` 只会让依赖它的入口点重跑。缓存命中后还会检查约定产物 `build/chisel/<Name>/filelist.f` 是否存在，产物被删掉时会重新生成。缓存文件在 `build/chisel/.emit-cache/`，`./mill clean` 不会删 `build/chisel/`；需要无条件重跑时用上面的 `runMain`（单个主类）或 `--force`（`emit`）。构建定义与缓存实现见仓库根 `build.mill`。
+
+`emit --check` 只查询、不生成：模块名写法与 `emit` 相同（省略时检查全部 `Emit<Name>` 入口点，多个模块名写在一条命令里），判定依据与 `emit` 的缓存完全一致——同一个缓存键（入口主类及其传递依赖的字节码闭包叠加依赖 classpath 标识等）加上产物 `build/chisel/<Name>/filelist.f` 的存在性检查。它逐模块输出是否需要重新生成及原因（产物缺失、无缓存记录、入口点或其传递依赖的字节码变化），但**不执行生成、不写 `build/chisel/.emit-cache/` 缓存、不改动 `build/chisel/` 下的产物**。全部模块已是最新时退出码为 0；只要有模块需要重新生成，就逐条输出原因并打印汇总，以非零退出码失败（检查语义，与 `./mill fix --check` 相同），适合在 CI 或提交前确认生成产物是否最新。`--check` 与 `--force` 互斥，同时使用会报错；两者都必须写在模块名之前。
 
 每个模块只生成**一份**产物：复位同步由纯 RTL 的 `ResetSynchronizer` 实现，Verilator、xsim 与综合共用同一份 RTL，没有 `--type=sim|syn` 的差别。各消费入口对生成的处理不同：Verilator 测试目标的构建规则会在编译前自动执行 `./mill emit <模块名>`（需要时加 `--force`），所以改完 RTL 直接跑 `xmake test` / `xmake run` 即可；`sim/run_handoff_tb.sh` 默认也自带生成入口；Vivado 流程不会替你生成，改完 RTL 仍需先跑 `./mill emit DigitalPhaseMeterTop MmcmDrpController`（见 [`vivado/README.md`](vivado/README.md)）。生成入口的调用形式与陷阱见 [`.agents/skills/dpm-chisel-rtl`](.agents/skills/dpm-chisel-rtl/SKILL.md)。
 

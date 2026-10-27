@@ -45,6 +45,8 @@ object EmitFoo extends Main {
 ./mill emit                                  # 生成全部 Emit<Name>（按内容缓存，未变化的跳过）
 ./mill emit Controller DigitalPhaseMeterTop  # 只生成指定模块
 ./mill emit --force Controller               # 强制重新生成
+./mill emit --check                          # 只查询全部 Emit<Name> 是否需要重新生成（不生成、不写缓存）
+./mill emit --check Controller               # 只查询指定模块（--check 与 --force 互斥）
 ./mill runMain DigitalPhaseMeter.EmitController   # 无条件运行单个主类
 ```
 
@@ -52,11 +54,18 @@ Mill 专属的注意点：
 
 - **一条命令可传多个模块名**：`emit` 的位置参数就是模块名（可写 `Controller`、`EmitController` 或主类全名），
   需要生成多个模块时写在同一条命令里即可，不要拆成多条重复命令。
-- **`--force` 必须写在模块名之前**：模块名之后的 `--force` 不会被当作选项解析，必须写成
-  `./mill emit --force Controller`。
+- **`--force` / `--check` 必须写在模块名之前**：模块名之后的选项不会被当作选项解析，必须写成
+  `./mill emit --force Controller` / `./mill emit --check Controller`。
+- **`--check` 只查询、不生成，且与 `--force` 互斥**：`./mill emit --check [模块名...]` 用与 `emit`
+  相同的缓存判定（见下文「按内容缓存」）逐模块报告是否需要重新生成及原因（产物缺失 / 无缓存记录 /
+  入口点或其传递依赖的字节码变化），不执行生成、不写 `build/chisel/.emit-cache/` 缓存、不改
+  `build/chisel/` 下的产物；模块名写法与 `emit` 一致，省略时检查全部 `Emit<Name>` 入口点。
+  全部最新时退出码为 0；有模块需要重新生成时逐条输出原因并打印汇总，以非零退出码失败
+  （检查语义，类似 `./mill fix --check`）。`--check` 与 `--force` 同时使用会报错。
 - **`runMain` 的主类名是位置参数**：`./mill runMain DigitalPhaseMeter.EmitController`，其余参数原样传给主类。
   JVM 参数由构建定义（`build.mill` 的 `forkArgs` / `forkEnv`）配置，不在命令行用 `--` 分隔。
-- **生成入口会先编译**：`emit` / `runMain` 依赖编译产物；`-Werror` 下编译失败时不会生成。
+- **生成入口会先编译**：`emit` / `runMain` / `emit --check` 都依赖编译产物（`--check` 的缓存键
+  基于字节码闭包，同样先编译）；`-Werror` 下编译失败时 `emit` 不会生成，`--check` 也无法给出检查结果。
 - **Verilator 测试目标会自动调用生成入口**：`xmake` 构建 `<Name>Verilator` 目标时先执行
   `./mill emit <Name>`（`script/rule.lua` 的 `mill.verilator.shared` 规则；需要时带 `--force`），
   因此跑 `xmake test` / `xmake run` 前不需要手工生成。手工跑生成入口用于：单独生成某个模块、
@@ -74,10 +83,18 @@ Mill 专属的注意点：
   构建缓存/产物 `out/`，不会清掉 `build/chisel/`。
 - **带产物检查**：`Emit<Name>` 入口点还会检查约定产物 `build/chisel/<Name>/filelist.f`，缺失时重新生成
   （避免删掉产物后误跳过）。
+- **`--check` 复用同一判定且无副作用**：`./mill emit --check [模块名...]` 不生成，只按同一缓存键
+  （入口点字节码闭包 + 依赖 classpath 标识等）与 `filelist.f` 产物检查判断每个模块是否需要重新生成，
+  并逐模块输出状态与原因；它不写 `build/chisel/.emit-cache/` 缓存、不改 `build/chisel/` 下的产物。
+  全部最新时退出码为 0，有模块需要重新生成时以非零退出码失败（见上一节）。
 - 需要无条件重跑时，用 `./mill runMain DigitalPhaseMeter.Emit<Name>`（单个主类）或
   `./mill emit --force <模块名>`。
 - 实现见仓库根 `build.mill` 的 `emit` 任务；改动摘要或缓存键的构造方式时递增 `EmitCacheFormat`，
   避免旧缓存条目误命中。
+
+排查「产物是不是最新 / 这次改 RTL 会不会触发重生成」或需要 CI 门禁时，先跑 `./mill emit --check`
+（或带模块名只查本次改动涉及的入口点）：全部最新时退出码 0，需要重新生成时非零退出并给出原因；
+只想确认、不想改动 `build/chisel/` 时用它，确实需要刷新产物再跑 `./mill emit`。
 
 ## 产物目录：每个模块一份
 

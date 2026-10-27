@@ -35,14 +35,23 @@ rule("mill.verilator.shared", function ()
         local dependinfo = depend.load(dependfile) or {}
         local is_changed_opt = { lastmtime = os.mtime(makefile), files = sourcefiles }
         progress.set_target(opt.progress, target)
-        progress.show(opt.progress, "${color.build.object}mill.emit %s", mill_target)
         local args = { "emit" }
+        local need_emit
         if target:is_rebuilt() or depend.is_changed(dependinfo, is_changed_opt) then
             table.append(args, "--force")
             depend.save({ files = sourcefiles }, dependfile)
+            need_emit = true
+        else
+            try {
+                function () os.vrunv(mill, { "emit", "--check", mill_target }) end,
+                finally { function (ok, _) need_emit = not ok end }
+            }
         end
-        table.append(args, mill_target)
-        os.vrunv(mill, args)
+        if need_emit then
+            progress.show(opt.progress, "${color.build.object}mill.emit %s", mill_target)
+            table.append(args, mill_target)
+            os.vrunv(mill, args)
+        end
         for sv_file in io.lines(makefile) do
             target:add("files", path.join(sv_dir, sv_file))
         end
