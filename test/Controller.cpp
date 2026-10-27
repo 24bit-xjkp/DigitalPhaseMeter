@@ -543,6 +543,52 @@ TEST_SUITE("Controller")
         }
     }
 
+    TEST_CASE("a fast sig2 still completes the stop handshake")
+    {
+        // P1 的端到端回归：sig2 周期取 2 个慢时钟周期（测试时基下 10ns；换到芯片时基
+        // 相当于 50MHz 慢时钟下的 100MHz 片内源频点）。sWaitStop 期间响应握手电平
+        // 每个 sig2 上升沿都会翻转（旧实现），慢域每拍正好采样到偶数次翻转、电平恒定，
+        // 停止响应送不到慢域，测量会一直停在 busy。修复后每个停止请求只翻转一次，
+        // 即使 sig2 远快于慢时钟也能完成。
+        constexpr femtosecond_t sig2_period{10_ns};
+        const stimulus_t option{
+            .sig1_period = 400_ns,
+            .sig1_high = 200_ns,
+            .sig2_period = sig2_period,
+            .sig2_high = sig2_period / 2zu,
+            // 短闸门即可：本用例只关心停止握手能否完成，不追求测量精度
+            .gate_cnt = 200zu,
+        };
+
+        dut_context_t ctx{ctx_opt};
+        ctx.set_base_name("Controller.fast_sig2");
+        port_t port{ctx.dut()};
+
+        ctx.add_task(generate_clock(port.clock, clock_period));
+        ctx.add_task(generate_clock(port.dsp_clock, dsp_period));
+        ctx.add_task(generate_reset(port.reset, port.clock));
+
+        std::array<measurement_t, 3zu> measurements{};
+        ctx.add_task(run_measurements(port, option, measurements));
+
+        ctx.loop_until_finish(20_ms);
+
+        for(const auto& measurement: measurements)
+        {
+            REQUIRE(measurement.observed);
+            check_common(measurement.result);
+            // 停止请求之后还要等下一个 sig2 沿、并把响应同步回慢域，才锁存 gateCnt，
+            // 因此实测闸门比目标值多几个慢周期（本用例留 8 个周期的上界）
+            CHECK_GE(measurement.result.gate_cnt, option.gate_cnt);
+            CHECK_LE(measurement.result.gate_cnt, option.gate_cnt + 8zu);
+            // 窗口内的参考沿数仍然由实际窗口长度决定（窗口边界允许 ±2 个沿）
+            const auto expected_edge_cnt{static_cast<std::uint64_t>(
+                ::std::lround(static_cast<double>(measurement.result.gate_cnt) * static_cast<double>(clock_period.rep) /
+                              static_cast<double>(option.sig1_period.rep)))};
+            CHECK_EQ(measurement.result.edge_cnt, edge_cnt_tolerance(expected_edge_cnt));
+        }
+    }
+
     TEST_CASE("the target gate is latched when the measurement starts")
     {
         // 启动后等 20 个低速时钟周期（400ns，此时 FSM 早已进入 measuring）再把

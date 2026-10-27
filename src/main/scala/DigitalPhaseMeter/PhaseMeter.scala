@@ -61,18 +61,14 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
 
     import PhaseMeterStateEnum._
     private val state = RegInit(sIdle)
+    private val needSendResponse = Reg(Bool())
     prefix("fsm") {
         switch(state) {
-            is(sIdle) { when(request) { state := sWaitStart } }
-            is(sWaitStart) {
-                when(pulseSig1) {
-                    state := sMeasuring
-                    responseValid.send()
-                }
-            }
+            is(sIdle) { when(request) { state := sWaitStart; needSendResponse := true.B } }
+            is(sWaitStart) { when(pulseSig1) { state := sMeasuring; responseValid.send() } }
             is(sMeasuring) { when(request) { state := sWaitStop } }
             is(sWaitStop) {
-                when(pulseSig2) { responseValid.send() }
+                when(pulseSig2 && needSendResponse) { responseValid.send(); needSendResponse := false.B }
                 when(responseReady) { state := sIdle }
             }
         }
