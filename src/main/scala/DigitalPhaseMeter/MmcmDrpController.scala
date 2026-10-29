@@ -1,25 +1,7 @@
 package DigitalPhaseMeter
 
 import chisel3._
-import chisel3.experimental.prefix
 import chisel3.util._
-import chisel3.util.experimental.InlineInstance
-
-class MmcmDrpControllerBundle extends Bundle {
-    // AXI4-Lite 从口（固定 32 位地址 / 32 位数据）
-    val s_axi_lite = new Axi4LiteSlavePorts
-    // MMCM 动态重配置口
-    val drp_daddr = Output(UInt(7.W))
-    val drp_di = Output(UInt(16.W))
-    val drp_den = Output(Bool())
-    val drp_dwe = Output(Bool())
-    val drp_dout = Input(UInt(16.W))
-    val drp_drdy = Input(Bool())
-    // MMCM 锁定指示（异步电平）
-    val locked = Input(Bool())
-    // 重配置复位（高有效），接到 MMCM 的 RST：重配置期间必须先把它拉高
-    val mmcm_reset = Output(Bool())
-}
 
 /** MMCM 动态重配置（DRP）控制器
   *
@@ -59,8 +41,20 @@ class MmcmDrpControllerBundle extends Bundle {
   *
   * 重配置期间 MMCM 会失锁、输出停止，因此软件必须在测量空闲（`STATUS.busy = 0`）时改。
   */
-class MmcmDrpControllerImpl extends Module with InlineInstance {
-    val io = IO(new MmcmDrpControllerBundle)
+class MmcmDrpController extends TopModule {
+    // AXI4-Lite 从口（固定 32 位地址 / 32 位数据）
+    val s_axi_lite = IO(new Axi4LiteSlavePorts)
+    // MMCM 动态重配置口
+    val drp_daddr = IO(Output(UInt(7.W)))
+    val drp_di = IO(Output(UInt(16.W)))
+    val drp_den = IO(Output(Bool()))
+    val drp_dwe = IO(Output(Bool()))
+    val drp_dout = IO(Input(UInt(16.W)))
+    val drp_drdy = IO(Input(Bool()))
+    // MMCM 锁定指示（异步电平）
+    val locked = IO(Input(Bool()))
+    // 重配置复位（高有效），接到 MMCM 的 RST：重配置期间必须先把它拉高
+    val mmcm_reset = IO(Output(Bool()))
 
     // ---- 软件可写的 MMCM 寄存器镜像 ----
     // 复位值取 clk_wiz Write DRP 在同一工作点（50MHz 参考、D=40、相位 0/90°）
@@ -75,7 +69,7 @@ class MmcmDrpControllerImpl extends Module with InlineInstance {
     private val power = RegInit(0xffff.U(16.W))
 
     // locked 是异步电平，先同步到本时钟域
-    private val lockedSync = CdcLevel(io.locked)
+    private val lockedSync = CdcLevel(locked)
     // 「重配置进行中」状态位在 DRP 状态机一节按状态派生（见 `busy :=`），这里先用 Wire 占位。
     private val busy = Wire(Bool())
     private val versionValue = Cat('M'.toInt.U(8.W), 3.U(8.W))
@@ -131,11 +125,11 @@ class MmcmDrpControllerImpl extends Module with InlineInstance {
     when(writeValid) {
         val wrBits = axiLiteSlave.wr.bits
         import wrBits._
-        val addrSlice = addr(indexWidth + 1, 2)
+        val (addrSlice, _) = RegIndex.safe(addr(indexWidth + 1, 2))
         indexMap.drop(2).foreach { case (i, v) =>
-            when(addrSlice === i.asUInt) { v := ByteStrobe.merge(v, data, strb) }
+            when(addrSlice === i) { v := ByteStrobe.merge(v, data, strb) }
         }
-        loadPending := addrSlice === iLoadPending.asUInt && strb(0) && data(0)
+        loadPending := addrSlice === iLoadPending && strb(0) && data(0)
     }
 
     // 读数据：窗口外读回 0。寄存器的数据只用低 16 位，高 16 位恒 0。
@@ -161,7 +155,7 @@ class MmcmDrpControllerImpl extends Module with InlineInstance {
     // 「重配置进行中」状态位：由状态派生（不在 IDLE，或已收到 LOAD 但状态机还没进
     // sResetHold），不需要独立寄存器；LOAD 写入的下一拍即置位，避免 STATUS 出现一拍假空闲。
     busy := !isIdle || loadPending
-    private val idxCntEnable = state === sWait && io.drp_drdy
+    private val idxCntEnable = state === sWait && drp_drdy
     private val holdCntEnable = state === sResetHold
     private val (idx, idxTrigger) = Counter(0 until 8, idxCntEnable, isIdle)
     private val (_, holdCntTrigger) = Counter(0 until 8, holdCntEnable, isIdle)
@@ -169,38 +163,28 @@ class MmcmDrpControllerImpl extends Module with InlineInstance {
     private val daddrTable = VecInit(0x14.U, 0x15.U, 0x08.U, 0x09.U, 0x0a.U, 0x0b.U, 0x16.U, 0x28.U)
     private val diTable = VecInit(indexMap.drop(2).map { case (_, v) => v })
 
-    io.drp_daddr := daddrTable(idx)
-    io.drp_di := diTable(idx)
+    drp_daddr := daddrTable(idx)
+    drp_di := diTable(idx)
     // DEN 与 DWE 都只在 sWrite 那一拍拉高：
     //  * MMCM 要求 DEN 只拉高**一个** DCLK 周期（DADDR/DI/DWE 此时有效）；
     //  * 厂商 unisim 模型对「DWE 连续多个 DCLK 拉高」直接报 DRC Error 并结束仿真。
     private val isWrite = state === sWrite
-    io.drp_den := isWrite
-    io.drp_dwe := isWrite
+    drp_den := isWrite
+    drp_dwe := isWrite
     // 复位在「按住 + 8 笔写 + 等 DRDY」期间保持拉高，写完放开
-    io.mmcm_reset := state.isOneOf(sResetHold, sWrite, sWait)
+    mmcm_reset := state.isOneOf(sResetHold, sWrite, sWait)
 
-    prefix("fsm") {
-        switch(state) {
-            is(sIdle) { when(loadPending) { loadPending := false.B; state := sResetHold } }
-            // 复位至少要按住几拍（MMCM 数据手册要求 RST 有效宽度；这里取 8 个 CLK）。
-            is(sResetHold) { when(holdCntTrigger) { state := sWrite } }
-            is(sWrite) { state := sWait }
-            is(sWait) { when(io.drp_drdy) { state := Mux(idxTrigger, sIdle, sWrite) } }
-        }
+    switch(state) {
+        is(sIdle) { when(loadPending) { state := sResetHold } }
+        // 复位至少要按住几拍（MMCM 数据手册要求 RST 有效宽度；这里取 8 个 CLK）。
+        is(sResetHold) { when(holdCntTrigger) { state := sWrite } }
+        is(sWrite) { state := sWait }
+        is(sWait) { when(drp_drdy) { state := Mux(idxTrigger, sIdle, sWrite) } }
     }
+    when(state === sIdle && loadPending) { loadPending := false.B }
 
     // AXI 从口：本模块顶层端口与 Axi4LiteSlave 的方向约定一致，直接整体连接
-    io.s_axi_lite :<>= axiLiteSlave.axi
-}
-
-class MmcmDrpController extends RawModule {
-    val clock = IO(Input(Clock()))
-    val resetn = IO(Input(Bool()))
-    val io = FlatIO(new MmcmDrpControllerBundle)
-    private val mainReset = ResetSynchronizer(clock, resetn)
-    private val impl = withClockAndReset(clock, mainReset) { Module(new MmcmDrpControllerImpl) }
-    io :<>= impl.io
+    s_axi_lite :<>= axiLiteSlave.axi
 }
 
 object EmitMmcmDrpController extends Main { emitSystemVerilog(new MmcmDrpController) }

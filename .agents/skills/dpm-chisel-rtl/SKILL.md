@@ -26,11 +26,17 @@ object EmitFoo extends Main {
 
 - `Main`（定义在 `Utils.scala`）提供 `emitSystemVerilog`：创建输出目录、调用 `ChiselStage.emitSystemVerilogFile`；程序收到的参数原样转交给 `ChiselStage`（不再有 `--type` 之类被 `Main` 摘掉的选项，见下文）。
 - 输出目录为 `build/chisel/<Name>/`（**每个模块只有一份产物**），`<Name>` 由主类名剥离 `Emit` 前缀得到（`EmitFoo` → `Foo`）。需要与类名不同的目录名时显式传第二个参数。
-- 传给 firtool 的固定选项是 `-disable-all-randomization`、`-default-layer-specialization=enable` 与
-  `--lowering-options=emittedLineLength=120`；`--split-verilog` 与 `--target-dir` 由
-  `emitSystemVerilog` 自动追加。`emittedLineLength` 只改输出格式（单行代码上限放宽到 120 字符），
-  不改变逻辑；位置注释保持 firtool 默认的 `// <源文件> <行列>` 形式（没有开
-  `locationInfoStyle=wrapInAtSquareBracket`）。要改善生成物的可读性，得从命名与层次入手。
+- 传给 firtool 的固定选项是 `-disable-all-randomization`、`-default-layer-specialization=enable`、
+  `--lowering-options=emittedLineLength=120` 与 `--preserve-aggregate=1d-vec`；`--split-verilog` 与
+  `--target-dir` 由 `emitSystemVerilog` 自动追加。`emittedLineLength` 只改输出格式（单行代码上限
+  放宽到 120 字符）；`--preserve-aggregate=1d-vec` 让一维 `Vec`（如 `MmcmDrpController` 的
+  `daddrTable`/`diTable`）保留为具名 packed array，不改变端口与逻辑（对未改动模块，生成的 SV 除
+  位置注释外与关闭该选项时逐字节相同）。位置注释保持 firtool 默认的 `// <源文件> <行列>` 形式
+  （没有开 `locationInfoStyle=wrapInAtSquareBracket`），路径按编译期系统属性 `chisel.project.root`
+  相对化。该项由 `build.mill` 设置：工程根同时写进该系统属性和编译选项（`-Xmacro-settings:...`），
+  因此工程根变化、或沿用引入该设置之前编译出的旧 class 产物时，Zinc 会全量重编译并恢复相对路径；
+  生成物里不应出现检出路径。生成后可 `grep -rF "$(pwd)" build/chisel` 复核（应无命中）。位置注释
+  只影响生成物的可读性与可复现性，不影响逻辑。要改善生成物的可读性，优先从命名与层次入手。
 - 参数合法性用 `require` 校验（elaboration 期，如 `require(n >= 2)`、`require(dataWidth % 8 == 0)`）；
   不要用 `assert`（那是硬件断言：常量条件会被优化掉，检查时机也不同）。现有模块统一用 `require`，
   例如 `DspCounter` 的位宽上限、`ResetSynchronizer` 的级数下限。
@@ -127,11 +133,13 @@ Verilator 与 xsim / Vivado 都能直接编译。
   （如顶层 `Axi4LiteSlaveA6D32`、DRP 控制器 `Axi4LiteSlaveA12D16`，注意文件名里没有下划线）。否则两个 IP 的生成文件
   被编进同一个仿真库时（`sim/run_handoff_tb.sh` 会把两个 `filelist.f` 一起交给 xvlog）同名模块
   互相覆盖，xelab 报 `[VRFC 10-3091] actual bit length ... differs from formal ...`、仿真行为全错。
-- **内层包装只影响内部名，不改变顶层端口名**：`MmcmDrpController` 用外层 `RawModule` +
-  内层 `MmcmDrpControllerImpl extends Module with InlineInstance`（配 `FlatIO`）压平层次，端口仍是
-  `clock`/`resetn`/`s_axi_lite_*`/`drp_*`/`mmcm_reset`；但内部寄存器带内层实例名前缀
-  （`impl_state`、`impl_clkFbOut`），子模块连线会出现 `_impl_axiLiteSlave__io_*` 这类双下划线。
-  写断言或看波形时按这些前缀找。
+- **模块层次与命名**：`MmcmDrpController` 直接 `extends TopModule`（`Utils.scala` 里的公共顶层：
+  显式 `clock`/`resetn`，内部 `ResetSynchronizer(clock, resetn)` 同时作为 `ImplicitClock`/
+  `ImplicitReset`），不再有外层 `RawModule` + 内层 `Impl`/`InlineInstance`/`FlatIO` 包装；端口仍是
+  `clock`/`resetn`/`s_axi_lite_*`/`drp_*`/`mmcm_reset`，内部名没有 `impl_` 前缀（如 `state`、
+  `clkFbOut`、`loadPending`；子模块连线 `_axiLiteSlave__io_*`，复位同步器实例
+  `reset_resetSynchronizer`）。`DigitalPhaseMeterTop` 同样继承 `TopModule`，主时钟域复位就是
+  `TopModule.reset`。写断言或看波形时按这些名字找。
 - `Axi4LiteSlave.apply` / `PhaseMeter.apply` 里的 `.suggestName("")` 只是去掉「实例名 + 模块名」的
   重复前缀（生成实例 `axiLiteSlave_`/`phaseMeter_`，内部线名 `_axiLiteSlave__io_*`/`_phaseMeter__io_*`），
   不影响连接与端口名。
@@ -157,8 +165,9 @@ Verilator 与 xsim / Vivado 都能直接编译。
 顶层 IP 的端口名还要满足 Vivado 的 AXI 接口推断约定：`val s_axi_lite = IO(new Axi4LiteSlavePorts(...))` 会生成
 `s_axi_lite_awaddr` / `s_axi_lite_rvalid` 这类名字，`ipx::infer_bus_interfaces` 据此自动建立 `s_axi_lite`
 从口（详见 `dpm-vivado-ip`）。当前顶层只有这一个 AXI 从口：控制/状态与测量结果都在它的寄存器里
-（`ControlRegs`），没有片内存储。顶层用 `RawModule` 显式声明 `clock` / `resetn` / `dspClock`，
-不要依赖隐式时钟复位。
+（`ControlRegs`），没有片内存储。顶层统一继承 `Utils.scala` 的 `TopModule`（`RawModule` +
+`ImplicitClock`/`ImplicitReset`，提供 `clock` / `resetn` 与内部复位同步器），其余端口（`dspClock`、
+被测信号、`s_axi_lite`、`interrupt`）仍显式声明；子模块依赖该隐式时钟复位，不要各自再派生一套。
 
 ## 顶层与 AXI 接口的实测陷阱
 
@@ -267,12 +276,12 @@ Verilator 与 xsim / Vivado 都能直接编译。
 `Controller` 同时使用两个时钟：低速 `clock` 域（FSM、闸门计数）与高速 `dspClock` 域（测量核心）。新增逻辑时先确定它属于哪个域：
 
 - 高速域模块用 `withClockAndReset(dspClock, dspReset) { ... }` 例化；`dspReset` 由 `Controller` 内部的 `ResetSynchronizer` 从主复位同步得到，不要在高速域直接使用低速域的 `reset`。
-- **每个时钟域一个复位同步器，复位释放必须与消费它的时钟同域**：顶层例化主时钟域那个（`mainReset`，与 `clock` 同步，接 PS 的低有效 `resetn`）；**DSP 域那个在 `Controller` 内部**（与 `dspClock` 同步，从高有效的 `mainReset` 取反接入，见上面的极性陷阱），其输出给 `PhaseMeter`。原因是两个时钟都源自 MMCM、相位关系不固定，而
+- **每个时钟域一个复位同步器，复位释放必须与消费它的时钟同域**：顶层例化主时钟域那个（`TopModule.reset` = `ResetSynchronizer(clock, resetn)`，与 `clock` 同步，接 PS 的低有效 `resetn`）；**DSP 域那个在 `Controller` 内部**（与 `dspClock` 同步，从高有效的 `TopModule.reset` 取反接入，见上面的极性陷阱），其输出给 `PhaseMeter`。原因是两个时钟都源自 MMCM、相位关系不固定，而
   `withClockAndReset(clk, boolReset)` 生成的复位在消费端是**同步复位**（`always @(posedge clk) if (reset)`）：
   拿主时钟域的复位去释放高速域寄存器，会让释放沿落在 `dspClock` 的建立/保持窗口里。**曾经踩过**——
   把 `dspReset` 也接到 `clock` 域的同步器上（照抄上一行），生成 RTL 表面完全正常，实际是跨域释放。
   DSP 域复位**由谁产生**还会影响 `dspClock` 域复位分配网络的布局与余量；当前 450MHz 设计把链的
-  异步端接在 `mainReset` 上。2026-10-26 当前 RTL 实测测量域最差 setup 路径是
+  异步端接在 `TopModule.reset` 上。2026-10-26 当前 RTL 实测测量域最差 setup 路径是
   `dspReset` 释放链 → 边沿检测链复位脚（+0.553ns；同类路径随布局布线在 0.5~0.6ns 量级浮动），
   整体 WNS 由 clk_wiz Safe Clock Startup 内部路径决定（+0.271ns）。
 - `ResetSynchronizer` 是 `RawModule`，自己显式声明 `clock` / `resetn` / `reset`；复位链直接复用

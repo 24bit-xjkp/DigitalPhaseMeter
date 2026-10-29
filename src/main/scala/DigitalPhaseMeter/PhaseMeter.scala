@@ -1,7 +1,6 @@
 package DigitalPhaseMeter
 
 import chisel3._
-import chisel3.experimental.prefix
 import chisel3.util._
 
 /** 相位计输入信号，sig1为参考信号，sig2为被测信号
@@ -62,17 +61,17 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
     import PhaseMeterStateEnum._
     private val state = RegInit(sIdle)
     private val needSendResponse = Reg(Bool())
-    prefix("fsm") {
-        switch(state) {
-            is(sIdle) { when(request) { state := sWaitStart; needSendResponse := true.B } }
-            is(sWaitStart) { when(pulseSig1) { state := sMeasuring; responseValid.send() } }
-            is(sMeasuring) { when(request) { state := sWaitStop } }
-            is(sWaitStop) {
-                when(pulseSig2 && needSendResponse) { responseValid.send(); needSendResponse := false.B }
-                when(responseReady) { state := sIdle }
-            }
-        }
+    switch(state) {
+        is(sIdle) { when(request) { state := sWaitStart } }
+        is(sWaitStart) { when(pulseSig1) { state := sMeasuring } }
+        is(sMeasuring) { when(request) { state := sWaitStop } }
+        is(sWaitStop) { when(responseReady) { state := sIdle } }
     }
+    private val isIdle = dontTouch(state === sIdle)
+    when(isIdle) { needSendResponse := true.B }
+    when(state === sWaitStart && pulseSig1) { responseValid.send() }
+    private val sendResponse = state === sWaitStop && pulseSig2 && needSendResponse
+    when(sendResponse) { responseValid.send(); needSendResponse := false.B }
 
     // 计数器控制脚全部寄存器化（450MHz 的关键路径）：clearCnt / pulseSig1Valid /
     // pulseSig2Valid / phaseCntEnable 都是寄存器，直接驱动 DSP48E1 的 RSTP/CEP 控制脚。
@@ -80,7 +79,7 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
     // 置位与清零必须**用同一级延迟**（pulseSig1Valid / pulseSig2Valid）：相位计数的是
     // 「sig1 检测沿 → sig2 检测沿」之间的高速时钟周期数，两个边沿脉冲经同样的边沿检测
     // 流水线后相隔 K 拍，那么使能窗口也必须是 K 拍
-    private val clearCnt = RegNext(state === sIdle)
+    private val clearCnt = RegNext(isIdle)
     private val pulseSig1Valid = RegNext(state.isOneOf(sWaitStart, sMeasuring) && pulseSig1)
     private val pulseSig2Valid = RegNext(pulseSig2)
     // 无复位值在 xsim 里是 X，在第一次测量时经 `cnt + enable` 污染计数器

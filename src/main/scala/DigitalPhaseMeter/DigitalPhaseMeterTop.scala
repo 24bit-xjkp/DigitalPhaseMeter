@@ -46,15 +46,12 @@ class DigitalPhaseMeterTop(
     val gateCntWidth: Int = 28,
     val edgeCntWidth: Int = 32,
     val phaseCntWidth: Int = 32
-) extends RawModule {
+) extends TopModule {
     // AXI4-Lite 端口固定 32 位地址 / 32 位数据；寄存器堆只按 addr[5:2] 译码，
     // 因此从口只把低 6 位地址交给下游，写数据保持全宽（数据通路是 32 位寄存器）
     private val axiAddrUsedWidth = 6
     private val axiDataUsedWidth = 32
-    // 主时钟，低速域
-    val clock = IO(Input(Clock()))
-    // 异步复位输入，低有效
-    val resetn = IO(Input(Bool()))
+
     // 高速测量时钟
     val dspClock = IO(Input(Clock()))
     // 外部被测信号输入（异步）
@@ -68,41 +65,35 @@ class DigitalPhaseMeterTop(
     // 测量完成中断，高有效电平
     val interrupt = IO(Output(Bool()))
 
-    // 各时钟域一个复位同步器：异步置位、与**各自域的时钟**同步释放。
-    // 复位释放与消费它的时钟同域，跨域释放会在释放沿上违反建立/保持时间（两个时钟相位关系不固定）
-    private val mainReset = ResetSynchronizer(clock, resetn)
+    private val controller = Module(new Controller(gateCntWidth, edgeCntWidth, phaseCntWidth))
+    controller.dspClock := dspClock
 
-    withClockAndReset(clock, mainReset) {
-        val controller = Module(new Controller(gateCntWidth, edgeCntWidth, phaseCntWidth))
-        controller.dspClock := dspClock
+    private val controlRegs = Module(
+        new ControlRegs(axiAddrUsedWidth, axiDataUsedWidth, gateCntWidth, edgeCntWidth, phaseCntWidth)
+    )
+    // MMCM 的 locked 异步于主时钟，同步后再进状态寄存器
+    controlRegs.io.srcLocked := srcLocked
 
-        val controlRegs = Module(
-            new ControlRegs(axiAddrUsedWidth, axiDataUsedWidth, gateCntWidth, edgeCntWidth, phaseCntWidth)
-        )
-        // MMCM 的 locked 异步于主时钟，同步后再进状态寄存器
-        controlRegs.io.srcLocked := srcLocked
+    // 输入选择在主时钟域完成（门控 + 二选一），输出作为异步被测信号进控制器；
+    // 使能与选择位取自同一域的寄存器堆，因此写寄存器与切换同拍生效，不需要跨时钟域
+    controller.io.sig := SignalInputMux(controlRegs.io.sigEnable, controlRegs.io.srcSelect, extSig, intSig)
 
-        // 输入选择在主时钟域完成（门控 + 二选一），输出作为异步被测信号进控制器；
-        // 使能与选择位取自同一域的寄存器堆，因此写寄存器与切换同拍生效，不需要跨时钟域
-        controller.io.sig := SignalInputMux(controlRegs.io.sigEnable, controlRegs.io.srcSelect, extSig, intSig)
+    // 寄存器堆只按 `addr[5:2]` 译码，地址高位不参与任何逻辑，因此 AXI 从口只把低 6 位地址交给下游
+    // （命令总线本身就是 6 位地址，不再零扩展）；数据通路是 32 位寄存器，写数据保持全宽。
+    // 行为与全宽锁存完全一致，只是不再产生「未读寄存器位被 trim」的 Synth 8-3936 告警。
+    private val axiLiteSlave = Axi4LiteSlave(addrUsedWidth = axiAddrUsedWidth, dataUsedWidth = axiDataUsedWidth)
 
-        // 寄存器堆只按 `addr[5:2]` 译码，地址高位不参与任何逻辑，因此 AXI 从口只把低 6 位地址交给下游
-        // （命令总线本身就是 6 位地址，不再零扩展）；数据通路是 32 位寄存器，写数据保持全宽。
-        // 行为与全宽锁存完全一致，只是不再产生「未读寄存器位被 trim」的 Synth 8-3936 告警。
-        val axiLiteSlave = Axi4LiteSlave(addrUsedWidth = axiAddrUsedWidth, dataUsedWidth = axiDataUsedWidth)
+    // AXI4-Lite 从口 ↔ 寄存器堆
+    s_axi_lite :<>= axiLiteSlave.axi
+    controlRegs.io.wr :<>= axiLiteSlave.wr
+    controlRegs.io.rd :<>= axiLiteSlave.rd
+    axiLiteSlave.rdData := controlRegs.io.rdData
 
-        // AXI4-Lite 从口 ↔ 寄存器堆
-        s_axi_lite :<>= axiLiteSlave.axi
-        controlRegs.io.wr :<>= axiLiteSlave.wr
-        controlRegs.io.rd :<>= axiLiteSlave.rd
-        axiLiteSlave.rdData := controlRegs.io.rdData
+    // 寄存器堆 ↔ 控制器（测量请求/结果）
+    controller.io.in := controlRegs.io.request
+    controlRegs.io.response := controller.io.out
 
-        // 寄存器堆 ↔ 控制器（测量请求/结果）
-        controller.io.in := controlRegs.io.request
-        controlRegs.io.response := controller.io.out
-
-        interrupt := controlRegs.io.interrupt
-    }
+    interrupt := controlRegs.io.interrupt
 }
 
 object EmitDigitalPhaseMeterTop extends Main { emitSystemVerilog(new DigitalPhaseMeterTop) }

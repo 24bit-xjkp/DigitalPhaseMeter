@@ -1,7 +1,7 @@
 package DigitalPhaseMeter
 
 import chisel3._
-import chisel3.experimental.prefix
+import chisel3.experimental.dataview.RecordUpcastable
 import chisel3.util._
 
 /** 控制/状态与测量结果寄存器堆
@@ -112,14 +112,14 @@ class ControlRegs(
     private val irqPending = RegInit(false.B)
     private val busy = RegInit(false.B)
     private val resultValid = RegInit(false.B)
-    private val lostCnt = RegInit(0.U(dataWidth.W))
+    private val lostCnt = Counter(1 << 16)
     // 最新一条结果的 4 个字（记录序号在锁存时取当时的 `seq`，随后 `seq` 自增）
     private class ResultBundle extends ControllerOutPayload(gateCntWidth, edgeCntWidth, phaseCntWidth) {
-        val seqCnt = UInt(dataWidth.W)
+        val seqCnt = UInt(16.W)
     }
     private val result = RegInit(0.U.asTypeOf(new ResultBundle))
     // 下一条结果的记录序号：与结果寄存器分开保存，锁存时先取旧值再自增（首条结果序号为 0）
-    private val seq = RegInit(0.U(dataWidth.W))
+    private val seq = Counter(1 << 16)
     // 片内信号源与输入选择：软件侧寄存器，直接驱动主时钟域的组合输入选择
     private val sigEnable = RegInit(false.B)
     private val srcSelect = RegInit(false.B)
@@ -131,34 +131,22 @@ class ControlRegs(
     private val clearPulse = WireDefault(false.B)
     // 写通道不挂起任何命令：配置与输入选择同在本域生效，不需要等跨时钟域送达
     io.wr.ready := true.B
-    prefix("wrImpl") {
-        when(io.wr.fire) {
-            switch(io.wr.bits.addr(indexWidth + 1, 2)) {
-                is(iCtrl.asUInt) {
-                    when(io.wr.bits.strb(0)) {
-                        irqEnable := io.wr.bits.data(1)
-                        when(io.wr.bits.data(0)) { startPulse := true.B }
-                        when(io.wr.bits.data(2)) { clearPulse := true.B }
-                    }
-                }
-                is(iGateTarget.asUInt) {
-                    targetGate := ByteStrobe.merge(targetGate, io.wr.bits.data, io.wr.bits.strb)
-                }
-                is(iIrqStatus.asUInt) {
-                    when(io.wr.bits.strb(0)) {
-                        when(io.wr.bits.data(0)) { irqPending := false.B }
-                        when(io.wr.bits.data(1)) { resultValid := false.B }
-                        when(io.wr.bits.data(2)) { lostCnt := 0.U }
-                    }
-                }
-                is(iSigCtrl.asUInt) {
-                    when(io.wr.bits.strb(0)) {
-                        sigEnable := io.wr.bits.data(0)
-                        srcSelect := io.wr.bits.data(1)
-                    }
-                }
-            }
+    when(io.wr.fire) {
+        import io.wr.bits._
+        val (addrSlice, _) = RegIndex.safe(addr(indexWidth + 1, 2))
+        when(addrSlice === iCtrl && strb(0)) {
+            irqEnable := data(1)
+            when(data(0)) { startPulse := true.B }
+            when(data(2)) { clearPulse := true.B }
         }
+        when(addrSlice === iGateTarget) { targetGate := ByteStrobe.merge(targetGate, data, strb) }
+        val isIrqStatus = addrSlice === iIrqStatus && strb(0)
+        when(isIrqStatus) {
+            when(data(0)) { irqPending := false.B }
+            when(data(1)) { resultValid := false.B }
+            when(data(2)) { lostCnt.reset() }
+        }
+        when(addrSlice === iSigCtrl && strb(0)) { sigEnable := data(0); srcSelect := data(1) }
     }
 
     // ---- 输入选择输出：直接驱动主时钟域的组合门控与二选一，同拍生效 ----
@@ -176,21 +164,21 @@ class ControlRegs(
     // 本块写在写通道之后：同一拍 IRQ_STATUS 的 W1C 与新结果竞争时新结果优先（后写优先）；
     // CTRL.clear 写在更后面，同拍清零优先
     when(io.response.fire) {
-        result.waiveAllAs[ControllerOutPayload] :<= io.response.bits
+        result.viewAsSupertype(new ControllerOutPayload) := io.response.bits
         // 先保存本次的序号，再自增给下一条结果：首条结果序号为 0
-        result.seqCnt := seq
-        seq := seq + 1.U
+        result.seqCnt := seq.value
+        seq.inc()
         busy := false.B
         irqPending := true.B
         resultValid := true.B
-        when(resultValid) { lostCnt := lostCnt + 1.U }
+        when(resultValid) { lostCnt.inc() }
     }
 
     // ---- 清零 ----
     // 写 CTRL.clear 当拍生效（不挂起）：只复位结果区与标志，不动 busy，正在进行的测量继续跑完并照常锁存结果
     when(clearPulse) {
-        lostCnt := 0.U
-        seq := 0.U
+        lostCnt.reset()
+        seq.reset()
         irqPending := false.B
         resultValid := false.B
         result := 0.U.asTypeOf(result)
@@ -202,24 +190,24 @@ class ControlRegs(
     // 选择外部输入时一定有信号可用（是否有边沿由外部决定）；选择片内源时要求使能有效且 MMCM 已锁定，
     // 否则两路输出恒低，测量 FSM 会一直等不到参考沿
     private val sourceReady = !srcSelect || (sigEnable && srcLocked)
-    private val lostFlag = lostCnt =/= 0.U
+    private val lostFlag = lostCnt.value =/= 0.U
     io.rd.ready := true.B
     io.rdData := MuxLookup(io.rd.bits.addr(indexWidth + 1, 2), 0.U)(
         Seq(
-            iCtrl -> Cat(irqEnable, 0.U(1.W)).pad(dataWidth),
-            iStatus -> Cat(irqPending, lostFlag, resultValid, busy).pad(dataWidth),
-            iGateTarget -> targetGate.pad(dataWidth),
+            iCtrl -> Cat(irqEnable, 0.U(1.W)),
+            iStatus -> Cat(irqPending, lostFlag, resultValid, busy),
+            iGateTarget -> targetGate,
             iResultGate -> result.gateCnt,
             iResultEdge -> result.edgeCnt,
             iResultPhase -> result.phaseCnt,
             iResultSeq -> result.seqCnt,
-            iLostCnt -> lostCnt,
-            iIrqStatus -> Cat(lostFlag, resultValid, irqPending).pad(dataWidth),
+            iLostCnt -> lostCnt.value,
+            iIrqStatus -> Cat(lostFlag, resultValid, irqPending),
             iVersion -> versionValue,
             iCaps -> capsValue,
-            iSigCtrl -> Cat(srcSelect, sigEnable).pad(dataWidth),
-            iSigStatus -> Cat(sourceReady, srcLocked, srcSelect, sigEnable).pad(dataWidth)
-        ).map { case (i, v) => (i.asUInt, v) }
+            iSigCtrl -> Cat(srcSelect, sigEnable),
+            iSigStatus -> Cat(sourceReady, srcLocked, srcSelect, sigEnable)
+        ).map { case (i, v) => (i.asUInt, v.pad(dataWidth)) }
     )
 }
 

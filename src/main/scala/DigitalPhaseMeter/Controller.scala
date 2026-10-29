@@ -1,7 +1,7 @@
 package DigitalPhaseMeter
 
 import chisel3._
-import chisel3.experimental.prefix
+import chisel3.experimental.dataview.RecordUpcastable
 import chisel3.util._
 
 /** 控制器输入负载
@@ -88,43 +88,29 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
     private val gateCntClear = Reg(Bool())
     private val (gateCnt, _) = Counter(0 to (1 << gateCntWidth) - 1, true.B, gateCntClear)
     private val targetGate = RegInit(0.U(gateCntWidth.W))
+    private val targetGateMet = gateCnt === targetGate
 
     import PhaseMeterStateEnum._
     private val state = RegInit(sIdle)
-    prefix("fsm") {
-        switch(state) {
-            is(sIdle) {
-                gateCntClear := true.B
-                outValid := false.B
-                when(io.in.valid) {
-                    state := sWaitStart
-                    targetGate := io.in.bits.targetGate
-                    request.send()
-                }
-            }
-            is(sWaitStart) {
-                when(responseValid) {
-                    state := sMeasuring
-                    gateCntClear := false.B
-                    responseReady.send()
-                }
-            }
-            is(sMeasuring) {
-                when(gateCnt === targetGate) {
-                    state := sWaitStop
-                    request.send()
-                }
-            }
-            is(sWaitStop) {
-                when(responseValid) {
-                    state := sIdle
-                    payload.waiveAllAs[PhaseMeterResponsePayload] :<= phaseMeter.response.bits
-                    payload.gateCnt := gateCnt
-                    outValid := true.B
-                    responseReady.send()
-                }
-            }
-        }
+    switch(state) {
+        is(sIdle) { when(io.in.fire) { state := sWaitStart } }
+        is(sWaitStart) { when(responseValid) { state := sMeasuring } }
+        is(sMeasuring) { when(targetGateMet) { state := sWaitStop } }
+        is(sWaitStop) { when(responseValid) { state := sIdle } }
+    }
+
+    private val isIdle = dontTouch(state === sIdle)
+    when(isIdle) { gateCntClear := true.B; outValid := false.B }
+    private val startRequestReceived = isIdle && io.in.fire
+    when(startRequestReceived) { targetGate := io.in.bits.targetGate; request.send() }
+    when(state === sWaitStart && responseValid) { gateCntClear := false.B }
+    when(state === sMeasuring && targetGateMet) { request.send() }
+    private val finishMeasure = state === sWaitStop && responseValid
+    when(finishMeasure) {
+        payload.viewAsSupertype(new PhaseMeterResponsePayload) := phaseMeter.response.bits
+        payload.gateCnt := gateCnt
+        outValid := true.B
+        responseReady.send()
     }
 }
 

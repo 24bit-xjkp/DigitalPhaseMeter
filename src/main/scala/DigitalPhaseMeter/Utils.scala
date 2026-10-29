@@ -23,9 +23,19 @@ trait Main extends App {
         val firtoolOpts = Array(
             "-disable-all-randomization",
             "-default-layer-specialization=enable",
-            "--lowering-options=emittedLineLength=120"
+            "--lowering-options=emittedLineLength=120",
+            "--preserve-aggregate=1d-vec"
         )
         Files.createDirectories(outputDir)
         ChiselStage.emitSystemVerilogFile(genModule, chiselArgs, firtoolOpts)
     }
+}
+
+trait TopModule extends RawModule with ImplicitClock with ImplicitReset {
+    val clock = IO(Input(Clock()))
+    val resetn = IO(Input(Bool()))
+
+    protected val reset = ResetSynchronizer(clock, resetn)
+    override protected def implicitClock = clock
+    override protected def implicitReset = reset
 }
