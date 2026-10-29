@@ -76,6 +76,11 @@ class MmcmDrpControllerImpl extends Module with InlineInstance {
 
     // locked 是异步电平，先同步到本时钟域
     private val lockedSync = CdcLevel(io.locked)
+    // 「重配置进行中」状态位在 DRP 状态机一节按状态派生（见 `busy :=`），这里先用 Wire 占位。
+    private val busy = Wire(Bool())
+    private val versionValue = Cat('M'.toInt.U(8.W), 3.U(8.W))
+    // STATUS：b0 = locked、b1/b2 = 重配置进行中，其余位保留读 0。
+    private val statusValue = Cat(busy, busy, lockedSync).pad(16)
 
     // ---- AXI4-Lite 从口 ----
     // 寄存器空间只有 11 个字、读写都一拍完成：就地吸收命令，不给 AXI 挂起。
@@ -106,39 +111,8 @@ class MmcmDrpControllerImpl extends Module with InlineInstance {
         // 从口已把地址截断到低 drpAddrUsedWidth 位，只需检查窗口内偏移
         Cat(addr(drpAddrUsedWidth - 1, indexWidth + 2), addr(1, 0)) === 0.U
     }
-    private val inWindow = inWindowOf(axiLiteSlave.wr.bits.addr)
+    private val inWindowWr = inWindowOf(axiLiteSlave.wr.bits.addr)
     private val inWindowRd = inWindowOf(axiLiteSlave.rd.bits.addr)
-
-    // LOAD 是写 1 触发，不落寄存器；用字节选通合并后的值
-    prefix("wrImpl") {
-        when(axiLiteSlave.wr.fire && inWindow) {
-            val wrBits = axiLiteSlave.wr.bits
-            import wrBits._
-            switch(addr(indexWidth + 1, 2)) {
-                is(iClkFbOut.asUInt) { clkFbOut := ByteStrobe.merge(clkFbOut, data, strb) }
-                is(iClkFbOut2.asUInt) { clkFbOut2 := ByteStrobe.merge(clkFbOut2, data, strb) }
-                is(iClkOut0.asUInt) { clkOut0 := ByteStrobe.merge(clkOut0, data, strb) }
-                is(iClkOut0_2.asUInt) { clkOut0_2 := ByteStrobe.merge(clkOut0_2, data, strb) }
-                is(iClkOut1.asUInt) { clkOut1 := ByteStrobe.merge(clkOut1, data, strb) }
-                is(iClkOut1_2.asUInt) { clkOut1_2 := ByteStrobe.merge(clkOut1_2, data, strb) }
-                is(iDivClk.asUInt) { divClk := ByteStrobe.merge(divClk, data, strb) }
-                is(iPower.asUInt) { power := ByteStrobe.merge(power, data, strb) }
-                is(iLoadPending.asUInt) { when(strb(0) && data(0)) { loadPending := true.B } }
-            }
-        }
-    }
-
-    // DRP 的 DOUT（`io.drp_dout`）本设计不消费：控制器只做 DRP 写（软件给的是完整寄存器值，
-    // 不存在读-改-写），而 MMCM 的 DOUT 只在读访问的 DRDY 有效。端口保留以匹配
-    // `dpm_mmcm_src` 的 DRP 接口；STATUS 的高 16 位改为保留 0（见下）。
-
-    // 「重配置进行中」状态位在 DRP 状态机一节按状态派生（见 `busy :=`），这里先用 Wire 占位。
-    private val busy = Wire(Bool())
-
-    // 读数据：窗口外读回 0。寄存器的数据只用低 16 位，高 16 位恒 0。
-    private val versionValue = Cat("DPM".map(_.toInt.U(8.W)) :+ 3.U(8.W))
-    // STATUS：b0 = locked、b1/b2 = 重配置进行中，其余位保留读 0。
-    private val statusValue = Cat(0.U(16.W), 0.U(13.W), busy, busy, lockedSync)
     private val indexMap = Seq(
         iVersion -> versionValue,
         iStatus -> statusValue,
@@ -151,6 +125,20 @@ class MmcmDrpControllerImpl extends Module with InlineInstance {
         iDivClk -> divClk,
         iPower -> power
     )
+
+    // LOAD 是写 1 触发，不落寄存器；用字节选通合并后的值
+    private val writeValid = axiLiteSlave.wr.fire && inWindowWr
+    when(writeValid) {
+        val wrBits = axiLiteSlave.wr.bits
+        import wrBits._
+        val addrSlice = addr(indexWidth + 1, 2)
+        indexMap.drop(2).foreach { case (i, v) =>
+            when(addrSlice === i.asUInt) { v := ByteStrobe.merge(v, data, strb) }
+        }
+        loadPending := addrSlice === iLoadPending.asUInt && strb(0) && data(0)
+    }
+
+    // 读数据：窗口外读回 0。寄存器的数据只用低 16 位，高 16 位恒 0。
     axiLiteSlave.rdData := Mux(
         inWindowRd,
         MuxLookup(axiLiteSlave.rd.bits.addr(indexWidth + 1, 2), 0.U)(indexMap.map { case (i, v) => (i.asUInt, v) }),
@@ -194,12 +182,7 @@ class MmcmDrpControllerImpl extends Module with InlineInstance {
 
     prefix("fsm") {
         switch(state) {
-            is(sIdle) {
-                when(loadPending) {
-                    loadPending := false.B
-                    state := sResetHold
-                }
-            }
+            is(sIdle) { when(loadPending) { loadPending := false.B; state := sResetHold } }
             // 复位至少要按住几拍（MMCM 数据手册要求 RST 有效宽度；这里取 8 个 CLK）。
             is(sResetHold) { when(holdCntTrigger) { state := sWrite } }
             is(sWrite) { state := sWait }

@@ -45,7 +45,7 @@ class Axi4LiteSlave(
         // 读命令，到寄存器堆；地址只保留下游实际使用的低位
         val rd = EnqIO(new AxiLiteReadPayload(addrUsedWidth))
         // 读数据，由寄存器堆组合给出（AXI 侧仍是完整的 32 位）
-        val rdData = Input(UInt(axiDataWidth.W))
+        val rdData = Input(UInt(dataUsedWidth.W))
     })
 
     // ---- 写通道 ----
@@ -88,7 +88,7 @@ class Axi4LiteSlave(
 
     // ---- 读通道 ----
     private val rValid = RegInit(false.B)
-    private val rData = Reg(UInt(axiDataWidth.W))
+    private val rData = Reg(UInt(dataUsedWidth.W))
 
     // 地址通道握手的前提是数据寄存器能腾出来、寄存器堆能接收本次读命令，且不在复位期间
     io.axi.arready := (!rValid || io.axi.rready) && io.rd.ready && !reset.asBool
@@ -96,7 +96,7 @@ class Axi4LiteSlave(
     // 读地址是组合路径：只把下游实际使用的低位交给寄存器堆，AXI 高位丢弃
     io.rd.bits.addr := io.axi.araddr.take(addrUsedWidth)
     io.axi.rvalid := rValid
-    io.axi.rdata := rData
+    io.axi.rdata := rData.pad(axiDataWidth - dataUsedWidth)
     io.axi.rresp := AxiResp.okay.asUInt
 
     // 先默认撤销数据有效，同一拍接收新读地址时再置位（后写优先）

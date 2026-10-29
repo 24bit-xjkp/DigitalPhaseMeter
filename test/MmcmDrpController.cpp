@@ -283,7 +283,7 @@ TEST_CASE("MmcmDrpController：ID 与配置寄存器读写")
     REQUIRE(id.has_value());
     // REQUIRE 失败会终止用例，因此此处访问是安全的
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK_EQ(*id, 0x44504D03u);
+    CHECK_EQ(*id, 0x4d03u);
     for(std::size_t i{0zu}; i != kPattern.size(); ++i)
     {
         REQUIRE(readback[i].has_value());
@@ -345,7 +345,7 @@ TEST_CASE("MmcmDrpController：地址译码只看页内偏移（基地址 + 偏�
     REQUIRE(id_at_base.has_value());
     // REQUIRE 失败会终止用例，因此此处访问是安全的
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    CHECK_EQ(*id_at_base, 0x44504D03u);
+    CHECK_EQ(*id_at_base, 0x4d03u);
     REQUIRE(clkout1_at_base.has_value());
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     CHECK_EQ(*clkout1_at_base, pattern_value(kClkout1));
