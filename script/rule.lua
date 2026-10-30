@@ -35,7 +35,7 @@ rule("mill.verilator.shared", function ()
         local dependinfo = depend.load(dependfile) or {}
         local is_changed_opt = { lastmtime = os.mtime(makefile), files = sourcefiles }
         progress.set_target(opt.progress, target)
-        local args = { "emit" }
+        local args = { "--no-build-lock", "emit" }
         local need_emit
         if target:is_rebuilt() or depend.is_changed(dependinfo, is_changed_opt) then
             table.append(args, "--force")
@@ -43,7 +43,7 @@ rule("mill.verilator.shared", function ()
             need_emit = true
         else
             try {
-                function () os.vrunv(mill, { "emit", "--check", mill_target }) end,
+                function () os.vrunv(mill, table.join(args, { "--check", mill_target })) end,
                 finally { function (ok, _) need_emit = not ok end }
             }
         end

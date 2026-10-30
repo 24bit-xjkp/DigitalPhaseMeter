@@ -3,12 +3,23 @@ local verilator_options = {
 }
 local test_args = { "+verilator+rand+reset+2", "-fc" }
 
+target("mill.compile", function ()
+    set_kind("phony")
+    set_default(false)
+
+    on_config(function (_)
+        -- 保证串行执行一次编译
+        local mill = path.join(os.projectdir(), "mill")
+        os.vrunv(mill, { "compile" })
+    end)
+end)
+
 for _, file in ipairs(os.files("*.cpp")) do
     local name = path.basename(file)
 
     target(name .. "Verilator", function ()
+        add_deps("mill.compile")
         add_rules("mill.verilator.shared")
-        add_packages("verilator")
         add_toolchains("@verilator")
         set_warnings("none")
         set_policy("build.fence", true)
