@@ -1,7 +1,8 @@
 package DigitalPhaseMeter
 
 import chisel3._
-import chisel3.experimental.dataview.RecordUpcastable
+import chisel3.experimental.BundleLiterals._
+import chisel3.experimental.dataview._
 import chisel3.util._
 
 /** 控制器输入负载
@@ -67,10 +68,8 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
         val in = Flipped(ValidIO(new ControllerInPayload(gateCntWidth)))
         val out = ValidIO(new ControllerOutPayload(gateCntWidth, edgeCntWidth, phaseCntWidth))
     })
-    private val payload = Reg(new ControllerOutPayload(gateCntWidth, edgeCntWidth, phaseCntWidth))
-    io.out.bits := payload
-    private val outValid = RegInit(false.B)
-    io.out.valid := outValid
+    private val out = RegInit(chiselTypeOf(io.out).Lit(_.valid -> false.B))
+    io.out := out
 
     // 高速域复位：由本模块自己的复位同步链产生（异步置位、与 dspClock 同步释放）。
     // ResetSynchronizer 的输入是**低有效**复位（顶层接 PS 的 resetn），而隐式 reset 是高有效主复位，
@@ -87,7 +86,7 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
 
     private val gateCntClear = Reg(Bool())
     private val (gateCnt, _) = Counter(0 to (1 << gateCntWidth) - 1, true.B, gateCntClear)
-    private val targetGate = RegInit(0.U(gateCntWidth.W))
+    private val targetGate = Reg(UInt(gateCntWidth.W))
     private val targetGateMet = gateCnt === targetGate
 
     import PhaseMeterStateEnum._
@@ -100,16 +99,16 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
     }
 
     private val isIdle = dontTouch(state === sIdle)
-    when(isIdle) { gateCntClear := true.B; outValid := false.B }
+    when(isIdle) { gateCntClear := true.B; out.valid := false.B }
     private val startRequestReceived = isIdle && io.in.fire
     when(startRequestReceived) { targetGate := io.in.bits.targetGate; request.send() }
     when(state === sWaitStart && responseValid) { gateCntClear := false.B }
     when(state === sMeasuring && targetGateMet) { request.send() }
     private val finishMeasure = state === sWaitStop && responseValid
     when(finishMeasure) {
-        payload.viewAsSupertype(new PhaseMeterResponsePayload) := phaseMeter.response.bits
-        payload.gateCnt := gateCnt
-        outValid := true.B
+        out.bits.viewAsSupertype(new PhaseMeterResponsePayload) := phaseMeter.response.bits
+        out.bits.gateCnt := gateCnt
+        out.valid := true.B
         responseReady.send()
     }
 }
