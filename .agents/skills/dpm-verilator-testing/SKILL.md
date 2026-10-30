@@ -57,7 +57,7 @@ xmake run Controller "-ts=Controller" "-tc=*gate count matches*"  # 一个用例
 ### 1. 时间精度统一为 `ns`，所有等待时长必须是整数纳秒（本项目用 `ns`）
 
 ```cpp
-constexpr dut_context_option ctx_opt{.coverage = true, .time_precision = verilator_time_unit::ns};
+constexpr dut_context_option ctx_opt{.time_precision = verilator_time_unit::ns};
 dut_context_t ctx{ctx_opt};
 ```
 

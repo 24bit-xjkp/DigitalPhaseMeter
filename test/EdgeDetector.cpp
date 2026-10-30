@@ -8,7 +8,7 @@ namespace
 {
     using namespace verilator_utils;
     using dut_t = EdgeDetectorVerilator;
-    using dut_context_t = dut_context<dut_t, VerilatedFstC>;
+    using dut_context_t = dut_context<dut_t, VerilatedFstC, false>;
 
     struct port_t
     {
@@ -25,9 +25,7 @@ TEST_SUITE("EdgeDetector")
 {
     TEST_CASE("EdgeDetector")
     {
-        dut_context_t ctx{
-            {.coverage = true, .time_precision = verilator_time_unit::ns}
-        };
+        dut_context_t ctx{{.time_precision = verilator_time_unit::ns}};
         port_t port{ctx.dut()};
 
         // 时间精度为 ns，且下面的异步激励在 period/4、period/2 处翻转，因此周期必须取

@@ -29,7 +29,7 @@ namespace
 {
     using namespace verilator_utils;
     using dut_t = MmcmDrpControllerVerilator;
-    using dut_context_t = dut_context<dut_t, VerilatedFstC>;
+    using dut_context_t = dut_context<dut_t, VerilatedFstC, false>;
 
     constexpr auto clock_period{20_ns};
 
@@ -257,7 +257,7 @@ namespace
     /// 按**字索引**（不是数组下标）取 kPattern 里的值：kPattern 从 kClkfbout 起顺序排列。
     constexpr std::uint32_t pattern_value(std::uint32_t word_index) { return kPattern.at(word_index - kClkfbout).second; }
 
-    constexpr dut_context_option ctx_opt{.coverage = true, .time_precision = verilator_time_unit::ns};
+    constexpr dut_context_option ctx_opt{.time_precision = verilator_time_unit::ns};
 }  // namespace
 
 TEST_CASE("MmcmDrpController：ID 与配置寄存器读写")

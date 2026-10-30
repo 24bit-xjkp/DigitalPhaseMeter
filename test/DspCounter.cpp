@@ -15,7 +15,7 @@ namespace
 {
     using namespace verilator_utils;
     using dut_t = DspCounterVerilator;
-    using dut_context_t = dut_context<dut_t, VerilatedFstC>;
+    using dut_context_t = dut_context<dut_t, VerilatedFstC, false>;
 
     /// 时钟周期。测试取 DSP 域同款 4ns（250MHz）：时间精度为 ns，周期必须取整数纳秒的偶数，
     /// 半周期才不会被截断（1_ns 的半周期会被截成 0，时钟根本不翻转）。
@@ -38,7 +38,7 @@ namespace
         [[nodiscard]] std::uint64_t value_of() const { return static_cast<std::uint64_t>(io_value); }
     };
 
-    constexpr dut_context_option ctx_opt{.coverage = true, .time_precision = verilator_time_unit::ns};
+    constexpr dut_context_option ctx_opt{.time_precision = verilator_time_unit::ns};
 }  // namespace
 
 TEST_SUITE("DspCounter")

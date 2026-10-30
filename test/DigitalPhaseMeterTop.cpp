@@ -33,7 +33,7 @@ namespace
 {
     using namespace verilator_utils;
     using dut_t = DigitalPhaseMeterTopVerilator;
-    using dut_context_t = dut_context<dut_t, VerilatedFstC>;
+    using dut_context_t = dut_context<dut_t, VerilatedFstC, false>;
 
     /// 主时钟 50MHz（低速域：寄存器堆、控制 FSM、闸门计数）
     constexpr auto clock_period{20_ns};
@@ -442,7 +442,7 @@ namespace
         co_return interrupted;
     }
 
-    constexpr dut_context_option ctx_opt{.coverage = true, .time_precision = verilator_time_unit::ns};
+    constexpr dut_context_option ctx_opt{.time_precision = verilator_time_unit::ns};
 }  // namespace
 
 TEST_SUITE("DigitalPhaseMeterTop")

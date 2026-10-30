@@ -40,7 +40,7 @@ namespace
 {
     using namespace verilator_utils;
     using dut_t = ControllerVerilator;
-    using dut_context_t = dut_context<dut_t, VerilatedFstC>;
+    using dut_context_t = dut_context<dut_t, VerilatedFstC, false>;
 
     /// 高速时钟周期，250MHz。时间精度为 ns，周期必须取整数纳秒的偶数，半周期才能精确表示：
     /// 5_ns 这类奇数周期的半周期 2.5ns 会被截断成 2ns（实际变成 4ns）
@@ -310,7 +310,7 @@ namespace
         if(::std::abs(offset_cycles - offset_cycle_round) < 1e-9) { CHECK_EQ(result.phase_cnt, theory_phase_cnt); }
     }
 
-    constexpr dut_context_option ctx_opt{.coverage = true, .time_precision = verilator_time_unit::ns};
+    constexpr dut_context_option ctx_opt{.time_precision = verilator_time_unit::ns};
 }  // namespace
 
 TEST_SUITE("Controller")

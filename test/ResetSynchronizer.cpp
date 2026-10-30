@@ -8,7 +8,7 @@ namespace
 {
     using namespace verilator_utils;
     using dut_t = ResetSynchronizerVerilator;
-    using dut_context_t = dut_context<dut_t, VerilatedFstC>;
+    using dut_context_t = dut_context<dut_t, VerilatedFstC, false>;
 
     /// 复位同步链级数，与 ResetSynchronizer 的 n 默认值一致
     constexpr std::size_t reset_depth{4zu};
@@ -27,9 +27,7 @@ TEST_SUITE("ResetSynchronizer")
 {
     TEST_CASE("reset asserts asynchronously and releases after the chain depth")
     {
-        dut_context_t ctx{
-            {.coverage = true, .time_precision = verilator_time_unit::ns}
-        };
+        dut_context_t ctx{{.time_precision = verilator_time_unit::ns}};
         ctx.set_base_name("ResetSynchronizer.async_assert_sync_release");
         port_t port{ctx.dut()};
 

@@ -23,7 +23,7 @@ namespace
 {
     using namespace verilator_utils;
     using dut_t = PhaseMeterVerilator;
-    using dut_context_t = dut_context<dut_t, VerilatedFstC>;
+    using dut_context_t = dut_context<dut_t, VerilatedFstC, false>;
 
     /// 高速测量时钟周期（测试时基取整数纳秒以便精确激励；实际芯片为 450MHz）
     constexpr auto dsp_period{4_ns};
@@ -60,7 +60,7 @@ namespace
         }
     };
 
-    constexpr dut_context_option ctx_opt{.coverage = true, .time_precision = verilator_time_unit::ns};
+    constexpr dut_context_option ctx_opt{.time_precision = verilator_time_unit::ns};
 
     /// 在接下来 `cycles` 个高速周期内统计 response.valid 的翻转次数
     [[nodiscard]] task<std::uint64_t> count_response_toggles(const port_t& port, std::uint64_t cycles)

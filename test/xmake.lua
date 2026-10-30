@@ -1,5 +1,5 @@
 local verilator_options = {
-    "--trace-fst", { "--x-assign", "unique" }, { "--x-initial", "unique" }, "--coverage", "-Wno-SYMRSVDWORD"
+    "--trace-fst", { "--x-assign", "unique" }, { "--x-initial", "unique" }, "-Wno-SYMRSVDWORD"
 }
 local test_args = { "+verilator+rand+reset+2", "-fc" }
 
