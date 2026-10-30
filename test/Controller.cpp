@@ -54,15 +54,15 @@ namespace
     /// 闸门计数容限：相位计要等到被测信号的下一个上升沿才能给出停止响应，因此测量
     /// 窗口最多比目标闸门时间多一个被测信号周期，换算成低速时钟周期就是 T_sig2 /
     /// T_clock 再留一个周期的余量
-    [[nodiscard]] ::verilator_utils::approx<::std::uint64_t> gate_cnt_tolerance(std::uint64_t sig2_period_fs)
+    [[nodiscard]] verilator_utils::approx<std::uint64_t> gate_cnt_tolerance(std::uint64_t sig2_period_fs)
     {
-        const auto extra_slow_cycles{static_cast<::std::uint64_t>(
-            ::std::lround(static_cast<double>(sig2_period_fs) / static_cast<double>(clock_period.rep)))};
+        const auto extra_slow_cycles{
+            static_cast<std::uint64_t>(std::lround(static_cast<double>(sig2_period_fs) / static_cast<double>(clock_period.rep)))};
         return {extra_slow_cycles + 1zu, 0.0};
     }
 
     /// 边沿计数容限：窗口边界上可能多算或少算一个沿
-    constexpr ::verilator_utils::approx<::std::uint64_t> edge_cnt_tolerance{2zu, 0.0};
+    constexpr verilator_utils::approx<std::uint64_t> edge_cnt_tolerance{2zu, 0.0};
     /// 相位计数容限：每个参考周期允许的高速时钟周期误差，覆盖参考沿与被测沿落在
     /// 高速时钟网格上的采样量化
     constexpr std::uint64_t phase_cnt_per_edge_tolerance{1zu};
@@ -272,7 +272,7 @@ namespace
         // 频率不整除时会多算或少算一个沿
         const auto window_fs{static_cast<double>(option.gate_cnt) * static_cast<double>(clock_period.rep)};
         const auto expected_edge_cnt{
-            static_cast<::std::uint64_t>(::std::lround(window_fs / static_cast<double>(option.sig1_period.rep)))};
+            static_cast<std::uint64_t>(std::lround(window_fs / static_cast<double>(option.sig1_period.rep)))};
         CHECK_EQ(result.edge_cnt, edge_cnt_tolerance(expected_edge_cnt));
     }
 
@@ -294,9 +294,9 @@ namespace
         // 整数，容限取每个参考周期 1 个高速时钟周期以覆盖该量化
         const auto offset_cycles{static_cast<double>(option.phase_offset.rep) / static_cast<double>(dsp_period.rep)};
         const auto theory_phase_cnt{
-            static_cast<::std::uint64_t>(::std::lround(offset_cycles * static_cast<double>(result.edge_cnt)))};
+            static_cast<std::uint64_t>(std::lround(offset_cycles * static_cast<double>(result.edge_cnt)))};
         const auto phase_cnt_tolerance{
-            ::verilator_utils::approx<::std::uint64_t>{phase_cnt_per_edge_tolerance * result.edge_cnt, 0.0}
+            verilator_utils::approx{phase_cnt_per_edge_tolerance * result.edge_cnt, 0.0}
         };
         CAPTURE(theory_phase_cnt);
         CHECK_EQ(result.phase_cnt, phase_cnt_tolerance(theory_phase_cnt));
@@ -306,8 +306,9 @@ namespace
         // 理论值**逐位相等**。这条精确断言专门抓「每个周期固定少算/多算 1 个周期」这类
         // 系统性偏差：上面的 ±1 周期容限恰好把它覆盖掉（本项目实际踩过一次——相位计数器
         // 的清零信号少延迟一拍，所有读数系统性偏小 1 个 DSP 周期，单测全绿）。
-        const auto offset_cycle_round{static_cast<double>(::std::lround(offset_cycles))};
-        if(::std::abs(offset_cycles - offset_cycle_round) < 1e-9) { CHECK_EQ(result.phase_cnt, theory_phase_cnt); }
+        const auto offset_cycle_round{static_cast<double>(std::lround(offset_cycles))};
+        constexpr verilator_utils::approx offset_cycle_tolerance{1e-9, 0};
+        if(offset_cycle_tolerance(offset_cycles) == offset_cycle_round) { CHECK_EQ(result.phase_cnt, theory_phase_cnt); }
     }
 
     constexpr dut_context_option ctx_opt{.time_precision = verilator_time_unit::ns};
@@ -324,7 +325,7 @@ TEST_SUITE("Controller")
         ctx.add_task(generate_clock(port.clock, clock_period));
         ctx.add_task(generate_clock(port.dsp_clock, dsp_period));
 
-        const stimulus_t option{
+        constexpr static stimulus_t option{
             .sig1_period = 400_ns,
             .sig1_high = 200_ns,
             .sig2_period = 400_ns,
@@ -382,7 +383,7 @@ TEST_SUITE("Controller")
         CAPTURE(sig2_period_ns);
 
         dut_context_t ctx{ctx_opt};
-        ctx.set_base_name(::std::format("Controller.gate.{}_{}", sig1_period_ns, sig2_period_ns));
+        ctx.set_base_name(std::format("Controller.gate.{}_{}", sig1_period_ns, sig2_period_ns));
         port_t port{ctx.dut()};
 
         ctx.add_task(generate_clock(port.clock, clock_period));
@@ -583,8 +584,8 @@ TEST_SUITE("Controller")
             CHECK_LE(measurement.result.gate_cnt, option.gate_cnt + 8zu);
             // 窗口内的参考沿数仍然由实际窗口长度决定（窗口边界允许 ±2 个沿）
             const auto expected_edge_cnt{static_cast<std::uint64_t>(
-                ::std::lround(static_cast<double>(measurement.result.gate_cnt) * static_cast<double>(clock_period.rep) /
-                              static_cast<double>(option.sig1_period.rep)))};
+                std::lround(static_cast<double>(measurement.result.gate_cnt) * static_cast<double>(clock_period.rep) /
+                            static_cast<double>(option.sig1_period.rep)))};
             CHECK_EQ(measurement.result.edge_cnt, edge_cnt_tolerance(expected_edge_cnt));
         }
     }

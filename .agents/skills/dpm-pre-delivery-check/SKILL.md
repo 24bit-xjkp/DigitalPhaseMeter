@@ -54,7 +54,7 @@ REQUIRE(after_reset.has_value());
 const auto& result{after_reset.value()};  // NOLINT(bugprone-unchecked-optional-access)
 ```
 
-当前代码里已按下述方式处理过这类告警，改动时不要重新引入：先判断后执行的循环用普通 `while` 而不是 `do-while`（`cppcoreguidelines-avoid-do-while`）；浮点转整用 `::std::lround`（`bugprone-incorrect-roundings`）。
+当前代码里已按下述方式处理过这类告警，改动时不要重新引入：先判断后执行的循环用普通 `while` 而不是 `do-while`（`cppcoreguidelines-avoid-do-while`）；浮点转整用 `std::lround`（`bugprone-incorrect-roundings`）。
 
 ### Scala：Scalafix + 编译器 lint
 
