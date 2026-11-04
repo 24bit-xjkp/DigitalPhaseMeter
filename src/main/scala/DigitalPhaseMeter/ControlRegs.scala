@@ -11,21 +11,21 @@ import chisel3.util._
   *
   * 寄存器映射（地址按字对齐，取地址的第 5:2 位作为寄存器索引，偏移为字节地址）：
   *
-  * | 偏移   | 名称           | 属性  | 说明                                                                    |
-  * |:-----|:-------------|:----|:----------------------------------------------------------------------|
-  * | 0x00 | CTRL         | 混合  | b0 start（写 1 启动，只写）、b1 irqEnable（读写）、b2 clear（写 1 当拍复位结果区与标志，不清 busy） |
-  * | 0x04 | STATUS       | 只读  | b0 busy、b1 resultValid、b2 lost、b3 irqPending                          |
-  * | 0x08 | GATE_TARGET  | 读写  | 目标闸门计数（低 `gateCntWidth` 位有效）                                          |
-  * | 0x0C | RESULT_GATE  | 只读  | 最新结果的 gateCnt（实际闸门计数）                                                 |
-  * | 0x10 | RESULT_EDGE  | 只读  | 最新结果的 edgeCnt（窗口内参考信号上升沿数）                                            |
-  * | 0x14 | RESULT_PHASE | 只读  | 最新结果的 phaseCnt（相位计数）                                                  |
-  * | 0x18 | RESULT_SEQ   | 只读  | 最新结果的记录序号                                                             |
-  * | 0x1C | LOST_COUNT   | 只读  | 结果未被读走即被覆盖的次数                                                         |
-  * | 0x20 | IRQ_STATUS   | W1C | b0 irqPending、b1 resultValid（软件读走结果）、b2 lost                          |
-  * | 0x24 | VERSION      | 只读  | 版本号 0x44504D02（"DPM2"，寄存器数据通道）                                        |
-  * | 0x28 | CAPS         | 只读  | b[7:0] 每条结果字数、b[15:8] 结果深度（条）、b16 数据通道为寄存器、b17 有片内信号源与输入选择            |
-  * | 0x2C | SIG_CTRL     | 读写  | b0 enable（片内源使能，0 时两路输出恒低）、b1 srcSelect（0 = 外部输入，1 = 片内源）             |
-  * | 0x30 | SIG_STATUS   | 只读  | b0 enable、b1 srcSelect、b2 srcLocked（MMCM 已锁定）、b3 sourceReady          |
+  * | 偏移   | 名称           | 属性  | 说明                                                                                                          |
+  * |:-----|:-------------|:----|:------------------------------------------------------------------------------------------------------------|
+  * | 0x00 | CTRL         | 混合  | b0 start（写 1 启动，只写）、b1 irqEnable（读写）、b2 clear（写 1 当拍复位结果区与标志，不清 busy）、b3 forceStop（写 1 强制中止在途测量并撤销 busy，只写） |
+  * | 0x04 | STATUS       | 只读  | b0 busy、b1 resultValid、b2 lost、b3 irqPending                                                                |
+  * | 0x08 | GATE_TARGET  | 读写  | 目标闸门计数（低 `gateCntWidth` 位有效）                                                                                |
+  * | 0x0C | RESULT_GATE  | 只读  | 最新结果的 gateCnt（实际闸门计数）                                                                                       |
+  * | 0x10 | RESULT_EDGE  | 只读  | 最新结果的 edgeCnt（窗口内参考信号上升沿数）                                                                                  |
+  * | 0x14 | RESULT_PHASE | 只读  | 最新结果的 phaseCnt（相位计数）                                                                                        |
+  * | 0x18 | RESULT_SEQ   | 只读  | 最新结果的记录序号                                                                                                   |
+  * | 0x1C | LOST_COUNT   | 只读  | 结果未被读走即被覆盖的次数                                                                                               |
+  * | 0x20 | IRQ_STATUS   | W1C | b0 irqPending、b1 resultValid（软件读走结果）、b2 lost                                                                |
+  * | 0x24 | VERSION      | 只读  | 版本号 0x44504D02（"DPM2"，寄存器数据通道）                                                                              |
+  * | 0x28 | CAPS         | 只读  | b[7:0] 每条结果字数、b[15:8] 结果深度（条）、b16 数据通道为寄存器、b17 有片内信号源与输入选择                                                  |
+  * | 0x2C | SIG_CTRL     | 读写  | b0 enable（片内源使能，0 时两路输出恒低）、b1 srcSelect（0 = 外部输入，1 = 片内源）                                                   |
+  * | 0x30 | SIG_STATUS   | 只读  | b0 enable、b1 srcSelect、b2 srcLocked（MMCM 已锁定）、b3 sourceReady                                                |
   *
   * 时序要点：
   *
@@ -37,6 +37,9 @@ import chisel3.util._
   *   - 中断是电平：`irqPending && irqEnable`。软件写 `IRQ_STATUS` 的 b0 清中断挂起位，写 b1 表示结果已读走（清 resultValid）， 写 b2 清丢失计数。
   *   - 写 `CTRL.clear` **当拍生效**（不挂起）：复位 `LOST_COUNT`、记录序号与全部结果/标志，但**不改变 `busy`**——正在进行的测量继续跑完并照常锁存结果（序号从 0 重新计数）。 它与
   *     `out.valid` 同拍竞争时 clear 优先，该条结果被丢弃（`busy` 仍按测量完成撤销）。
+  *   - 写 `CTRL.forceStop` 会在写后一拍产生一个单周期脉冲：该拍撤销 `busy`，`Controller` 回到 idle，`PhaseMeter` 中止在途测量（不依赖被测信号再有边沿）。被中止的测量
+  *     **不产生结果**，因此结果寄存器、`resultValid`、`LOST_COUNT` 与中断挂起位都保持不变；空闲时写无影响。它与 `clear` 的分工是：`clear` 清结果区但不中止测量， `forceStop`
+  *     中止测量但不动结果区。该位是写 1 触发位，读回为 0；写 `CTRL` 时 b1（irqEnable）仍按整字更新。
   *   - 软件写 `IRQ_STATUS` 清标志与 `out.valid` 新结果同拍竞争时按**新结果优先**处理：结果寄存器与 `resultValid` 保持新结果，中断不会被误清。
   *   - 片内信号源使能与输入选择（`SIG_CTRL`）就在这里生效：`io.sigEnable` / `io.srcSelect`
   *     直接驱动主时钟域的组合输入选择（`SignalInputMux`），同一拍生效、不跨时钟域，因此写通道始终 `ready`；切换的效果由 `SIG_STATUS.sourceReady` 反映（选片内源要求使能有效且
@@ -104,6 +107,7 @@ class ControlRegs(
         // 片内信号源使能与输入选择（主时钟域电平），接主时钟域的 `SignalInputMux`
         val sigEnable = Output(Bool())
         val srcSelect = Output(Bool())
+        val forceStop = Output(Bool())
     })
 
     // ---- 寄存器 ----
@@ -125,6 +129,9 @@ class ControlRegs(
     private val srcSelect = RegInit(false.B)
     // MMCM 的 locked 异步于主时钟，先同步成主时钟域的电平再进状态位
     private val srcLocked = CdcLevel(io.srcLocked)
+    // 强制停止请求：默认每拍清零，写 CTRL.forceStop 当拍把下一拍置 1，产生一个单周期脉冲；
+    // 交给 Controller 后转换为跨域事件
+    private val forceStop = RegNext(false.B, false.B)
 
     // ---- 写通道：解析控制寄存器的写 ----
     private val startPulse = WireDefault(false.B)
@@ -135,9 +142,10 @@ class ControlRegs(
         import io.wr.bits._
         val (addrSlice, _) = RegIndex.safe(addr(indexWidth + 1, 2))
         when(addrSlice === iCtrl && strb(0)) {
+            startPulse := data(0)
             irqEnable := data(1)
-            when(data(0)) { startPulse := true.B }
-            when(data(2)) { clearPulse := true.B }
+            clearPulse := data(2)
+            forceStop := data(3)
         }
         when(addrSlice === iGateTarget) { targetGate := ByteStrobe.merge(targetGate, data, strb) }
         val isIrqStatus = addrSlice === iIrqStatus && strb(0)
@@ -152,6 +160,7 @@ class ControlRegs(
     // ---- 输入选择输出：直接驱动主时钟域的组合门控与二选一，同拍生效 ----
     io.sigEnable := sigEnable
     io.srcSelect := srcSelect
+    io.forceStop := forceStop
 
     // ---- 与 Controller 的握手：空闲时给出实时目标闸门，由 Controller 在启动拍锁存 ----
     // 锁存正确性依赖「busy ⇔ Controller 非 idle」：request.valid 被 !busy 门控，busy 只在
@@ -173,6 +182,13 @@ class ControlRegs(
         resultValid := true.B
         when(resultValid) { lostCnt.inc() }
     }
+
+    // ---- 强制停止 ----
+    // 写 CTRL.forceStop 后的一拍撤销 busy，Controller 同步回到 idle 并让 PhaseMeter 中止在途测量。
+    // 被中止的测量不产生结果，因此结果区、resultValid、LOST_COUNT 与中断挂起位都保持不变；
+    // 本块写在结果锁存之后，与 response.fire 同拍时仍以强制停止为准（Controller 在 forceStop
+    // 同拍不产生 out.valid，见 Controller）。
+    when(forceStop) { busy := false.B }
 
     // ---- 清零 ----
     // 写 CTRL.clear 当拍生效（不挂起）：只复位结果区与标志，不动 busy，正在进行的测量继续跑完并照常锁存结果

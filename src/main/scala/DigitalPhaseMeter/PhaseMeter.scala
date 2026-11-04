@@ -40,6 +40,8 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
         val request = Input(Bool())
         // 响应控制字
         val response = EnqIO(new PhaseMeterResponsePayload(edgeCntWidth, phaseCntWidth))
+        // 强制结束测量
+        val forceStop = Input(Bool())
     })
 
     // 四个跨域/异步输入都先经检测器的组合输出，再统一打一拍送进 FSM 与计数器控制逻辑。
@@ -57,6 +59,7 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
     private val request = RegNext(CdcToggleHandShake.receive(io.request))
     private val responseReady = RegNext(CdcToggleHandShake.receive(io.response.ready))
     private val responseValid = CdcToggleHandShake.send(io.response.valid)
+    private val forceStop = CdcToggleHandShake.receive(io.forceStop)
 
     import PhaseMeterStateEnum._
     private val state = RegInit(sIdle)
@@ -67,10 +70,12 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
         is(sMeasuring) { when(request) { state := sWaitStop } }
         is(sWaitStop) { when(responseReady) { state := sIdle } }
     }
+    when(forceStop) { state := sIdle }
     private val isIdle = dontTouch(state === sIdle)
     when(isIdle) { needSendResponse := true.B }
-    when(state === sWaitStart && pulseSig1) { responseValid.send() }
-    private val sendResponse = state === sWaitStop && pulseSig2 && needSendResponse
+    // 强制停止同拍不发送启动/停止应答：本次测量已被中止，慢域不会使用这些应答
+    when(state === sWaitStart && pulseSig1 && !forceStop) { responseValid.send() }
+    private val sendResponse = state === sWaitStop && pulseSig2 && needSendResponse && !forceStop
     when(sendResponse) { responseValid.send(); needSendResponse := false.B }
 
     // 计数器控制脚全部寄存器化（450MHz 的关键路径）：clearCnt / pulseSig1Valid /

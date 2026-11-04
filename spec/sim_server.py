@@ -19,6 +19,7 @@ SIG_CTRL/SIG_STATUS，以及「结果未读走即被覆盖 → lostCount++」「
 「GATE_TARGET 在启动拍锁存（测量期间改写不影响本次测量）」
 「CTRL.clear 写当拍立即生效：只复位 lostCount/seq/irqPending/resultValid/结果字，
 不清 busy —— 在途测量（包括卡在等参考沿、永不完成的那种）继续存在」
+「CTRL.forceStop 写当拍中止在途测量并撤销 busy，不产生结果；源无边沿时同样有效」
 「片内源使能前两路输出恒低 / 外部输入无信号 → 测量挂在等参考沿、永不完成」。
 """
 
@@ -50,6 +51,7 @@ CMD = {
     "CLEAR": 0x0C,
     "STREAM": 0x0D,
     "RESET_COUNTERS": 0x0E,
+    "STOP": 0x0F,
 }
 ERR_PARAM, ERR_BUSY = 0xFE, 0xFF
 
@@ -226,6 +228,12 @@ class SimBackend:
             self.pending_result = None
             self.finish_at = None
 
+    def force_stop(self) -> None:
+        """CTRL.forceStop：中止在途测量、撤销 busy；不产生结果、不改结果区与标志。"""
+        self.busy = 0
+        self.finish_at = None
+        self.pending_result = None
+
     def _apply_clear(self) -> None:
         """CTRL.clear：写当拍立即复位结果区与标志（与 `ControlRegs.scala` 的 clearPulse 分支一致）。
 
@@ -290,10 +298,12 @@ class SimBackend:
         idx = (off >> 2) & 0xF
         if idx == 0:  # CTRL
             self.ctrl_irq_enable = (value >> 1) & 1
-            if value & 1:
-                self.start()
             if value & 4:
                 self._apply_clear()
+            if value & 8:
+                self.force_stop()  # forceStop 优先于同一拍 start
+            elif value & 1:
+                self.start()
         elif idx == 2:
             self.gate_target = value & 0x0FFFFFFF
         elif idx == 8:  # IRQ_STATUS，W1C
@@ -404,6 +414,12 @@ class Session:
             return encode(resp, struct.pack("<IIIHB", b.freq_hz, b.phase_mdeg, b.vco_hz, b.div, b.phase_field))
         if cmd == CMD["CLEAR"]:
             b.write(0x00, (b.ctrl_irq_enable << 1) | 4)
+            return encode(resp)
+        if cmd == CMD["STOP"]:
+            if payload:
+                return encode(ERR_PARAM)
+            b.write(0x00, (b.ctrl_irq_enable << 1) | 8)
+            b.mode = 0  # 连续模式下退回 single，避免立刻重启
             return encode(resp)
         if cmd == CMD["STREAM"]:
             if len(payload) != 3:

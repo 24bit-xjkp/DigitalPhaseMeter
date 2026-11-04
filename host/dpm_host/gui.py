@@ -5,15 +5,16 @@
 - 连接/断开、波特率与连接状态（给出 `--port` 时启动后自动连接并 `IDENTIFY`）；
 - 状态灯：busy / MMCM 锁定（locked）/ 结果丢失（lost）/ sourceReady；
 - 频率显示（大字号 + `freqHz` 原值与周期）与**相位差 0~360°**（数字 + 仪表盘弧 + 0~360° 条形）；
-- 单次测量 / 连续测量开关，CLEAR 与统计复位；
+- 单次测量 / 连续测量开关 / STOP（强制中止在途测量）/ CLEAR 与统计复位；
 - **闸门时间**按**秒**设置（下发时按低速时钟换算成 `SET_GATE` 的周期数，见 :func:`gate_seconds_to_cycles`）；
 - 输入源单选（外部引脚 / 片内信号源）；
 - 片内源频率与相位输入 + 「设置」；扫描频点/相位列表 + 「扫描」（频点 × 相位 → 结果表 → CSV 导出）；
 - 结果表（最近 N 条：序号 / 频率 / 相位 / gate / edge / phaseCnt / DSP 周期）+ 导出 CSV + 清空表；
 - 日志区（带时间戳，含求解出的 VCO/MULT/D、相位量化提示、错误信息）。
 
-线程模型：所有串口操作都在一个后台 `QThread` 里**串行**执行，结果通过 Qt 信号（跨线程队列连接）
-回到界面线程刷新控件，因此界面不会因为请求超时而卡死，也不需要在工作线程里碰控件。
+线程模型：除 STOP 外的串口操作都在一个后台 `QThread` 里**串行**执行，结果通过 Qt 信号（跨线程队列连接）
+回到界面线程刷新控件，因此界面不会因为请求超时而卡死，也不需要在工作线程里碰控件。STOP 单独起线程
+发送，避免排在正在等结果的单次/连续测量任务后面（串口半双工，仍要等当前事务返回）。
 
 相位可控性来自 `spec/drp_semantics.json`（方案 A 下为 true）；不可控时（旧 bitstream）相位输入会
 置灰并给出提示，而不是假装能改。
@@ -482,6 +483,8 @@ class DpmGuiApp(QMainWindow):
         grid = QGridLayout(ctl_box)
         self.single_btn = QPushButton("单次测量")
         self.cont_btn = QPushButton("连续测量：关")
+        self.stop_btn = QPushButton("STOP")
+        self.stop_btn.setToolTip("强制中止在途测量并撤销 busy（源没有边沿时也能恢复）")
         self.clear_btn = QPushButton("CLEAR")
         self.reset_btn = QPushButton("复位统计")
         self.gate_spin = QDoubleSpinBox()
@@ -499,12 +502,13 @@ class DpmGuiApp(QMainWindow):
         self.gate_btn = QPushButton("设置闸门")
         grid.addWidget(self.single_btn, 0, 0)
         grid.addWidget(self.cont_btn, 0, 1)
-        grid.addWidget(self.clear_btn, 1, 0)
-        grid.addWidget(self.reset_btn, 1, 1)
-        grid.addWidget(QLabel("闸门时间:"), 2, 0)
-        grid.addWidget(self.gate_spin, 2, 1)
-        grid.addWidget(self.gate_hint, 3, 0, 1, 2)
-        grid.addWidget(self.gate_btn, 4, 0, 1, 2)
+        grid.addWidget(self.stop_btn, 1, 0)
+        grid.addWidget(self.clear_btn, 1, 1)
+        grid.addWidget(self.reset_btn, 2, 0, 1, 2)
+        grid.addWidget(QLabel("闸门时间:"), 3, 0)
+        grid.addWidget(self.gate_spin, 3, 1)
+        grid.addWidget(self.gate_hint, 4, 0, 1, 2)
+        grid.addWidget(self.gate_btn, 5, 0, 1, 2)
         lay.addWidget(ctl_box)
         lay.addStretch(1)
         return panel
@@ -600,6 +604,7 @@ class DpmGuiApp(QMainWindow):
         self.disconnect_btn.clicked.connect(self.after_disconnect)
         self.single_btn.clicked.connect(self.after_single)
         self.cont_btn.clicked.connect(self.after_continuous_toggle)
+        self.stop_btn.clicked.connect(self.after_stop)
         self.clear_btn.clicked.connect(self.after_clear)
         self.reset_btn.clicked.connect(self.after_reset_counters)
         self.gate_btn.clicked.connect(self.after_set_gate)
@@ -779,6 +784,7 @@ class DpmGuiApp(QMainWindow):
         for widget in (
             self.single_btn,
             self.cont_btn,
+            self.stop_btn,
             self.clear_btn,
             self.reset_btn,
             self.scan_btn,
@@ -962,6 +968,37 @@ class DpmGuiApp(QMainWindow):
             self.sig_log.emit("连续测量已结束")
 
         self.submit(job)
+
+    def after_stop(self) -> None:
+        """STOP：强制中止在途测量。
+
+        不能把 STOP 排进 `self.submit()` 的工作队列：正在等结果的单次/连续测量任务会一直占着
+        工作线程，STOP 会排在它后面永远轮不到。这里单独起一个线程发 STOP；它可能仍要等当前
+        `GET_RESULT` 事务返回（串口是半双工的），但不会被工作队列挡住。
+        """
+        client = self._require_client()
+        if client is None:
+            return
+        # 连续测量的本地开关先关掉：worker 循环下一次检查就会退出（即使它正在等结果）
+        self._continuous = False
+        self.cont_btn.setText("连续测量：关")
+        self.sig_busy.emit(True)
+
+        def job() -> None:
+            try:
+                client.stop()
+            except Exception as exc:
+                self.sig_log.emit(f"STOP 失败：{type(exc).__name__}: {exc}")
+                self.sig_busy.emit(False)
+                return
+            self.sig_log.emit("已发送 STOP：在途测量已中止")
+            try:
+                self.sig_status.emit(client.get_status())
+            except Exception as exc:  # 状态回读失败不影响 STOP 已完成
+                self.sig_log.emit(f"STOP 后读状态失败：{type(exc).__name__}: {exc}")
+            self.sig_busy.emit(False)
+
+        threading.Thread(target=job, name="dpm-stop", daemon=True).start()
 
     def after_clear(self) -> None:
         """CLEAR：复位结果区与标志。"""

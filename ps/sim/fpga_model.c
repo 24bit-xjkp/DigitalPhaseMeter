@@ -69,6 +69,18 @@ static void do_clear(dpm_model_t *m)
     m->result_valid = 0u;
 }
 
+/** CTRL.forceStop 的写当拍效果：中止在途测量、撤销 busy，不产生结果。
+ *
+ * 与 `ControlRegs.scala` 的 forceStop 分支一致：不修改结果区、resultValid、lostCount
+ * 与中断挂起位；源没有边沿（meas_blocked = 1）时同样能中止。
+ */
+static void do_force_stop(dpm_model_t *m)
+{
+    m->busy = 0u;
+    m->meas_blocked = 0u;
+    m->remaining_cycles = 0u;
+}
+
 /** 结果锁存（与 ControlRegs 的 response 分支同序：覆盖旧结果 → lostCount++）。 */
 static void latch_result(dpm_model_t *m)
 {
@@ -288,7 +300,9 @@ static void apply_dpm_write(dpm_model_t *m, uint32_t off, uint32_t data)
         if ((data & DPM_CTRL_CLEAR) != 0u) {
             do_clear(m); /* 写当拍生效：只复位结果区与标志，不动 busy */
         }
-        if ((data & DPM_CTRL_START) != 0u && m->busy == 0u) {
+        if ((data & DPM_CTRL_FORCE_STOP) != 0u) {
+            do_force_stop(m); /* 强制中止在途测量并撤销 busy，不产生结果 */
+        } else if ((data & DPM_CTRL_START) != 0u && m->busy == 0u) {
             start_measurement(m, m->gate_target & 0x0FFFFFFFu);
         }
         break;

@@ -220,6 +220,40 @@ def test_clear_wins_over_same_step_latch() -> None:
     assert (fpga.seq, fpga.lost_count) == (0, 0)
 
 
+def test_force_stop_aborts_without_latching_result() -> None:
+    """CTRL.forceStop：中止在途测量、撤销 busy，不产生结果（源无边沿的卡死状态也有效）。"""
+    fpga, clock = new_fpga(freq_hz=10_000_000, ext_enabled=False)
+    fpga.write(F.REG_SIG_CTRL, 0)  # 选外部输入
+    clock.advance(0.001)
+    fpga.poll()
+    fpga.start()
+    assert fpga.busy
+    assert fpga._meas_deadline is None  # 外部无信号：永不完成
+
+    fpga.write(F.REG_CTRL, F.CTRL_IRQ_ENABLE | F.CTRL_FORCE_STOP)
+    assert not fpga.busy
+    assert not fpga.result_valid
+    assert (fpga.result_gate, fpga.result_edge, fpga.result_phase, fpga.result_seq) == (0, 0, 0, 0)
+    assert (fpga.seq, fpga.lost_count, fpga.irq_pending) == (0, 0, False)
+
+
+def test_force_stop_keeps_previous_result() -> None:
+    """STOP 不清结果区：已有结果、resultValid/seq/lostCount 保持不变。"""
+    fpga, clock = new_fpga(freq_hz=10_000_000)
+    fpga.start()
+    clock.advance(0.01)
+    fpga.poll()
+    assert fpga.result_valid
+    old = (fpga.result_gate, fpga.result_edge, fpga.result_phase, fpga.result_seq, fpga.seq, fpga.lost_count)
+
+    fpga.start()  # 第二次测量，busy 期间强制停止
+    assert fpga.busy
+    fpga.write(F.REG_CTRL, F.CTRL_IRQ_ENABLE | F.CTRL_FORCE_STOP)
+    assert not fpga.busy
+    assert fpga.result_valid
+    assert (fpga.result_gate, fpga.result_edge, fpga.result_phase, fpga.result_seq, fpga.seq, fpga.lost_count) == old
+
+
 def test_gate_target_byte_strobe() -> None:
     fpga, _clock = new_fpga()
     fpga.write(F.REG_GATE_TARGET, 0x0000ABCD)

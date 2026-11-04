@@ -175,7 +175,8 @@ AXI 从口与 `ControlRegs`，只有这个目标能抓到「寄存器堆往下�
   W1C 与只读寄存器写忽略；第二次更短闸门测量；结果只保留最新一条与 `LOST_COUNT`；`CTRL.clear`
   复位结果区与序号；中断使能门控；目标闸门在启动拍锁存；busy 期间重复 start 被忽略；片内源
   （用 `generate_clock` 产生的 640ns/160ns 理想时钟代替 MMCM 输出）与外部输入（400ns/120ns）
-  切换；busy 期间 `CTRL.clear` 当拍生效而在途测量继续跑完；第二次复位回到默认值。
+  切换；busy 期间 `CTRL.clear` 当拍生效而在途测量继续跑完；`CTRL.forceStop` 中止源无边沿、永远
+  完不成的测量（busy 清零、无结果），随后切到片内源重新测量成功；第二次复位回到默认值。
 - 理想信号源直接用 `generate_clock(port.sig, period, offset)`：第三个参数是**起始延时**，两路之间
   的延时差就是相位差；不要为周期信号另写方波 helper。带上误差容限的判据用 `verilator_utils::approx`
   表达（与 `test/Controller.cpp` 的闸门/边沿/相位容限同一套写法）。

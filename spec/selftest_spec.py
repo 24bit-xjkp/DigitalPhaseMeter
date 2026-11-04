@@ -176,6 +176,7 @@ def main() -> int:
         "CLEAR": 0x0C,
         "STREAM": 0x0D,
         "RESET_COUNTERS": 0x0E,
+        "STOP": 0x0F,
     }
     for name, code in cmds.items():
         check(re.search(rf"#define DPM_CMD_{name} 0x{code:02X}u", proto) is not None, f"dpm_proto.h 定义 DPM_CMD_{name} = 0x{code:02X}")

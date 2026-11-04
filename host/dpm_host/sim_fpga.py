@@ -7,7 +7,7 @@
 
    | 偏移  | 名称          | 语义                                                       |
    | ----- | ------------- | ---------------------------------------------------------- |
-   | 0x00  | CTRL          | b0 start（写 1 触发，**busy 期间被忽略**）、b1 irqEnable、b2 clear（写当拍立即生效，复位结果区与标志、不清 busy） |
+   | 0x00  | CTRL          | b0 start（写 1 触发，**busy 期间被忽略**）、b1 irqEnable、b2 clear（写当拍立即生效，复位结果区与标志、不清 busy）、b3 forceStop（写当拍中止在途测量、撤销 busy，不产生结果） |
    | 0x04  | STATUS        | b0 busy、b1 resultValid、b2 lost、b3 irqPending             |
    | 0x08  | GATE_TARGET   | 低 28 位有效，按字节选通合并                                |
    | 0x0C..0x18 | RESULT_GATE/EDGE/PHASE/SEQ | 最新一条结果                     |
@@ -84,6 +84,7 @@ REG_SIG_STATUS = 0x30
 CTRL_START = 1 << 0
 CTRL_IRQ_ENABLE = 1 << 1
 CTRL_CLEAR = 1 << 2
+CTRL_FORCE_STOP = 1 << 3
 
 IRQ_PENDING = 1 << 0
 IRQ_RESULT_READ = 1 << 1
@@ -314,6 +315,16 @@ class SimFpga:
             self.lost_count = (self.lost_count + 1) & U32_MASK
         self.result_valid = True
 
+    def force_stop(self) -> None:
+        """`CTRL.forceStop`：中止在途测量、撤销 busy；不产生结果、不改结果区与标志。
+
+        对齐 RTL：源没有边沿（`_meas_deadline is None`、busy 一直为 1）时同样能中止。
+        """
+        self.busy = False
+        self._meas_deadline = None
+        self._meas_started_at = None
+        self._meas_counts = None
+
     def _apply_clear(self) -> None:
         """`CTRL.clear` 写当拍生效：只复位结果区与全部标志、seq 归零（不清 busy）。
 
@@ -383,11 +394,14 @@ class SimFpga:
         if off == REG_CTRL:
             if strb & 0x1:
                 self.irq_enable = bool(data & CTRL_IRQ_ENABLE)
-                if data & CTRL_START:
-                    self.start()
                 if data & CTRL_CLEAR:
                     # 写当拍立即生效（不清 busy，在途测量继续跑完）
                     self._apply_clear()
+                if data & CTRL_FORCE_STOP:
+                    # forceStop 优先于同一拍 start（对齐 RTL 的 Controller 优先级）
+                    self.force_stop()
+                elif data & CTRL_START:
+                    self.start()
             return
         if off == REG_GATE_TARGET:
             merged = 0
@@ -673,6 +687,7 @@ __all__ = [
     "CTRL_START",
     "CTRL_IRQ_ENABLE",
     "CTRL_CLEAR",
+    "CTRL_FORCE_STOP",
     "IRQ_PENDING",
     "IRQ_RESULT_READ",
     "IRQ_LOST_CLEAR",

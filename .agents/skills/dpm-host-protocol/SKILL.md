@@ -43,7 +43,7 @@ Python（`host/dpm_host/mathx.py`、`sig.py`、`protocol.py`）、金标准（`s
    `>180°` 的请求是合法的（相位计测无符号间隔），不要按老规则拒掉。两侧判据：
    C `dpm_mmcm_phase_code_fits` / Python `sig.phase_code_fits`；仿真后端必须用同一条
    （否则会出现「仿真接受、真机拒绝」的假象）；`DpmClient.scan` 遇到被拒的点会跳过并记日志。
-4. **通知码**用 `0xE1/0xE2`：`0x81..0x8E` 是响应区间（值 = 请求码 `| 0x80`），`0xE0..0xEF`
+4. **通知码**用 `0xE1/0xE2`：`0x81..0x8F` 是响应区间（值 = 请求码 `| 0x80`），`0xE0..0xEF`
    保留给 PS 主动上报，两者不重叠。新增响应码时先检查是否与通知码撞码。
 5. **GUI 线程模型**：所有串口操作都在后台线程里串行执行，结果用 **Qt 信号**（PySide6）回主线程刷新；
    不要在工作线程里碰控件，也不要在主线程里做阻塞请求。
@@ -60,6 +60,17 @@ Python（`host/dpm_host/mathx.py`、`sig.py`、`protocol.py`）、金标准（`s
    回归入口：`host/tests/test_gate_timeout.py` 与 `test_client_over_pty.py` 的长闸门用例
    （pty 对端 + `sim_server --gate 120000000`）。GUI 的闸门上限就是 28 位计数器对应的 5.37s，
    不再压到 2s。
+8. **强制停止是 `STOP`（0x0F），不是 `CLEAR`**：PS 写 PL 的 `CTRL.forceStop`（b3），中止在途测量
+   并撤销 `busy`，不产生结果、不清结果区；`CLEAR` 不清 `busy`、也不中止测量。连续模式下 PS 会把
+   模式退回 `single`，否则 `dpm_cmd_tick` 会立刻重启。上位机侧：`DpmClient.stop()`、CLI
+   `dpm_host stop`、GUI STOP 按钮；GUI 的 STOP **不能**排进工作线程队列（会被正在等结果的单次/
+   连续任务挡住），要单独起线程发送。串口是半双工的，正在飞行中的 `GET_RESULT` 事务返回后
+   `STOP` 才能送达，不要把 STOP 写成「立即中断一切」的硬实时承诺。`DpmClient.stop()` 成功后
+   置位本地停止标记，另一个线程里的 `wait_result`/`wait_meas` 下一次循环抛 `DpmTimeoutError`
+   （detail 说明被 STOP 中止）退出，不必等完整个闸门预算。回归入口：
+   `host/tests/test_client_over_pty.py` 的 `test_stop_aborts_a_stuck_measurement` /
+   `test_stop_aborts_a_local_wait`（sim_server `--source ext --ext-disable` 造出永不完成的
+   busy）与 `ps/tests/test_server_selftest.py` 的外部无信号/连续模式用例。
 
 ## 无硬件验证（pty 仿真后端）
 

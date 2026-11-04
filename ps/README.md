@@ -67,10 +67,10 @@ ps/build/host_main --stdio                    # 协议字节走 stdin/stdout
 
 | 方面 | 建模 | 简化/假设 |
 | --- | --- | --- |
-| 寄存器语义 | 逐个对齐 `ControlRegs.scala`：start 脉冲（busy 期间忽略）、busy/resultValid/lost/irqPending、结果被覆盖即 `lostCount++`、IRQ_STATUS W1C、`CTRL.clear` 写当拍生效（只复位结果区与标志、不清 busy，在途测量继续跑完并照常锁存结果） | 输入选择/使能的配置快照经固定几个慢周期送达（模型参数，真实实现同域同拍） |
+| 寄存器语义 | 逐个对齐 `ControlRegs.scala`：start 脉冲（busy 期间忽略）、busy/resultValid/lost/irqPending、结果被覆盖即 `lostCount++`、IRQ_STATUS W1C、`CTRL.clear` 写当拍生效（只复位结果区与标志、不清 busy，在途测量继续跑完并照常锁存结果）、`CTRL.forceStop` 写当拍中止在途测量并撤销 busy（不产生结果） | 输入选择/使能的配置快照经固定几个慢周期送达（模型参数，真实实现同域同拍） |
 | 测量模型 | `gate = target + ceil(T_sig/T_slow)`；`edge = floor(gate·f_sig/f_slow)`；相位先量化到整数个 DSP 周期（450MHz 下 1 个周期 = 2.222ns，整数 RNE）再乘沿数 → `phase_cnt = cycles·edge` | 与 `spec/gen_golden.py` 同口径，逐位一致 |
 | 时间推进 | **每次 AXI 事务**推进 64 个慢周期；主循环每轮再用 `--speed`（默认 4096）额外推进，让虚拟时间与墙钟解耦 | 真实硬件是自由运行的时钟；长闸门只花很短墙钟 |
-| 源不可用 | 片内源未使能/未锁定，或外部引脚无信号（默认）→ 两路恒低：`busy` 恒为 1、不产生结果、`RESULT_SEQ` 不自增 | 与真实 PL 的「等参考沿」一致 |
+| 源不可用 | 片内源未使能/未锁定，或外部引脚无信号（默认）→ 两路恒低：`busy` 恒为 1、不产生结果、`RESULT_SEQ` 不自增 | 与真实 PL 的「等参考沿」一致；`STOP` 可随时中止并撤销 busy |
 | 片内源相位 | 由写入的 MMCM 寄存器镜像（`ClkReg1`/`ClkReg2` 的 `DELAY_TIME` + `PHASE_MUX`）反推实现相位，网格 `45°/D` | 不建模 MMCM 抖动、重配置期间的输出停止细节 |
 | DRP 映射 | MMCM 原始 16 位寄存器镜像：`0x08..0x24` + `0x28` LOAD，ID/STATUS 在 `0x00`/`0x04`（`0x43C1_0000` 段） | 不建模真实 DRP 时序 |
 
@@ -82,7 +82,7 @@ ps/build/host_main --stdio                    # 协议字节走 stdin/stdout
 test_calc         329 项检查，0 失败   # 金标准定点输出逐位一致、除零/溢出边界
 test_proto        128 项检查，0 失败   # CRC 标准向量、组帧↔收帧、负向帧、等待上限量纲
 test_sig          584 项检查，0 失败   # 冻结频点求解、VCO/MULT/D 约束、方案 A 编码位域
-test_server_selftest  631/631 项通过  # pty 上逐条覆盖命令码、错误路径、流上报、长闸门
+test_server_selftest  637/637 项通过  # pty 上逐条覆盖命令码、错误路径、流上报、长闸门、STOP
 ```
 
 其他入口：
@@ -143,6 +143,9 @@ uart_ref_hz=86400000 cpu_variant=3 proto=1.1`。`uart_ref_hz` 是 SLCR 送给 UA
 - **等待预算**：闸门目标最大 28 位（50MHz 下 ≈5.37s）。固件在 `GET_RESULT`/`GET_MEAS` 内部做
   有界等待，上限 `DPM_WAIT_TIMEOUT_MS = 50ms + 4 × 闸门时间（秒）`（**毫秒界**，不是慢周期）；
   无时间源时用 `DPM_WAIT_POLL_LIMIT`（**慢时钟周期**界）。两者不要混用。
+- **STOP 用独立短超时**：`handle_stop` 只等 PL 撤销 busy 的几拍，使用
+  `DPM_STOP_TIMEOUT_MS`/`DPM_STOP_POLL_LIMIT`，不要复用闸门等待的宏（否则源无边沿时会白等
+  一个闸门窗口）。连续模式下 STOP 会把软件侧 `mode` 退回 `single`。
 - **验证台虚拟时间**：`host_main` 的模型时间由 AXI 事务与 `--speed` 推进，与墙钟解耦，长闸门
   只花很短墙钟；跨协议/固件的超时行为由 `host/tests/test_gate_timeout.py` 与
   `host/tests/test_client_over_pty.py` 覆盖。

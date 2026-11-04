@@ -214,6 +214,9 @@ class DpmClient:
         self._parser = FrameParser()
         self._reader: threading.Thread | None = None
         self._closing = threading.Event()
+        #: 收到 STOP 后置位：正在轮询结果的 `wait_result`/`wait_meas` 下一次循环直接退出，
+        #: 不必等到自己的闸门预算耗尽。下一次 `start()` 会清掉它。
+        self._stop_requested = threading.Event()
         self._reader_error: BaseException | None = None
         #: `IDENTIFY` 结果缓存（`slow_hz` / `dsp_hz` 可被它覆盖）。
         self.identify_info: Identify | None = None
@@ -306,7 +309,7 @@ class DpmClient:
         """分发一帧：通知帧走回调，其余交给等待中的事务。
 
         通知码是 `0xE1/0xE2`（协议 v1.1；`cmd & 0xF0 == 0xE0` 即通知），与响应码
-        `0x81..0x8E` 没有交集，因此**按码判定**即可，不再需要任何长度兜底。
+        `0x81..0x8F` 没有交集，因此**按码判定**即可，不再需要任何长度兜底。
         """
         if frame.cmd == Cmd.STREAM_DATA:
             try:
@@ -531,6 +534,7 @@ class DpmClient:
         `ERR_BUSY`；两种语义对调用方等价（「已经在测量中」），因此默认把 `ERR_BUSY`
         当正常情况（`accept_busy=True`）。
         """
+        self._stop_requested.clear()
         frame = self.request(Cmd.START, accept_busy=accept_busy, **kw)  # type: ignore[arg-type]
         if frame.is_error:
             self._log("START 被忽略：当前已在测量中（ERR_BUSY）")
@@ -591,6 +595,23 @@ class DpmClient:
         （序号从 0 开始）；真实固件会先等 idle 再写，忙时回 `ERR_BUSY`。
         """
         self.request(Cmd.CLEAR, **kw)  # type: ignore[arg-type]
+
+    def stop(self, **kw: object) -> None:
+        """`STOP`：强制中止在途测量并撤销 `busy`。
+
+        不需要被测信号有边沿，也不产生新结果；已有结果区与标志保持不变。真实固件在
+        `continuous` 模式下会把模式退回 `single`，避免周期轮转立刻重启测量。空闲时调用也成功。
+
+        成功后置位内部停止标记：另一个线程里正在轮询结果的 `wait_result`/`wait_meas` 会在下一次
+        循环退出（抛 :class:`DpmTimeoutError`，detail 说明是被 STOP 中止），不必等完整个闸门预算。
+        """
+        self.request(Cmd.STOP, **kw)  # type: ignore[arg-type]
+        self._stop_requested.set()
+
+    def _raise_if_stopped(self) -> None:
+        """等待循环的退出检查：`STOP` 后不再空等自己的超时预算。"""
+        if self._stop_requested.is_set():
+            raise DpmTimeoutError(None, None, "测量已被 STOP 中止")
 
     def stream(self, enable: bool | int, interval_ms: int = P.DEFAULT_STREAM_INTERVAL_MS, **kw: object) -> tuple[int, int]:
         """`STREAM`：开关流模式，返回生效的 (enable, intervalMs)。"""
@@ -656,7 +677,7 @@ class DpmClient:
                     "结果槽里还留着上一次未读的结果（resultValid=1），本次测量还没产出新结果——"
                     "对端按「不把旧结果当新结果」处理，所以这里继续等的是本次的结果"
                 )
-        parts.append("挂起的这次测量会一直等边沿：接好信号或切回片内信号源后它才会结束")
+        parts.append("挂起的这次测量会一直等边沿：接好信号、切回片内信号源，或发送 STOP 强制结束后它才会结束")
         return "；".join(parts)
 
     def _status_or_none(self) -> Status | None:
@@ -703,6 +724,7 @@ class DpmClient:
         budget = self.effective_timeout(timeout)
         deadline = time.monotonic() + budget
         while True:
+            self._raise_if_stopped()
             try:
                 result = self._poll_result()
             except DpmTimeoutError as exc:
@@ -732,6 +754,7 @@ class DpmClient:
         deadline = time.monotonic() + budget
         status_miss_logged = False
         while True:
+            self._raise_if_stopped()
             st = self.get_status()  # 顺带刷新闸门目标
             if st.result_valid:
                 try:

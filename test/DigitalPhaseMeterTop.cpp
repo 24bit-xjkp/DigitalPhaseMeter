@@ -14,6 +14,8 @@
 //   - 测量期间改写 GATE_TARGET 不影响本次测量（targetGate 由 Controller 在启动的那一拍锁存）；
 //   - CTRL.clear 写当拍生效：busy 期间写清只复位结果区与标志（不清 busy），在途测量继续跑完并
 //     照常锁存结果，记录序号从 0 重新开始；
+//   - CTRL.forceStop 强制中止在途测量：不需要被测信号有边沿，写后 busy 撤销、不产生结果，
+//     并且可以立即重新启动下一次测量（覆盖「源没有边沿、busy 永远不撤销」的恢复路径）；
 //   - 读 4 个结果寄存器并用理论模型校验 gateCnt / edgeCnt / phaseCnt
 //     （模型见 .agents/skills/dpm-measurement-model）；
 //   - 结果只保留最新一条：不读走就再次测量会覆盖旧结果并累加 LOST_COUNT；
@@ -77,6 +79,7 @@ namespace
     constexpr std::uint32_t ctrl_start{0};
     constexpr std::uint32_t ctrl_irq_enable{1};
     constexpr std::uint32_t ctrl_clear{2};
+    constexpr std::uint32_t ctrl_force_stop{3};
     // STATUS 位
     constexpr std::uint32_t status_busy{0};
     constexpr std::uint32_t status_result{1};
@@ -1012,6 +1015,79 @@ TEST_SUITE("DigitalPhaseMeterTop")
             CHECK_EQ(value, 0u);
             const auto record{co_await read_record(port)};
             check_record(record, expect(gate_slow, 0u));
+            co_await acknowledge_result(port);
+
+            co_await port.stimulate(2zu);
+            co_await eval_finish();
+        }());
+
+        ctx.loop_until_finish(20_ms);
+        MESSAGE(ctx.stats());
+    }
+
+    TEST_CASE("CTRL.forceStop aborts a stuck measurement, clears busy and allows a new one")
+    {
+        dut_context_t ctx{ctx_opt};
+        ctx.set_base_name("DigitalPhaseMeterTop.force_stop");
+        port_t port{ctx.dut()};
+        ctx.add_task(generate_clock(port.clock, clock_period));
+        ctx.add_task(generate_clock(port.dsp_clock, dsp_period));
+        // 外部输入保持 0（不生成时钟）：用它复现「选中的源没有边沿、测量永不完成」的状态。
+        // 片内源有时钟，供强制停止后的恢复测量使用。
+        ctx.add_task(generate_clock(port.int_sig1, internal_period));
+        ctx.add_task(generate_clock(port.int_sig2, internal_period, internal_offset));
+
+        ctx.add_task([&] -> task<void> {
+            co_await init_dut(port);
+            port.src_locked = 1;
+            co_await port.stimulate(8zu);
+
+            // 空闲时写 forceStop 不应产生任何结果或标志（只有写 1 的那一拍有动作）
+            co_await axi_write(port, reg_ctrl, bit_mask(ctrl_force_stop));
+            co_await port.stimulate(2zu);
+            std::uint32_t value{co_await axi_read(port, reg_status)};
+            check_status(value, false, false, false, false);
+            CHECK_EQ(port.interrupt, 0u);
+            value = co_await axi_read(port, reg_ctrl);
+            CHECK_EQ(value, 0u);  // forceStop 是自清位，读回为 0
+
+            // 选中外部输入（默认），启动一次永远等不到参考沿的测量：busy 一直为 1
+            co_await start_measurement(port, gate_slow, true);
+            co_await port.stimulate(4zu);
+            value = co_await axi_read(port, reg_status);
+            check_status(value, true, false, false, false);
+            CHECK_EQ(port.interrupt, 0u);
+
+            // 等 200 个低速周期确认它确实卡在等待边沿，而不是自己完成了
+            co_await port.stimulate(200zu);
+            value = co_await axi_read(port, reg_status);
+            check_status(value, true, false, false, false);
+
+            // CTRL.forceStop：撤销 busy，不产生结果、不置中断挂起位，也不改动结果区
+            co_await axi_write(port, reg_ctrl, bit_mask(ctrl_irq_enable) | bit_mask(ctrl_force_stop));
+            co_await port.stimulate(2zu);
+            value = co_await axi_read(port, reg_status);
+            check_status(value, false, false, false, false);
+            CHECK_EQ(port.interrupt, 0u);
+            value = co_await axi_read(port, reg_irq_status);
+            check_irq_status(value, false, false, false);
+            value = co_await axi_read(port, reg_result_gate);
+            CHECK_EQ(value, 0u);
+            value = co_await axi_read(port, reg_result_edge);
+            CHECK_EQ(value, 0u);
+            value = co_await axi_read(port, reg_result_phase);
+            CHECK_EQ(value, 0u);
+            value = co_await axi_read(port, reg_result_seq);
+            CHECK_EQ(value, 0u);
+            value = co_await axi_read(port, reg_lost_count);
+            CHECK_EQ(value, 0u);
+
+            // 强制停止后必须能重新启动：切到有边沿的片内源，完成一次正常测量
+            co_await axi_write(port, reg_sig_ctrl, bit_mask(sig_enable) | bit_mask(sig_select));
+            co_await port.stimulate(8zu);
+            CHECK_MESSAGE(co_await run_measurement(port, gate_fast), "强制停止后重新测量的中断超时");
+            const auto record{co_await read_record(port)};
+            check_record(record, expect(gate_fast, 0u, internal_period, internal_offset));
             co_await acknowledge_result(port);
 
             co_await port.stimulate(2zu);

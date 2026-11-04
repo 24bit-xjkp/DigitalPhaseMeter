@@ -10,6 +10,7 @@
  *      start 脉冲（busy 期间忽略）、busy/resultValid/lost/irqPending、
  *      结果被覆盖即 lostCount++、IRQ_STATUS 的 W1C、
  *      CTRL.clear 写当拍生效（只复位结果区与标志，不清 busy；在途测量继续跑完并照常锁存结果）、
+ *      CTRL.forceStop 写当拍生效（中止在途测量、撤销 busy，不产生结果；源无边沿时同样有效）、
  *      SIG_CTRL 写入后配置快照经若干慢周期才送达测量域（期间 DPM 的写通道挂起）。
  *   2. 测量模型（与 `spec/gen_golden.py` 逐位一致，全程整数 RNE）：
  *        gate_cnt  = target_gate + ceil(T_sig / T_slow)

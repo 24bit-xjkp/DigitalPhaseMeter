@@ -33,7 +33,7 @@
 
 /* ------------------------------------------------------------ 寄存器偏移量 */
 
-#define DPM_REG_CTRL 0x00u        /**< 混合：b0 start（只写）、b1 irqEnable、b2 clear（只写） */
+#define DPM_REG_CTRL 0x00u        /**< 混合：b0 start（只写）、b1 irqEnable、b2 clear（只写）、b3 forceStop（只写） */
 #define DPM_REG_STATUS 0x04u      /**< 只读 */
 #define DPM_REG_GATE_TARGET 0x08u /**< 读写：目标闸门计数（28 位有效），字节选通写入 */
 #define DPM_REG_RESULT_GATE 0x0Cu /**< 只读：最新结果的 gateCnt */
@@ -49,10 +49,11 @@
 
 /* --------------------------------------------------------------- 位域定义 */
 
-/** CTRL（0x00）：b0/b2 是写 1 触发位，读回时恒为 0；b1 是普通读写位。 */
+/** CTRL（0x00）：b0/b2/b3 是写 1 触发位，读回时恒为 0；b1 是普通读写位。 */
 #define DPM_CTRL_START (1u << 0)     /**< 写 1 启动一次测量（busy 期间被忽略） */
 #define DPM_CTRL_IRQ_ENABLE (1u << 1)/**< 中断使能（每次写 CTRL 都按此位整体更新） */
 #define DPM_CTRL_CLEAR (1u << 2)     /**< 写 1 当拍复位结果寄存器与全部标志（不清 busy） */
+#define DPM_CTRL_FORCE_STOP (1u << 3)/**< 写 1 强制中止在途测量并撤销 busy（不产生结果、不动结果区） */
 
 /** STATUS（0x04）。 */
 #define DPM_STATUS_BUSY (1u << 0)        /**< 测量进行中 */

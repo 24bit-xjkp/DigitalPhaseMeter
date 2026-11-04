@@ -92,6 +92,7 @@ class DigitalPhaseMeterTop(
     // 寄存器堆 ↔ 控制器（测量请求/结果）
     controller.io.in := controlRegs.io.request
     controlRegs.io.response := controller.io.out
+    controller.io.forceStop := controlRegs.io.forceStop
 
     interrupt := controlRegs.io.interrupt
 }

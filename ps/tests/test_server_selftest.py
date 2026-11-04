@@ -3,7 +3,7 @@
 
 覆盖内容（对应 `docs/ps-protocol.md`）：
   - 帧层的正向/负向：CRC 错、LEN 越界、噪声字节、未知命令、响应方向帧；
-  - 全部命令码 0x01..0x0E + 通知帧 0x81/0x82；
+  - 全部命令码 0x01..0x0F + 通知帧 0xE1/0xE2；
   - 错误路径：非法 mode/source/freq/相位/PAYLOAD 长度 → 0xFE；未锁定选片内源、忙时命令 → 0xFF；
   - 10 个冻结频点 × 逐频点相位点（含 >180° 的用例）与 `spec/golden/vectors.json` 逐位对齐
     （gate/edge/phase 与定点输出）；
@@ -45,6 +45,7 @@ CMD_GET_SIG = 0x0B
 CMD_CLEAR = 0x0C
 CMD_STREAM = 0x0D
 CMD_RESET_COUNTERS = 0x0E
+CMD_STOP = 0x0F
 NTF_STREAM_DATA = 0xE1
 NTF_EVENT = 0xE2
 
@@ -616,8 +617,16 @@ def test_continuous(sv: Server, golden: dict) -> None:
             (s[1], s[2], s[3], s[4], s[5]) == (v["gate_cnt"], v["edge_cnt"], v["phase_cnt"], v["freq_milli_hz"], v["phase_milli_deg"]),
             f"{s} vs {(v['gate_cnt'], v['edge_cnt'], v['phase_cnt'])}",
         )
-    sv.expect_ok(CMD_SET_MODE, bytes([0]))
     sv.expect_ok(CMD_STREAM, bytes([0]) + u16(100))
+
+    # STOP 在连续模式下必须真的停下来：固件把模式退回 single，不会立刻重启下一次测量。
+    sv.expect_ok(CMD_STOP)
+    time.sleep(0.2)
+    pl = sv.expect_ok(CMD_GET_STATUS)
+    check("连续模式下 STOP 撤销 busy", (rd_u32(pl, 0) & DPM_STATUS_BUSY) == 0, hex(rd_u32(pl, 0)))
+    time.sleep(0.2)
+    pl = sv.expect_ok(CMD_GET_STATUS)
+    check("STOP 后不会自动重启测量", (rd_u32(pl, 0) & DPM_STATUS_BUSY) == 0, hex(rd_u32(pl, 0)))
 
 
 def test_external_source(host_main: str, golden: dict) -> None:
@@ -653,6 +662,17 @@ def test_external_source(host_main: str, golden: dict) -> None:
             len(pl) == 17 and pl[0] == 0 and rd_u32(pl, 1) == 0 and rd_u32(pl, 9) == 0,
             pl.hex(),
         )
+
+        # STOP 是恢复「源没有边沿、busy 永不撤销」的首选路径：不需要信号边沿，立即撤销 busy，
+        # 不产生结果；空闲时再发一次也成功。
+        sv.expect_ok(CMD_STOP)
+        pl = sv.expect_ok(CMD_GET_STATUS)
+        status = rd_u32(pl, 0)
+        check("外部无信号：STOP 撤销 STATUS.busy", (status & DPM_STATUS_BUSY) == 0, hex(status))
+        check("外部无信号：STOP 不产生结果", (status & DPM_STATUS_RESULT_VALID) == 0, hex(status))
+        check("外部无信号：STOP 后 RESULT_SEQ 仍为 0", rd_u32(pl, 16) == 0, str(rd_u32(pl, 16)))
+        sv.expect_ok(CMD_STOP)
+        check("空闲时 STOP 幂等成功", True)
     finally:
         rc = sv.close()
         check("无信号实例按 SIGTERM 干净退出（码 0）", rc == 0, f"rc={rc}")

@@ -8,7 +8,8 @@
  *   - 每次写 CTRL 都要带上当前 irqEnable（b1 是普通读写位）；
  *   - 结果读走后必须写 IRQ_STATUS = PENDING | RESULT_READ，否则下一次结果被记为丢失；
  *   - 片内源配置（SIG_CTRL）写入后，写通道可能被拉低 ready，配置要轮询 SIG_STATUS 确认；
- *   - START 在 busy 期间被忽略，软件侧对应 ERR_BUSY。
+ *   - START 在 busy 期间被忽略，软件侧对应 ERR_BUSY；
+ *   - STOP 写 CTRL.forceStop：中止在途测量、撤销 busy，不产生结果；连续模式下同时退回 single。
  */
 
 #include "dpm_cmd.h"
@@ -20,6 +21,13 @@
 #define DPM_DEFAULT_MODE DPM_MODE_SINGLE
 #define DPM_DEFAULT_SOURCE DPM_SRC_INTERNAL
 #define DPM_DEFAULT_STREAM_INTERVAL_MS 100u
+
+/** STOP 等待 PL 撤销 busy 的时限：forceStop 是 PL 内部的一拍操作，不需要等闸门窗口。
+ *
+ * 与测量等待的 `DPM_WAIT_TIMEOUT_MS` 故意分开：STOP 必须在源没有边沿时也能快速返回。
+ */
+#define DPM_STOP_TIMEOUT_MS 100u
+#define DPM_STOP_POLL_LIMIT 10000u
 
 /* ------------------------------------------------------------- 小工具 */
 
@@ -693,6 +701,30 @@ static uint32_t handle_get_sig(dpm_cmd_ctx_t* c, uint8_t* out, uint32_t cap)
     return cmd_reply(c, DPM_CMD_GET_SIG, pl, n, out, cap);
 }
 
+static uint32_t handle_stop(dpm_cmd_ctx_t* c, uint8_t* out, uint32_t cap)
+{
+    uint32_t ctrl;
+
+    /* 强制中止在途测量：PL 在写 CTRL.forceStop 后一拍撤销 busy，不产生结果。
+     * 不等待闸门/信号边沿，因此源没有边沿时也能立即恢复。 */
+    ctrl = DPM_CTRL_FORCE_STOP;
+    if(c->irq_enable != 0u) { ctrl |= DPM_CTRL_IRQ_ENABLE; }
+    dpm_reg_wr(c->io, c->io_ctx, DPM_REG_CTRL, ctrl);
+    if(wait_idle(c, DPM_STOP_TIMEOUT_MS, DPM_STOP_POLL_LIMIT) != 0)
+    {
+        return cmd_reply_err(c, DPM_RESP_ERR_BUSY, out, cap);
+    }
+
+    /* 清掉软件侧的在途标记；已有结果与统计保持不变（清结果区用 CLEAR）。
+     * 连续模式下退回 single：否则 dpm_cmd_tick() 下一轮会立刻重启测量，STOP 等于没停。 */
+    c->started = 0u;
+    c->awaiting = 0u;
+    c->valid_before = 0u;
+    c->seq_before = 0u;
+    if(c->mode == DPM_MODE_CONTINUOUS) { c->mode = DPM_MODE_SINGLE; }
+    return cmd_reply(c, DPM_CMD_STOP, 0, 0u, out, cap);
+}
+
 static uint32_t handle_clear(dpm_cmd_ctx_t* c, uint8_t* out, uint32_t cap)
 {
     /* PL 的 CTRL.clear 写当拍生效，但不清 busy：在途测量完成后仍会锁存结果。这里先等空闲再写，
@@ -787,6 +819,9 @@ uint32_t
         case DPM_CMD_CLEAR:
             if(payload_len != 0u) { return cmd_reply_err(c, DPM_RESP_ERR_PARAM, out, out_cap); }
             return handle_clear(c, out, out_cap);
+        case DPM_CMD_STOP:
+            if(payload_len != 0u) { return cmd_reply_err(c, DPM_RESP_ERR_PARAM, out, out_cap); }
+            return handle_stop(c, out, out_cap);
         case DPM_CMD_STREAM: return handle_stream(c, payload, payload_len, out, out_cap);
         case DPM_CMD_RESET_COUNTERS:
             if(payload_len != 0u) { return cmd_reply_err(c, DPM_RESP_ERR_PARAM, out, out_cap); }

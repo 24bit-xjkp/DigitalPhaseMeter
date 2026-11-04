@@ -37,6 +37,7 @@ from . import sig as S
 from .sim_fpga import (
     CAPS_VALUE,
     CTRL_CLEAR,
+    CTRL_FORCE_STOP,
     CTRL_IRQ_ENABLE,
     CTRL_START,
     GATE_TARGET_MAX,
@@ -161,6 +162,17 @@ class SimPs:
                 # RTL 的 CTRL.clear 写当拍生效且不清 busy：忙时也能立即清掉结果区/标志，在途
                 # 测量继续跑完并照常锁存结果。与固件的可观察差异只有「忙时不回 ERR_BUSY」。
                 self.fpga.write(0x00, CTRL_IRQ_ENABLE | CTRL_CLEAR)
+                return self._ok(cmd)
+            if cmd == P.Cmd.STOP:
+                # 强制中止在途测量：对齐固件 handle_stop（写 CTRL.forceStop、等待 busy 撤销）。
+                self.fpga.write(0x00, CTRL_IRQ_ENABLE | CTRL_FORCE_STOP)
+                self.fpga.poll()
+                if self.fpga.busy:
+                    return self._err(P.Cmd.ERR_BUSY)
+                # 连续模式下退回 single，避免周期轮转立刻重启测量
+                self.mode = P.MODE_SINGLE
+                self._pending_since = None
+                self._unread_event_sent = False
                 return self._ok(cmd)
             if cmd == P.Cmd.STREAM:
                 return self._set_stream(frame.payload)
@@ -389,7 +401,7 @@ class SimServer:
             response = self.ps.handle(ev)
             if response is not None:
                 out.append(response)
-                # 报原始码 + 长度（响应 0x81..0x8E / 通知 0xE1..0xE2）
+                # 报原始码 + 长度（响应 0x81..0x8F / 通知 0xE1..0xE2）
                 cmd_byte = response[2]
                 self._log(f"→ 响应 0x{cmd_byte:02X}（{len(response)} 字节）{response.hex(' ')}")
         out.extend(self.ps.notifications())

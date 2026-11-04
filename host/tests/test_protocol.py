@@ -52,6 +52,7 @@ _ROUND_TRIP_CASES = [
     (P.Cmd.SET_SOURCE, P.encode_set_source(1)),
     (P.Cmd.SET_SIG, P.encode_set_sig(25_000_000, 90_000)),
     (P.Cmd.STREAM, P.encode_stream(1, 100)),
+    (P.Cmd.STOP, b""),
 ]
 
 
@@ -108,16 +109,20 @@ def test_cmd_direction_bit() -> None:
     assert P.Cmd.PING.response == 0x81
     assert P.Cmd.IDENTIFY.response == 0x82
     assert P.Cmd.GET_MEAS.response == 0x86
-    assert P.Cmd.GET_MEAS.response == 0x86
+    assert P.Cmd.STOP.response == 0x8F
     assert P.Cmd.ERR_PARAM.is_error
     assert P.Cmd.ERR_BUSY.is_error
     assert P.Cmd.STREAM_DATA.is_notification
     assert P.Cmd.EVENT.is_notification
     assert not P.Cmd.GET_MEAS.is_notification
+    # STOP 是空请求/空响应：字长校验与响应解码都按空 PAYLOAD 处理
+    assert P.CMD_SPECS[P.Cmd.STOP] == ("STOP", 0, 0)
+    P.check_request_payload(P.Cmd.STOP, b"")
+    assert P.decode_response(P.Frame(P.Cmd.STOP.response, b"")) is None
 
 
 def test_notification_codes_are_separate_namespace() -> None:
-    """协议 v1.1：通知码 0xE1/0xE2，与响应码 0x81..0x8E 不再撞码。"""
+    """协议 v1.1：通知码 0xE1/0xE2，与响应码 0x81..0x8F 不再撞码。"""
     assert int(P.Cmd.STREAM_DATA) == 0xE1
     assert int(P.Cmd.EVENT) == 0xE2
     assert P.Cmd.PING.response != int(P.Cmd.STREAM_DATA)
@@ -134,7 +139,7 @@ def test_is_notification_code_true(code: int) -> None:
     assert P.is_notification_code(code)
 
 
-@pytest.mark.parametrize("code", [0x01, 0x0E, 0x81, 0x82, 0x8E, 0xFE, 0xFF], ids=lambda c: hex(c))
+@pytest.mark.parametrize("code", [0x01, 0x0F, 0x81, 0x82, 0x8F, 0xFE, 0xFF], ids=lambda c: hex(c))
 def test_is_notification_code_false(code: int) -> None:
     """非 0xEx 段一律不是通知（响应码、错误码都不算）。"""
     assert not P.is_notification_code(code)

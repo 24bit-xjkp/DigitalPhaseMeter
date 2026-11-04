@@ -42,7 +42,7 @@ uv run python -m dpm_host --port /dev/ttyUSB0 ping
 在仓库根或 `host/` 下执行都收集同一批用例；`slow` / `pty` 标记默认也执行：
 
 ```bash
-uv run pytest -q                # 全量（当前 726 项通过）
+uv run pytest -q                # 全量（当前 735 项通过）
 uv run pytest -q -m slow        # 只跑 slow 标记（长耗时，默认也会执行）
 ```
 
@@ -95,6 +95,7 @@ uv run python -m dpm_host --port /tmp/dpm_pty gui
 | `identify` | `IDENTIFY`（版本、caps、两侧时钟、flags） |
 | `status` | `GET_STATUS`（状态位 + `SIG_STATUS` 解读） |
 | `start [--no-wait]` | `START`（默认等结果并打印） |
+| `stop` | `STOP`（强制中止在途测量；连续模式退回 single） |
 | `meas [--expect-deg X] [--no-start]` | `GET_MEAS`（无结果时自动测一次；`phaseCnt/edgeCnt` 主判据 + 期望值判据） |
 | `monitor [-n N] [-d SEC] [--stream] [--csv PATH]` | 连续测量（轮询或流模式通知） |
 | `mode single\|continuous` | `SET_MODE` |
@@ -134,7 +135,7 @@ uv run python -m dpm_host --port /tmp/dpm_pty gui
 - **连接/断开**：串口路径、波特率、超时、连接状态（给出 `--port` 时启动后自动连接并 `IDENTIFY`）；
 - **状态灯**：busy / MMCM 锁定 / 结果丢失 / sourceReady（绿=有效、橙=忙、红=丢失）；
 - **频率显示**与**相位差 0~360°**：数字 + 仪表盘弧 + 0~360° 条形；
-- **测量控制**：单次测量、连续测量开关、CLEAR、复位统计、闸门时间按秒设置（实时显示等价的低速
+- **测量控制**：单次测量、连续测量开关、STOP（强制中止在途测量）、CLEAR、复位统计、闸门时间按秒设置（实时显示等价的低速
   周期数、频率分辨率与等结果等待预算；上限是 28 位计数器的真实上界 ≈5.37s @50MHz）；
 - **输入源单选**：外部引脚 / 片内信号源；
 - **片内源**：频率与相位差输入 + 「设置」；扫描频点/相位列表 + 「扫描」；相位不可控时相位输入置灰；
@@ -143,7 +144,9 @@ uv run python -m dpm_host --port /tmp/dpm_pty gui
 - **日志区**（带时间戳，含求解出的 VCO/MULT/D、量化提示、错误信息）。
 
 线程模型：所有串口操作都在一个后台 `QThread` 里**串行**执行，结果通过 Qt 信号（跨线程队列连接）
-回到界面线程刷新控件，因此请求超时不会卡死界面，工作线程也不碰控件。
+回到界面线程刷新控件，因此请求超时不会卡死界面，工作线程也不碰控件。**STOP** 是唯一的例外：
+它单独起线程发送，避免排在正在等结果的单次/连续测量任务后面；但仍受串口半双工约束，正在飞行中的
+`GET_RESULT` 事务返回后才能送达 PS。
 
 冒烟 + 截图（可复跑）：
 
@@ -161,11 +164,12 @@ uv run python host/tools/gui_smoke.py --scan     # 再跑一次 2×3 扫描并�
 
 1. **寄存器语义**（对齐 `src/main/scala/DigitalPhaseMeter/ControlRegs.scala` 与
    `ps/include/dpm_regs.h`）：`CTRL.start` 写 1 触发（busy 期间被忽略）、`CTRL.clear` 写当拍生效
-   （只清结果区与标志、不清 busy，在途测量继续跑完）、`STATUS` 四位、结果未读走即被覆盖时
+   （只清结果区与标志、不清 busy，在途测量继续跑完）、`CTRL.forceStop` 写当拍中止在途测量并撤销
+   busy（不产生结果，源无边沿时同样有效）、`STATUS` 四位、结果未读走即被覆盖时
    `lostCount++` / `seq++`、`IRQ_STATUS` 三位 W1C、
    `GATE_TARGET` 按字节选通合并、`SIG_CTRL` 同拍生效（门控与选择都在主时钟域，与写寄存器的域相同，
    写完成后 `SIG_STATUS.sourceReady` 立即反映新配置）。片内源未使能/未锁定时两路恒低 →
-   **测量永远不完成**（用来验证上位机能超时退出）。
+   **测量永远不完成**（用来验证上位机能超时退出 / 用 `STOP` 恢复）。
 2. **测量模型**（与 `spec/gen_golden.py` 的独立参考实现逐位一致）：
 
    ```text
@@ -242,7 +246,7 @@ uv run python host/tools/gui_smoke.py --scan     # 再跑一次 2×3 扫描并�
 
 | 入口 | 覆盖 |
 | --- | --- |
-| `uv run pytest -q` | 上位机与协议全量单测/pty 端到端（当前 726 项通过） |
+| `uv run pytest -q` | 上位机与协议全量单测/pty 端到端（当前 735 项通过） |
 | `uv run black --check host/ spec/ ps/`、`uv run isort --check-only host/ spec/ ps/` | 脚本树格式与导入顺序 |
 | `uv run python spec/selftest_spec.py` | 文档 ↔ C 头文件 ↔ 金标准三方一致性（当前 0 失败） |
 | `uv run python host/tools/gui_smoke.py [--scan]` | GUI 冒烟 + 截图 |

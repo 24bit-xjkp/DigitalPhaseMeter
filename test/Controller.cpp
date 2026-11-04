@@ -80,6 +80,7 @@ namespace
         bit_slice<CData> io_sig_sig2;
         bit_slice<CData> io_in_valid;
         vector_slice<IData> io_in_bits_target_gate;
+        bit_slice<CData> io_force_stop;
         bit_slice<CData> io_out_valid;
         vector_slice<IData> io_out_bits_gate_cnt;
         vector_slice<IData> io_out_bits_edge_cnt;
@@ -88,8 +89,8 @@ namespace
         explicit port_t(dut_t& dut) :
             clock{dut.clock}, reset{dut.reset}, dsp_clock{dut.dspClock, boolean}, io_sig_sig1{dut.io_sig_sig1, boolean},
             io_sig_sig2{dut.io_sig_sig2, boolean}, io_in_valid{dut.io_in_valid, boolean},
-            io_in_bits_target_gate{dut.io_in_bits_targetGate, 28zu, dec_unsigned}, io_out_valid{dut.io_out_valid, boolean},
-            io_out_bits_gate_cnt{dut.io_out_bits_gateCnt, 28zu, dec_unsigned},
+            io_in_bits_target_gate{dut.io_in_bits_targetGate, 28zu, dec_unsigned}, io_force_stop{dut.io_forceStop, boolean},
+            io_out_valid{dut.io_out_valid, boolean}, io_out_bits_gate_cnt{dut.io_out_bits_gateCnt, 28zu, dec_unsigned},
             io_out_bits_edge_cnt{dut.io_out_bits_edgeCnt, 32zu, dec_unsigned},
             io_out_bits_phase_cnt{dut.io_out_bits_phaseCnt, 32zu, dec_unsigned}
         {
@@ -154,6 +155,7 @@ namespace
         port.io_sig_sig1 = low;
         port.io_sig_sig2 = low;
         port.io_in_valid = low;
+        port.io_force_stop = low;
         port.io_in_bits_target_gate = option.gate_cnt;
 
         measurement_t measurement{};
@@ -627,5 +629,84 @@ TEST_SUITE("Controller")
         CHECK_GT(measurements[0].result.gate_cnt, changed_gate);
         // 窗口内的参考沿数随之与目标闸门时间一致（而不是与小值一致）
         check_window(measurements[0].result, option);
+    }
+
+    TEST_CASE("forceStop aborts the in-flight measurement and the next measurement completes")
+    {
+        // 长闸门测量在 sMeasuring 中被强制停止：本次测量不得产生 out.valid，控制器回到 idle；
+        // 随后立即发起一次短闸门测量，必须照常完成。信号用 generate_clock 自由运行，避免
+        // “强制停止没生效时测量因为缺边沿也完不成”导致判据没有区分度。
+        dut_context_t ctx{ctx_opt};
+        ctx.set_base_name("Controller.force_stop");
+        port_t port{ctx.dut()};
+
+        ctx.add_task(generate_clock(port.clock, clock_period));
+        ctx.add_task(generate_clock(port.dsp_clock, dsp_period));
+        ctx.add_task(generate_clock(port.io_sig_sig1, 400_ns));
+        ctx.add_task(generate_clock(port.io_sig_sig2, 400_ns, 200_ns));
+        ctx.add_task(generate_reset(port.reset, port.clock));
+
+        ctx.add_task([&] -> task<void> {
+            port.io_in_valid = 0;
+            port.io_force_stop = 0;
+            port.io_in_bits_target_gate = target_gate;
+            co_await wait_reset_finish(port.reset);
+
+            // 启动一次长闸门测量
+            co_await wait_stimulate(port.clock);
+            port.io_in_valid = 1;
+            co_await wait_stimulate(port.clock);
+            port.io_in_valid = 0;
+
+            // 等 50 个低速周期，让测量进入 sMeasuring（远小于 2000 的闸门目标）
+            for(auto cycle{0zu}; cycle != 50zu; ++cycle) { co_await wait_verify(port.clock); }
+
+            // 一个低速周期宽的强制停止脉冲
+            co_await wait_stimulate(port.clock);
+            port.io_force_stop = 1;
+            co_await wait_stimulate(port.clock);
+            port.io_force_stop = 0;
+
+            // 被中止的测量在本应完成的窗口内不得输出结果。观察 2500 个低速周期，
+            // 覆盖长闸门（2000）加停止握手与余量。
+            bool aborted_output{};
+            for(auto cycle{0zu}; cycle != 2500zu; ++cycle)
+            {
+                co_await wait_verify(port.clock);
+                if(port.io_out_valid != 0u) { aborted_output = true; }
+            }
+            CHECK_FALSE(aborted_output);
+
+            // 控制器已回到 idle：再把目标闸门改小，启动第二次测量，必须正常完成
+            constexpr std::uint64_t second_gate{100zu};
+            port.io_in_bits_target_gate = second_gate;
+            co_await wait_stimulate(port.clock);
+            port.io_in_valid = 1;
+            co_await wait_stimulate(port.clock);
+            port.io_in_valid = 0;
+
+            measurement_t second{};
+            for(auto cycle{0zu}; cycle != 500zu && !second.observed; ++cycle)
+            {
+                co_await wait_verify(port.clock);
+                if(port.io_out_valid != 0u)
+                {
+                    second.observed = true;
+                    second.result.gate_cnt = static_cast<std::uint64_t>(port.io_out_bits_gate_cnt);
+                    second.result.edge_cnt = static_cast<std::uint64_t>(port.io_out_bits_edge_cnt);
+                    second.result.phase_cnt = static_cast<std::uint64_t>(port.io_out_bits_phase_cnt);
+                }
+            }
+            CHECK(second.observed);
+            CHECK_EQ(second.result.gate_cnt, gate_cnt_tolerance((400_ns).rep)(second_gate));
+            // 窗口里有参考沿，说明这是一次真实完成的测量而不是空结果
+            CHECK_GT(second.result.edge_cnt, 0zu);
+            CHECK_GT(second.result.phase_cnt, 0zu);
+
+            co_await wait_stimulate(port.clock);
+            co_await eval_finish();
+        }());
+
+        ctx.loop_until_finish(20_ms);
     }
 }

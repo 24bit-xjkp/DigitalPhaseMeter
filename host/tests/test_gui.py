@@ -258,3 +258,37 @@ def test_window_gate_download_converts_to_cycles(window) -> None:
         assert fake.gates == [2000]
     finally:
         window.client = None
+
+
+def test_window_stop_button_calls_client_stop(window) -> None:
+    """STOP 按钮：调用 `client.stop()`，并立即关掉本地连续测量开关。"""
+
+    class _FakeClient:
+        slow_hz = SLOW_HZ
+        dsp_hz = 450_000_000
+
+        def __init__(self) -> None:
+            self.stops = 0
+            self.status_reads = 0
+
+        def stop(self) -> None:
+            self.stops += 1
+
+        def get_status(self):
+            self.status_reads += 1
+            return P.Status(status=0, sig_status=0, gate_target=0, lost_count=0, seq=0)
+
+    fake = _FakeClient()
+    window.client = fake
+    window._continuous = True
+    try:
+        window.after_stop()
+        deadline = time.time() + 5.0
+        while (fake.stops == 0 or fake.status_reads == 0) and time.time() < deadline:
+            time.sleep(0.01)
+        assert fake.stops == 1
+        assert fake.status_reads >= 1
+        assert window._continuous is False
+    finally:
+        window.client = None
+        window._continuous = False

@@ -38,6 +38,7 @@
 #define DPM_CMD_CLEAR 0x0Cu
 #define DPM_CMD_STREAM 0x0Du
 #define DPM_CMD_RESET_COUNTERS 0x0Eu
+#define DPM_CMD_STOP 0x0Fu
 
 /* 响应方向位 */
 #define DPM_RESP_FLAG 0x80u
@@ -53,7 +54,7 @@
  *
  * 取 0xE1/0xE2 而不是 0x81/0x82：响应码是「请求码 | 0x80」，PING 的响应恰好是 0x81、
  * IDENTIFY 的响应是 0x82，旧取值会与响应**撞码**（只能靠 PAYLOAD 长度区分）。
- * 约定：0xE0..0xEF = 通知，0x81..0x8E = 响应。 */
+ * 约定：0xE0..0xEF = 通知，0x81..0x8F = 响应。 */
 #define DPM_EVT_STREAM_DATA 0xE1u
 #define DPM_EVT_EVENT 0xE2u
 /** 通知码判定（收到该范围的 CMD 说明是主动上报，不是响应）。 */

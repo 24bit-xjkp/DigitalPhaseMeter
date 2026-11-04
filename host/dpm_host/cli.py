@@ -8,6 +8,7 @@
     identify    IDENTIFY（版本、能力、两侧时钟）
     status      GET_STATUS（状态位 + 片内源状态）
     start       START（可等结果）
+    stop        STOP（强制中止在途测量）
     meas        GET_MEAS（无有效结果时自动启动一次）
     monitor     连续测量 N 次或指定时长
     mode        SET_MODE single|continuous
@@ -254,6 +255,7 @@ def cmd_start(args: argparse.Namespace, client: DpmClient) -> int:
     except DpmTimeoutError as exc:
         print(f"测量未完成：{exc}", file=sys.stderr)
         print("提示：片内源未使能/未锁定，或外部输入没有边沿时，测量永远不会完成。", file=sys.stderr)
+        print("      可用 `dpm_host stop` 强制结束这次挂起的测量，或切回有边沿的输入源。", file=sys.stderr)
         print(f"      {fmt_gate_budget(client)}", file=sys.stderr)
         return EXIT_ERROR
     result = Result(True, meas.seq, meas.gate_cnt, meas.edge_cnt, meas.phase_cnt)
@@ -288,6 +290,7 @@ def cmd_meas(args: argparse.Namespace, client: DpmClient) -> int:
         except DpmTimeoutError as exc:
             print(f"测量未完成：{exc}", file=sys.stderr)
             print("提示：片内源未使能/未锁定，或外部输入没有边沿时，测量永远不会完成。", file=sys.stderr)
+            print("      可用 `dpm_host stop` 强制结束这次挂起的测量，或切回有边沿的输入源。", file=sys.stderr)
             print(f"      {fmt_gate_budget(client)}", file=sys.stderr)
             return EXIT_ERROR
     calc = client.calc_meas(meas)
@@ -536,6 +539,17 @@ def cmd_stream(args: argparse.Namespace, client: DpmClient) -> int:
     return EXIT_OK
 
 
+def cmd_stop(args: argparse.Namespace, client: DpmClient) -> int:
+    """STOP：强制中止在途测量（源没有边沿、busy 永不撤销时的恢复手段）。"""
+    client.stop()
+    st = client.get_status()
+    if args.json:
+        print_json({"stopped": True, "status": st.__dict__})
+    else:
+        print("已发送 STOP（在途测量已中止；连续模式退回 single）：" + fmt_status(st))
+    return EXIT_OK
+
+
 def cmd_clear(args: argparse.Namespace, client: DpmClient) -> int:
     client.clear()
     st = client.get_status()
@@ -763,6 +777,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("start", help="START：启动一次测量")
     p.add_argument("--no-wait", action="store_false", dest="wait", help="只发 START，不等结果")
     p.set_defaults(func=cmd_start, wait=True)
+
+    p = sub.add_parser("stop", help="STOP：强制中止在途测量（不需要信号有边沿）")
+    p.set_defaults(func=cmd_stop)
 
     p = sub.add_parser("meas", help="GET_MEAS：读频率与相位差")
     p.add_argument("--no-start", action="store_true", help="不自动触发测量，只读现有结果")

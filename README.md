@@ -80,7 +80,7 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
 注意：
 
 - **配置与切换都应在 `STATUS.busy = 0` 时进行**：切换输入源会让正在进行的测量作废；MMCM 重配置期间两路输出停止，正在等待边沿的测量会一直挂着。
-- **选择片内源时必须让源真的产生边沿**：`SIG_CTRL.enable = 1` 且 MMCM 已锁定，否则两路输出恒低，测量会一直停在「等待参考沿」的状态（切回外部输入或重新配置即可恢复）。`SIG_STATUS.sourceReady` 给出这个前提是否满足（选择外部输入时恒为 1，因为外部是否有信号无法在 PL 内判断——用一次测量的 `edgeCnt` 即可确认）。
+- **选择片内源时必须让源真的产生边沿**：`SIG_CTRL.enable = 1` 且 MMCM 已锁定，否则两路输出恒低，测量会一直停在「等待参考沿」的状态（写 `CTRL.forceStop` 可直接中止并恢复，或切回有边沿的输入源）。`SIG_STATUS.sourceReady` 给出这个前提是否满足（选择外部输入时恒为 1，因为外部是否有信号无法在 PL 内判断——用一次测量的 `edgeCnt` 即可确认）。
 
 ## PS↔PL 互联与寄存器接口
 
@@ -108,7 +108,7 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
 
 | 偏移 | 名称           | 访问 | 说明                                                                                                                                                                                                           |
 | ---- | -------------- | ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0x00 | `CTRL`         | 混合 | [0] `start`：写 1 启动一次测量（自清脉冲，`busy` 期间忽略）；[1] `irqEnable`：中断使能；[2] `clear`：写 1 当拍复位结果寄存器与全部标志（不清 `busy`，在途测量继续完成并照常锁存结果）。读回时 bit0/bit2 恒为 0 |
+| 0x00 | `CTRL`         | 混合 | [0] `start`：写 1 启动一次测量（自清脉冲，`busy` 期间忽略）；[1] `irqEnable`：中断使能；[2] `clear`：写 1 当拍复位结果寄存器与全部标志（不清 `busy`，在途测量继续完成并照常锁存结果）；[3] `forceStop`：写 1 强制中止在途测量并撤销 `busy`（不产生结果，不动结果区与标志）。读回时 bit0/bit2/bit3 恒为 0 |
 | 0x04 | `STATUS`       | RO   | [0] `busy`：测量中；[1] `resultValid`：有未被读走的结果；[2] `lost`：有结果被覆盖丢失；[3] `irqPending`                                                                                                        |
 | 0x08 | `GATE_TARGET`  | RW   | [27:0] 目标闸门计数（低速时钟周期数），按字节选通写入                                                                                                                                                          |
 | 0x0C | `RESULT_GATE`  | RO   | 最新结果的 `gateCnt`，实际闸门计数                                                                                                                                                                             |
@@ -124,6 +124,8 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
 
 `CTRL` 是「普通读写位 + 写 1 触发位」的混合：`irqEnable` 每次写 `CTRL` 都按 bit1 整体更新，因此启动测量时要写 `CTRL = (1<<1) | (1<<0)`。
 
+`forceStop` 与 `clear` 分工不同：`clear` 只清结果区与标志、**不中止测量**（`busy` 保持，在途测量继续跑完）；`forceStop` **中止在途测量并撤销 `busy`**、不产生新结果，也不改动已有结果与标志。测量因为选中的输入源没有边沿而永远等不到参考沿时，写 `forceStop` 是直接的恢复手段（随后可重新配置源并启动下一次测量）。串口协议层对应 **`STOP`（0x0F）** 命令：PS 固件负责写这一位，CLI `dpm_host stop` 与 GUI 的 STOP 按钮调用它；连续模式下 `STOP` 会把模式退回 `single`。该位是写 1 触发脉冲，读回为 0；写 `CTRL` 时 bit1 仍按整字更新，需要保持中断使能时把 `(1<<1)` 一起写入。
+
 ### 数据交换流程（PS 视角）
 
 0. （用片内源时）先用 MMCM 的 DRP 寄存器配置频率与相位差，再写 `SIG_CTRL` 选中它；
@@ -133,7 +135,7 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
 4. 依次读 `RESULT_GATE` / `RESULT_EDGE` / `RESULT_PHASE` / `RESULT_SEQ`，得到一条完整结果；
 5. 写 `IRQ_STATUS = (1<<0) | (1<<1)`：清中断挂起位，同时告诉 PL「结果已读走」——否则下一次测量的结果会被记为丢失。
 
-结果寄存器只保留最新一条：软件还没读走就再次测量，旧结果会被覆盖、`LOST_COUNT` 加一。需要重新开始计数或丢弃旧结果时写 `CTRL` 的 `clear` 位。与 `Controller` 交互的时序要点：启动时锁存 `GATE_TARGET`（测量期间改写不影响本次测量）；结果在 `out.valid` 那一拍一次性锁存并置中断；「软件清标志」与「新结果到达」同拍时按新结果优先。
+结果寄存器只保留最新一条：软件还没读走就再次测量，旧结果会被覆盖、`LOST_COUNT` 加一。需要重新开始计数或丢弃旧结果时写 `CTRL` 的 `clear` 位；需要中止卡住的在途测量时发 `STOP` 命令（PS 写 `CTRL.forceStop`；`clear` 不清 `busy`、也不中止测量）。与 `Controller` 交互的时序要点：启动时锁存 `GATE_TARGET`（测量期间改写不影响本次测量）；结果在 `out.valid` 那一拍一次性锁存并置中断；「软件清标志」与「新结果到达」同拍时按新结果优先。
 
 ## 目录结构
 
@@ -204,7 +206,7 @@ xmake run Controller                      # 单个测试目标（定位问题用
 
 构建测试目标前会自动调用生成入口：每个 `<Name>Verilator` 目标先执行 `./mill emit <Name>`（只生成该目标对应的模块；`test/xmake.lua` 用 `mill.verilator.shared` 规则接入，规则定义在 `script/rule.lua`），再把 `build/chisel/<Name>/filelist.f` 列出的 SV 交给 Verilator。因此改完 RTL 不需要先手工跑 `./mill emit`；要强制重新生成时用 `./mill emit --force <Name>`。
 
-覆盖 `Controller`（复位、闸门/相位计数、窗口跟随、连续测量一致性）、`EdgeDetector`、`ResetSynchronizer`、`DspCounter`、`MmcmDrpController`，以及顶层 IP 的 `DigitalPhaseMeterTop`：用 AXI4-Lite BFM 按真实基地址 `0x43C0_0000 + 偏移` 驱动，覆盖复位/寄存器默认值、写数据先到与字节选通、测量启动与中断时序、W1C 与只读寄存器写忽略、结果锁存与 `LOST_COUNT`、`CTRL.clear`、目标闸门锁存，以及片内源/外部输入切换。**顶层 AXI 寄存器通路由它守门**：动 `Axi*.scala`、`ControlRegs.scala` 或 `DigitalPhaseMeterTop.scala` 必须跑 `xmake test -v`，并把新寄存器纳入 [`test/DigitalPhaseMeterTop.cpp`](test/DigitalPhaseMeterTop.cpp)。测试目标的注册方式、时间精度与常见陷阱见 [`.agents/skills/dpm-verilator-testing`](.agents/skills/dpm-verilator-testing/SKILL.md)。
+覆盖 `Controller`（复位、闸门/相位计数、窗口跟随、连续测量一致性、强制停止中止在途测量）、`PhaseMeter`（停止握手与强制停止）、`EdgeDetector`、`ResetSynchronizer`、`DspCounter`、`MmcmDrpController`，以及顶层 IP 的 `DigitalPhaseMeterTop`：用 AXI4-Lite BFM 按真实基地址 `0x43C0_0000 + 偏移` 驱动，覆盖复位/寄存器默认值、写数据先到与字节选通、测量启动与中断时序、W1C 与只读寄存器写忽略、结果锁存与 `LOST_COUNT`、`CTRL.clear`、`CTRL.forceStop`（含「无沿卡住 → 强制停止 → busy 清零 → 重新测量」）、目标闸门锁存，以及片内源/外部输入切换。**顶层 AXI 寄存器通路由它守门**：动 `Axi*.scala`、`ControlRegs.scala` 或 `DigitalPhaseMeterTop.scala` 必须跑 `xmake test -v`，并把新寄存器纳入 [`test/DigitalPhaseMeterTop.cpp`](test/DigitalPhaseMeterTop.cpp)。测试目标的注册方式、时间精度与常见陷阱见 [`.agents/skills/dpm-verilator-testing`](.agents/skills/dpm-verilator-testing/SKILL.md)。
 
 ### xsim 仿真（MMCM 联调）
 
@@ -248,7 +250,7 @@ uv run python -m dpm_host gui             # PySide6 GUI
 | 层次         | 入口                                                           | 说明                                                               |
 | ------------ | -------------------------------------------------------------- | ------------------------------------------------------------------ |
 | RTL 单元     | `xmake test -v`                                                | Verilator：测量通路与复位/DRP 语义                                 |
-| 顶层 AXI     | `xmake test -v`                                                | Verilator：顶层 IP 的寄存器读写、中断、结果锁存、输入源切换        |
+| 顶层 AXI     | `xmake test -v`                                                | Verilator：顶层 IP 的寄存器读写、中断、结果锁存、输入源切换、强制停止 |
 | MMCM 联调    | `sim/run_handoff_tb.sh`                                        | xsim：真实 MMCM 行为模型，80 点相位/频率比对                       |
 | 协议与换算   | `uv run pytest -q`、`uv run python spec/selftest_spec.py`      | 上位机单测、C/Python/金标准三方一致性自检                          |
 | 离线验收演练 | `bash ps/tools/onboard_accept_sim.sh`                          | C 验证台经 pty 跑完整验收流程（80 点扫描）                         |

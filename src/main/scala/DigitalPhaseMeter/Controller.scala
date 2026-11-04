@@ -67,6 +67,7 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
         val sig = Input(new PhaseMeterSignalPayload)
         val in = Flipped(ValidIO(new ControllerInPayload(gateCntWidth)))
         val out = ValidIO(new ControllerOutPayload(gateCntWidth, edgeCntWidth, phaseCntWidth))
+        val forceStop = Input(Bool())
     })
     private val out = RegInit(chiselTypeOf(io.out).Lit(_.valid -> false.B))
     io.out := out
@@ -83,6 +84,7 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
     private val request = CdcToggleHandShake.send(phaseMeter.request)
     private val responseReady = CdcToggleHandShake.send(phaseMeter.response.ready)
     private val responseValid = CdcToggleHandShake.receive(phaseMeter.response.valid)
+    private val forceStop = CdcToggleHandShake.send(phaseMeter.forceStop)
 
     private val gateCntClear = Reg(Bool())
     private val (gateCnt, _) = Counter(0 to (1 << gateCntWidth) - 1, true.B, gateCntClear)
@@ -97,14 +99,18 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
         is(sMeasuring) { when(targetGateMet) { state := sWaitStop } }
         is(sWaitStop) { when(responseValid) { state := sIdle } }
     }
+    when(io.forceStop) { state := sIdle; forceStop.send() }
 
     private val isIdle = dontTouch(state === sIdle)
     when(isIdle) { gateCntClear := true.B; out.valid := false.B }
-    private val startRequestReceived = isIdle && io.in.fire
+    // 强制停止优先于同一拍的新启动：否则 Controller 回 idle 而 request 已经送给 PhaseMeter，
+    // 两边状态机会失配（PhaseMeter 停在 sMeasuring/sWaitStop，之后再也等不到停止应答）。
+    private val startRequestReceived = isIdle && io.in.fire && !io.forceStop
     when(startRequestReceived) { targetGate := io.in.bits.targetGate; request.send() }
     when(state === sWaitStart && responseValid) { gateCntClear := false.B }
     when(state === sMeasuring && targetGateMet) { request.send() }
-    private val finishMeasure = state === sWaitStop && responseValid
+    // 强制停止与停止响应同拍时按强制停止处理：被中止的测量不锁存结果、也不回停止应答
+    private val finishMeasure = state === sWaitStop && responseValid && !io.forceStop
     when(finishMeasure) {
         out.bits.viewAsSupertype(new PhaseMeterResponsePayload) := phaseMeter.response.bits
         out.bits.gateCnt := gateCnt

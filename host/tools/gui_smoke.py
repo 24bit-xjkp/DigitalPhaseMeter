@@ -17,7 +17,8 @@
 
 * **相位上界逐频点刷新**：25MHz（D=40）放开到 359.999° 并真的设到 225°（>180°）测出来；
   6MHz（D=125）收窄到 184.139°；
-* **闸门时间按秒设置**：界面输入 40µs，状态里读回 `gateTarget=2000` 个低速周期。
+* **闸门时间按秒设置**：界面输入 40µs，状态里读回 `gateTarget=2000` 个低速周期；
+* **STOP 撤销卡死测量**：外部输入无信号、单次测量超时后，STOP 让 `STATUS.busy` 归零。
 """
 
 from __future__ import annotations
@@ -238,6 +239,17 @@ def main() -> int:
                 and "外部引脚" in window.log_view.toPlainText()
                 and "ERR_BUSY" not in window.log_view.toPlainText(),
                 window.log_view.toPlainText().strip().splitlines()[-1] if window.log_view.toPlainText().strip() else "（日志为空）",
+            ),
+        )
+        # 外部无信号时 PL 的 busy 会一直保持：STOP 是恢复路径（CLEAR 不行）。
+        smoke.add("强制停止外部无信号测量", 0.5, window.after_stop)
+        smoke.add(
+            "检查 STOP 生效",
+            1.5,
+            lambda: smoke.check(
+                "STOP 撤销 busy（源没有边沿也能恢复）",
+                "busy" not in window.status_label.text() and "已发送 STOP" in window.log_view.toPlainText(),
+                window.status_label.text(),
             ),
         )
         smoke.add("切回片内源", 0.8, lambda: (window.radio_int.setChecked(True), window.after_set_source()))

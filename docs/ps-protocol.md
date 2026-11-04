@@ -44,8 +44,8 @@
 
 | 范围         | 用途                                   |
 | ------------ | -------------------------------------- |
-| `0x01..0x0E` | 请求（PC → PS）                        |
-| `0x81..0x8E` | 响应（PS → PC），值 = `请求码 \| 0x80` |
+| `0x01..0x0F` | 请求（PC → PS）                        |
+| `0x81..0x8F` | 响应（PS → PC），值 = `请求码 \| 0x80` |
 | `0xE1..0xE2` | 通知（PS → PC 主动上报，无需请求）     |
 | `0xFE/0xFF`  | 错误响应 `ERR_PARAM` / `ERR_BUSY`      |
 
@@ -65,6 +65,7 @@
 | 0x0C | `CLEAR`          | R/R  | 空                                 | 无                                                                                                                  |
 | 0x0D | `STREAM`         | R/R  | `enable(u8)` `intervalMs(u16)`     | `enable(u8)` `intervalMs(u16)`                                                                                      |
 | 0x0E | `RESET_COUNTERS` | R/R  | 空                                 | 无                                                                                                                  |
+| 0x0F | `STOP`           | R/R  | 空                                 | 无                                                                                                                  |
 
 ### 3.0 语义约定（避免两侧各写一套）
 
@@ -80,14 +81,23 @@
   测量**：busy 期间写入时，正在跑的那次测量完成后仍会照常锁存结果并拉中断（记录序号从 0 重来）。
   因此 PS 固件先等 `STATUS.busy = 0` 再写 clear，等待超时回 `ERR_BUSY`；上位机应把 `CLEAR` 的
   `ERR_BUSY` 当作「忙、可重试」而不是致命错误。
-  另外，`CTRL.clear` **不会复位测量 FSM**：它不能中止已经卡住的测量（见下一条）。
+  另外，`CTRL.clear` **不会复位测量 FSM**：它不能中止已经卡住的测量；中止在途测量要用
+  `STOP`（见下一条）。
+- **`STOP` 强制中止在途测量**：PS 写 PL 的 `CTRL.forceStop`（b3），不需要被测信号有边沿，
+  成功时 `STATUS.busy` 在写后一拍撤销、**不产生新结果**，已有结果区与标志保持不变；空闲时调用
+  也成功（幂等）。如果当前是 `continuous` 模式，PS 同时把模式退回 `single`，避免周期任务在
+  下一秒又启动一次测量；要恢复连续测量重新发 `SET_MODE(continuous)` + `START`。
+  `STOP` 不清结果区（用 `CLEAR`）、不关闭流上报（用 `STREAM off`）。它是恢复「选中的源没有
+  边沿、`STATUS.busy` 永不撤销」的首选路径。
 - **测量卡在 busy 时的恢复**：相位计必须等到被测信号的两个上升沿，因此选中的源没有边沿时
   测量永不完成、`STATUS.busy` 一直为 1（`GET_RESULT.valid = 0` 是这种状态的正常表达，见下）。
-  PL 没有中止在途测量的寄存器：`CTRL.clear` 不清 busy，`START` 在 busy 期间被忽略，
-  `SET_SIG` 又要求 idle（卡住时只会回 `ERR_BUSY`）。因此**唯一可用的软件恢复路径是
-  `SET_SOURCE` 切到另一路有边沿的源**：`SET_SOURCE` 不要求 idle，写 `SIG_CTRL` 当拍生效，
-  新源的下一个边沿会让在途测量完成，随后按正常流程 `CLEAR` 即可。两路源都没有可用边沿时，
-  只能复位 PL/PS。固件检测到长时间 busy 时应按此顺序处理，不要反复 `START`。
+  首选 **`STOP`**：写 PL 的 `CTRL.forceStop` 即中止在途测量并撤销 busy，不需要源有边沿；
+  `CTRL.clear` 做不到这一点（它不清 busy、也不中止测量），`START` 在 busy 期间被忽略，
+  `SET_SIG` 又要求 idle（卡住时只会回 `ERR_BUSY`）。`STOP` 超时回 `ERR_BUSY`（例如链路异常或
+  PL 是老 bitstream）时，仍可以 `SET_SOURCE` 切到另一路有边沿的源——它不要求 idle，写
+  `SIG_CTRL` 当拍生效，新源的下一个边沿会让在途测量完成，随后按正常流程 `CLEAR` 即可。
+  两路源都没有可用边沿时，只能复位 PL/PS。固件检测到长时间 busy 时应按
+  「`STOP` → 换源」的顺序处理，不要反复 `START`。
 - **`SET_SIG` 成功后清结果区**：重配置会更换片内源，重配置前的旧结果已失效，固件在
   `SET_SIG` 成功后写一次 `CTRL.clear`（只清结果区与标志，不清 busy）。需要保留旧结果时先读走
   再改源；即使随后因 `sourceReady` 未恢复返回 `ERR_BUSY`，这次 clear 也已经写入。
@@ -130,6 +140,10 @@
 | 0   | `single`：收到 `START` 才启动一次测量                               |
 | 1   | `continuous`：结果读走后**立即**重新启动下一次测量（PS 侧软件轮转） |
 
+`STOP` 在 `continuous` 模式下会把模式退回 `single`（否则周期轮转会立刻重启测量）；
+需要继续连续测量时重新发 `SET_MODE(1)` 并 `START`。`GET_STATUS` 不返回模式，客户端应自行
+记录最后一次 `SET_MODE` / `STOP` 的结果。
+
 `source`：
 
 | 值  | 含义                                        |
@@ -157,11 +171,11 @@
 | 0xE2 | `EVENT`       | `code(u8)` `detail(u32)`：`code` 1 = 结果丢失，2 = MMCM 失锁并恢复，3 = 上位机未及时读取 |
 
 > **为什么通知码取 0xE1/0xE2（v1.1 修正）**：响应码规则是「请求码 | 0x80」，而请求码占
-> 0x01..0x0E，于是 `PING` 的响应恰好是 0x81、`IDENTIFY` 的响应是 0x82 ——
+> 0x01..0x0F，于是 `PING` 的响应恰好是 0x81、`IDENTIFY` 的响应是 0x82 ——
 > 与旧版通知码 0x81/0x82 **完全撞码**，只能靠 PAYLOAD 长度猜（STREAM_DATA 恒 26B、
 > EVENT 恒 5B、PING 响应 0B、IDENTIFY 响应 30B）。这在第三方实现里极易出错，
 > 因此把通知码整体挪到 **0xE1/0xE2**：`0xE0..0xEF` 保留给 PS 主动上报，
-> `0x81..0x8E` 只用于响应，两者不再有交集。
+> `0x81..0x8F` 只用于响应，两者不再有交集。
 > 帧的其它字段与校验方式不变。
 
 ## 4. 通道/字节选通语义（PS 侧实现要求）
@@ -170,6 +184,11 @@
   PS 侧一律整字写（`strb = 0xF`），不要依赖部分字节写。
 - `CTRL` 的 b1（irqEnable）是普通读写位：**每次写 CTRL 都要把当前 irqEnable 一起写回**，
   启动测量写 `DPM_CTRL_IRQ_ENABLE | DPM_CTRL_START`。
+- `CTRL` 的 b3（forceStop）与 b0/b2 一样是写 1 触发位、读回为 0。写它只中止在途测量并撤销
+  `busy`，不产生结果、不改动结果区与标志；写 `CTRL` 时 b1 仍按整字更新，需要保持中断使能时把
+  `DPM_CTRL_IRQ_ENABLE | DPM_CTRL_FORCE_STOP` 一起写入。
+- `STOP` 的请求与响应 PAYLOAD 都为空；固件内部写 `CTRL.forceStop` 时会自动带上当前
+  `irqEnable`，不需要上位机再拼 `CTRL` 字。
 - `IRQ_STATUS` 是 W1C：结果读走后写 `DPM_IRQ_PENDING | DPM_IRQ_RESULT_READ`
   （可选加 `DPM_IRQ_LOST_CLEAR`）。**不写 b1 会导致下一次结果被记为丢失**。
 - `SIG_CTRL` 的使能/选择位与输入选择器同在主时钟域，写这一笔的同时切换即生效；

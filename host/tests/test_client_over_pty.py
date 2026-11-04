@@ -313,7 +313,81 @@ def test_clear_and_reset(client: DpmClient) -> None:
     client.reset_counters()
 
 
-@CONTROLLABLE
+def test_stop_aborts_a_stuck_measurement(sim_server) -> None:
+    """STOP：源没有边沿时强制中止在途测量、撤销 busy，之后仍能正常测量。
+
+    这是 ``STOP`` 与 ``CLEAR`` 的关键区别：``CLEAR`` 不清 ``busy``、也不中止测量。
+    """
+    srv = sim_server("--source", "ext", "--ext-disable")
+    cli = DpmClient(port=srv.slave, timeout=1.0, retries=1)
+    try:
+        cli.ping()
+        cli.set_source(P.SOURCE_EXTERNAL)
+        assert not cli.get_status().busy
+
+        # 外部输入无信号：START 后测量永远等不到参考沿，busy 一直为 1
+        cli.start()
+        time.sleep(0.05)
+        status = cli.get_status()
+        assert status.busy and not status.result_valid
+
+        cli.stop()
+        status = cli.get_status()
+        assert not status.busy
+        assert not status.result_valid
+        assert not cli.get_result().valid
+
+        # 空闲时再发 STOP 也成功（幂等）
+        cli.stop()
+        assert not cli.get_status().busy
+
+        # 强制停止后可以重新启动：切到有边沿的片内源并正常完成一次测量
+        cli.set_source(P.SOURCE_INTERNAL)
+        cli.wait_source_ready(timeout=2.0)
+        _result, meas, calc = cli.measure_once()
+        assert meas.edge_cnt > 0
+        assert calc.freq_hz == P.DEFAULT_SIG_FREQ_HZ
+    finally:
+        cli.close()
+
+
+def test_stop_aborts_a_local_wait(sim_server) -> None:
+    """STOP 也打断本地的结果轮询：等待线程立即退出，不用等完整个闸门预算。"""
+    srv = sim_server("--source", "ext", "--ext-disable")
+    cli = DpmClient(port=srv.slave, timeout=1.0, retries=1)
+    try:
+        cli.ping()
+        cli.set_source(P.SOURCE_EXTERNAL)
+        cli.start()
+        errors: list[BaseException] = []
+
+        def waiter() -> None:
+            try:
+                cli.wait_meas(timeout=30.0)
+            except BaseException as exc:  # noqa: BLE001 - 测试要收下具体异常类型
+                errors.append(exc)
+
+        thread = threading.Thread(target=waiter, daemon=True)
+        thread.start()
+        time.sleep(0.1)
+        started = time.monotonic()
+        cli.stop()
+        thread.join(timeout=2.0)
+        assert not thread.is_alive()
+        assert time.monotonic() - started < 2.0
+        assert errors and "STOP" in str(errors[0])
+        assert not cli.get_status().busy
+    finally:
+        cli.close()
+
+
+def test_cli_stop(sim_server, capsys) -> None:
+    """CLI `stop` 子命令走通（空闲时 STOP 幂等成功）。"""
+    srv = sim_server("--source", "ext", "--ext-disable")
+    assert cli.main(["--port", srv.slave, "stop"]) == 0
+    assert "已发送 STOP" in capsys.readouterr().out
+
+
 def test_error_response_raises(client: DpmClient) -> None:
     with pytest.raises(P.DpmError) as ctx:
         client.set_mode(7)

@@ -19,8 +19,8 @@
 
 .. code-block:: text
 
-    0x01..0x0E  请求（PC → PS）
-    0x81..0x8E  响应（PS → PC），值 = 请求码 | 0x80
+    0x01..0x0F  请求（PC → PS）
+    0x81..0x8F  响应（PS → PC），值 = 请求码 | 0x80
     0xE1..0xE2  通知（PS → PC 主动上报，无需请求）：0xE1 STREAM_DATA、0xE2 EVENT
     0xFE/0xFF   错误响应 ERR_PARAM / ERR_BUSY
 
@@ -72,6 +72,7 @@ class Cmd(IntEnum):
     CLEAR = 0x0C
     STREAM = 0x0D
     RESET_COUNTERS = 0x0E
+    STOP = 0x0F
 
     # 通知帧（PS → PC 主动上报）：0xE0..0xEF 保留给通知（协议 v1.1）
     STREAM_DATA = 0xE1
@@ -232,7 +233,7 @@ def cmd_name(cmd: int | Cmd | None) -> str:
     """命令码 → 名称。
 
     - 请求码 / 通知码 / 错误码：枚举名；
-    - 响应码 `0x81..0x8E`：``"<请求名> 响应"``（响应码不在枚举里，这样日志更好读）；
+    - 响应码 `0x81..0x8F`：``"<请求名> 响应"``（响应码不在枚举里，这样日志更好读）；
     - 其它：``0xNN``。
     """
     if cmd is None:
@@ -960,6 +961,7 @@ CMD_SPECS: dict[int, tuple[str, int | None, int | None]] = {
     Cmd.CLEAR: ("CLEAR", 0, 0),
     Cmd.STREAM: ("STREAM", 3, 3),
     Cmd.RESET_COUNTERS: ("RESET_COUNTERS", 0, 0),
+    Cmd.STOP: ("STOP", 0, 0),
     Cmd.STREAM_DATA: ("STREAM_DATA", None, None),
     Cmd.EVENT: ("EVENT", None, None),
     Cmd.ERR_PARAM: ("ERR_PARAM", 0, 0),

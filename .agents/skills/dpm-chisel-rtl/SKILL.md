@@ -220,6 +220,14 @@ Verilator 与 xsim / Vivado 都能直接编译。
   `CTRL.clear` 反过来是**clear 优先**：它用 `WireDefault` 脉冲当拍生效（不挂起，无需 pending 状态），
   块写在结果锁存块之后，同拍到达的结果被丢弃、`busy` 仍按测量完成撤销；clear 只清结果区与标志，不动
   `busy` / `GATE_TARGET` / `SIG_CTRL`。
+- **强制停止（`CTRL.b3`）必须单独撤销 `ControlRegs.busy`**：`busy` 只由 `response.fire` 撤销，而
+  forceStop 中止测量时**不产生结果**；只在 `Controller`/`PhaseMeter` 里复位 FSM 而不清 `busy`，会让
+  `STATUS.busy` 永久为 1、之后的 `START` 全被忽略（软件只能复位）。正确做法是 `ControlRegs` 用
+  `RegNext(false.B, false.B)` 做一拍脉冲，并在该拍清 `busy`；`Controller` 同时用 `!io.forceStop` 门控
+  `startRequestReceived`（强制停止优先于同拍启动，否则 request 已送出而两边 FSM 失配）与
+  `finishMeasure`（中止的测量不锁存结果），`PhaseMeter` 门控启动/停止应答。复位后还要保证脉冲寄存器
+  有确定初值，不能依赖 `--x-assign unique` 下的随机值。顶层用例要覆盖「源无边沿 → busy 卡死 →
+  写 forceStop → busy 清零 → 重新启动测量成功」。
 - **数据量只有几个字时不要引入片内存储**：一次测量的结果只有 4 个字，直接把结果锁存进可由 PS 读回的
   只读寄存器（GPIO 式数据通道）远比「BRAM + 独立 AXI4 突发口」简单——后者要 AXI4 全速从口、双口 RAM、
   突发/选通/`SLVERR` 处理与地址译码，前者只要几个寄存器加一次 `out.valid` 锁存。选通道先看数据量，

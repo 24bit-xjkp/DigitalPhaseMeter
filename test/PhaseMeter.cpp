@@ -46,6 +46,7 @@ namespace
         bit_slice<CData> io_sig_sig2;
         bit_slice<CData> io_request;
         bit_slice<CData> io_response_ready;
+        bit_slice<CData> io_force_stop;
         bit_slice<CData> io_response_valid;
         vector_slice<IData> io_response_bits_edge_cnt;
         vector_slice<IData> io_response_bits_phase_cnt;
@@ -53,7 +54,7 @@ namespace
         explicit port_t(dut_t& dut) :
             clock{dut.clock}, reset{dut.reset}, io_sig_sig1{dut.io_sig_sig1, boolean}, io_sig_sig2{dut.io_sig_sig2, boolean},
             io_request{dut.io_request, boolean}, io_response_ready{dut.io_response_ready, boolean},
-            io_response_valid{dut.io_response_valid, boolean},
+            io_force_stop{dut.io_forceStop, boolean}, io_response_valid{dut.io_response_valid, boolean},
             io_response_bits_edge_cnt{dut.io_response_bits_edgeCnt, 32zu, dec_unsigned},
             io_response_bits_phase_cnt{dut.io_response_bits_phaseCnt, 32zu, dec_unsigned}
         {
@@ -150,5 +151,69 @@ TEST_SUITE("PhaseMeter")
             CHECK_EQ(start_toggles[round], 1zu);
             CHECK_EQ(stop_toggles[round], 1zu);
         }
+    }
+
+    TEST_CASE("forceStop aborts the measurement, clears the counters and allows a new measurement")
+    {
+        dut_context_t ctx{ctx_opt};
+        ctx.set_base_name("PhaseMeter.force_stop");
+        port_t port{ctx.dut()};
+
+        ctx.add_task(generate_clock(port.clock, dsp_period));
+        ctx.add_task(generate_clock(port.io_sig_sig1, sig_period));
+        ctx.add_task(generate_clock(port.io_sig_sig2, sig_period, sig_phase));
+        ctx.add_task(generate_reset(port.reset, port.clock));
+
+        ctx.add_task([&] -> task<void> {
+            port.io_request = 0;
+            port.io_response_ready = 0;
+            port.io_force_stop = 0;
+            co_await wait_reset_finish(port.reset);
+
+            // 启动一次测量并应答启动握手
+            co_await wait_stimulate(port.clock);
+            port.io_request = 1;
+            CHECK_EQ(co_await count_response_toggles(port, 400zu), 1zu);
+            co_await wait_stimulate(port.clock);
+            port.io_response_ready = 1;
+
+            // 让计数器累计一段时间：相位差 200ns = 50 个高速周期，两个计数器都应非零
+            co_await wait_cycles(port, 200zu);
+            CHECK_GT(static_cast<std::uint64_t>(port.io_response_bits_edge_cnt), 0zu);
+            CHECK_GT(static_cast<std::uint64_t>(port.io_response_bits_phase_cnt), 0zu);
+
+            // 强制停止：接收端看到 forceStop 电平翻转后回到 idle，计数器被清零。
+            // 与停止请求不同，这里不依赖被测信号的上升沿，也不产生停止应答
+            port.io_force_stop = 1;
+            co_await wait_cycles(port, 8zu);
+            CHECK_EQ(static_cast<std::uint64_t>(port.io_response_bits_edge_cnt), 0zu);
+            CHECK_EQ(static_cast<std::uint64_t>(port.io_response_bits_phase_cnt), 0zu);
+
+            // 被中止的测量不会产生停止应答；idle 期间计数器保持清零
+            CHECK_EQ(co_await count_response_toggles(port, 400zu), 0zu);
+            CHECK_EQ(static_cast<std::uint64_t>(port.io_response_bits_edge_cnt), 0zu);
+
+            // 从 idle 重新发起一次完整测量：启动应答 → 停止请求 → 停止应答
+            port.io_response_ready = 0;
+            co_await wait_stimulate(port.clock);
+            port.io_request = 0;
+            CHECK_EQ(co_await count_response_toggles(port, 400zu), 1zu);
+            co_await wait_stimulate(port.clock);
+            port.io_response_ready = 1;
+            co_await wait_cycles(port, 100zu);
+
+            co_await wait_stimulate(port.clock);
+            port.io_request = 1;
+            CHECK_EQ(co_await count_response_toggles(port, 400zu), 1zu);
+            CHECK_GT(static_cast<std::uint64_t>(port.io_response_bits_edge_cnt), 0zu);
+            CHECK_GT(static_cast<std::uint64_t>(port.io_response_bits_phase_cnt), 0zu);
+
+            co_await wait_stimulate(port.clock);
+            port.io_response_ready = 0;
+            co_await wait_cycles(port, 100zu);
+            co_await eval_finish();
+        }());
+
+        ctx.loop_until_finish(10_ms);
     }
 }
