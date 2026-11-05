@@ -19,13 +19,6 @@ import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
 
 object `package` extends SbtModule with ScalafixModule {
-
-    // Chisel 在编译期用 `chisel.project.root` 把源位置注释（生成的 SystemVerilog 里的
-    // `// <源文件>:<行>:<列>`）相对化；编译器在 Mill 进程内执行，这里把工程根写入系统属性，
-    // 使生成的 SystemVerilog 不含检出路径（不同检出/机器内容一致）。
-    sys.props("chisel.project.root") = BuildCtx.workspaceRoot.toString
-    private def chiselProjectRootOption = s"-Xmacro-settings:chisel.project.root=${BuildCtx.workspaceRoot}"
-
     def scalaVersion = "2.13.18"
     def chiselVersion = "7.16.0"
 
@@ -39,7 +32,6 @@ object `package` extends SbtModule with ScalafixModule {
         "-feature",
         "-Xcheckinit",
         "-Ymacro-annotations",
-        chiselProjectRootOption,
         // Chisel 的匿名 Bundle 会「推断出结构类型」，访问其成员需要 reflective call，因此只关掉这一类。
         "-Xlint:_,-infer-structural",
         "-Wunused:imports,privates,locals,patvars,implicits,explicits",
