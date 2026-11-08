@@ -435,7 +435,8 @@ uv run isort --check-only vivado/flow
   `write_bitstream` 的 DRC 实测 0 违例，不需要把 `NSTD-1`/`UCIO-1` 降级为警告。
 - `extSig_sig1/2` 的引脚在顶层 xdc 里写死为 W18/W19、LVCMOS33；换板按实际引脚与 bank 供电改。
 - 测量结果只有一份（`resultDepth = 1`）：新结果会覆盖未读走的旧结果并累加 `LOST_COUNT`；用
-  `RESULT_SEQ` 跳变或 `LOST_COUNT` 判断漏读，`CTRL.clear` 是复位结果与标志的正确方式。
+  `RESULT_SEQ` 跳变或 `LOST_COUNT` 判断漏读。结果字不复位（`RESULT_SEQ` 复位为 0），必须在
+  `STATUS.resultValid = 1` 时才能解释；`CTRL.clear` 是清零结果与标志的正确方式。
 - IP 的 AXI4-Lite 从口没有突发、读写各一笔未完成事务，响应恒为 `OKAY`；未映射地址读回 0、写被忽略。
 - **DRP 写必须让 MMCM 处于复位**：控制器时序是 `RST=1`（≥8 个 DCLK）→ 8 笔 DRP 写 → `RST=0`
   → 重新锁定；不拉 RST 时「分频字立即生效、相位字不生效」。重配置期间两路输出停止。

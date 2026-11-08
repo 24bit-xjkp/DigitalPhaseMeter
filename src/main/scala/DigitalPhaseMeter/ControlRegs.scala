@@ -1,7 +1,8 @@
 package DigitalPhaseMeter
 
 import chisel3._
-import chisel3.experimental.dataview.RecordUpcastable
+import chisel3.experimental.BundleLiterals._
+import chisel3.experimental.dataview._
 import chisel3.ltl._
 import chisel3.util._
 
@@ -28,6 +29,9 @@ import chisel3.util._
   * | 0x2C | SIG_CTRL     | 读写  | b0 enable（片内源使能，0 时两路输出恒低）、b1 srcSelect（0 = 外部输入，1 = 片内源）                                                   |
   * | 0x30 | SIG_STATUS   | 只读  | b0 enable、b1 srcSelect、b2 srcLocked（MMCM 已锁定）、b3 sourceReady                                                |
   *
+  * 注：`RESULT_GATE`/`RESULT_EDGE`/`RESULT_PHASE` **不复位**（系统复位后保持原值，上电后为未定义值），`RESULT_SEQ` 复位为 0；`resultValid = 0`
+  * 时四个字段都不可解释。
+  *
   * 时序要点：
   *
   *   - 写 CTRL.start 产生**一拍**请求；`GATE_TARGET` 由 `Controller` 在启动的那一拍锁存，测量期间 `Controller` 使用锁存值， 因此软件在测量中改写 GATE_TARGET
@@ -35,6 +39,8 @@ import chisel3.util._
   *   - `Controller` 的 `out.valid` 那一拍把 gateCnt/edgeCnt/phaseCnt 与记录序号一起锁存进结果寄存器，同时撤销 busy 并置起中断挂起位。
   *   - 结果寄存器只保留最新一条：`out.valid` 到来时若上一次结果还没被软件读走（`resultValid` 仍为 1），新结果会覆盖它并把 `lostCount` 加一。软件用序号跳变或 `LOST_COUNT`
   *     判断是否漏读。
+  *   - 结果寄存器**不复位**：在四个结果字中，系统复位只把 `RESULT_SEQ` 置 0，`RESULT_GATE`/`RESULT_EDGE`/`RESULT_PHASE` 保持复位前的值（上电后为未定义值）。 软件必须用
+  *     `STATUS.resultValid = 1` 判断结果是否有效；复位后、首次测量完成前读到的三个值不可解释。需要清零结果区（含序号）时写 `CTRL.clear`。
   *   - 中断是电平：`irqPending && irqEnable`。软件写 `IRQ_STATUS` 的 b0 清中断挂起位，写 b1 表示结果已读走（清 resultValid）， 写 b2 清丢失计数。
   *   - 写 `CTRL.clear` **当拍生效**（不挂起）：复位 `LOST_COUNT`、记录序号与全部结果/标志，但**不改变 `busy`**——正在进行的测量继续跑完并照常锁存结果（序号从 0 重新计数）。 它与
   *     `out.valid` 同拍竞争时 clear 优先，该条结果被丢弃（`busy` 仍按测量完成撤销）。
@@ -88,7 +94,7 @@ class ControlRegs(
     // 能力寄存器：每条结果 4 个字、结果深度 1 条、数据通道为寄存器（而非 BRAM 突发口）、
     // b17 表示带片内信号源与输入选择寄存器
     private val hasSignalSource = true.B
-    private val capsValue = Cat(hasSignalSource, true.B, resultDepth.U(8.W), recordWords.U(8.W)).pad(dataWidth)
+    private val capsValue = Cat(hasSignalSource, true.B, resultDepth.U(8.W), recordWords.U(8.W))
 
     val io = IO(new Bundle {
         // 来自 AXI4-Lite 从口的写命令
@@ -122,7 +128,7 @@ class ControlRegs(
     private class ResultBundle extends ControllerOutPayload(gateCntWidth, edgeCntWidth, phaseCntWidth) {
         val seqCnt = UInt(16.W)
     }
-    private val result = RegInit(0.U.asTypeOf(new ResultBundle))
+    private val result = RegInit((new ResultBundle).Lit(_.seqCnt -> 0.U))
     // 下一条结果的记录序号：与结果寄存器分开保存，锁存时先取旧值再自增（首条结果序号为 0）
     private val seq = Counter(1 << 16)
     // 片内信号源与输入选择：软件侧寄存器，直接驱动主时钟域的组合输入选择

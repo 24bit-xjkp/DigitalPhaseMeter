@@ -179,18 +179,21 @@ AXI 从口与 `ControlRegs`，只有这个目标能抓到「寄存器堆往下�
 
 - 用 AXI4-Lite BFM 按 BD 里的**真实基地址** `0x43C0_0000 + 偏移` 驱动（不是裸偏移），与上板时
   PS 看到的地址一致。
-- 覆盖：复位期间从口不握手与释放后寄存器默认值；`GATE_TARGET` 写数据先到与字节选通；测量启动的
+- 覆盖：复位期间从口不握手与释放后控制/状态寄存器默认值（结果字 `RESULT_GATE/EDGE/PHASE`
+  不复位、`RESULT_SEQ` 复位为 0）；`GATE_TARGET` 写数据先到与字节选通；测量启动的
   `busy` / `resultValid` / 中断时序与 `gateCnt` / `edgeCnt` / `phaseCnt` 结果校验；`IRQ_STATUS`
   W1C 与只读寄存器写忽略；第二次更短闸门测量；结果只保留最新一条与 `LOST_COUNT`；`CTRL.clear`
   复位结果区与序号；中断使能门控；目标闸门在启动拍锁存；busy 期间重复 start 被忽略；片内源
   （用 `generate_clock` 产生的 640ns/160ns 理想时钟代替 MMCM 输出）与外部输入（400ns/120ns）
   切换；busy 期间 `CTRL.clear` 当拍生效而在途测量继续跑完；`CTRL.forceStop` 中止源无边沿、永远
-  完不成的测量（busy 清零、无结果），随后切到片内源重新测量成功；第二次复位回到默认值。
+  完不成的测量（busy 清零、无结果、结果区不变），随后切到片内源重新测量成功；第二次复位回到
+  默认值（结果字除外：`RESULT_GATE/EDGE/PHASE` 保留原值、`RESULT_SEQ` 复位为 0）。
 - 理想信号源直接用 `generate_clock(port.sig, period, offset)`：第三个参数是**起始延时**，两路之间
   的延时差就是相位差；不要为周期信号另写方波 helper。带上误差容限的判据用 `verilator_utils::approx`
   表达（与 `test/Controller.cpp` 的闸门/边沿/相位容限同一套写法）。
 - 改 `Axi*.scala` / `ControlRegs.scala` / `DigitalPhaseMeterTop.scala` 时必须跑 `xmake test -v`，
-  并把新寄存器纳入这个用例（读回、字节选通、复位默认值、以及「配置真的改变了测量结果」）。
+  并把新寄存器纳入这个用例（读回、字节选通、复位默认值——结果字按「不复位」语义检查——以及
+  「配置真的改变了测量结果」）。
 
 该目标不需要逐目标 Verilator 豁免：`test/xmake.lua` 只全局关掉 `SYMRSVDWORD`（顶层端口名
 `interrupt`，理由见上文「测试目标的注册方式」），其余按 Verilator 默认告警集编译。

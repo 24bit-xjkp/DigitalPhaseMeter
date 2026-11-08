@@ -111,10 +111,10 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
 | 0x00 | `CTRL`         | 混合 | [0] `start`：写 1 启动一次测量（自清脉冲，`busy` 期间忽略）；[1] `irqEnable`：中断使能；[2] `clear`：写 1 当拍复位结果寄存器与全部标志（不清 `busy`，在途测量继续完成并照常锁存结果）；[3] `forceStop`：写 1 强制中止在途测量并撤销 `busy`（不产生结果，不动结果区与标志）。读回时 bit0/bit2/bit3 恒为 0 |
 | 0x04 | `STATUS`       | RO   | [0] `busy`：测量中；[1] `resultValid`：有未被读走的结果；[2] `lost`：有结果被覆盖丢失；[3] `irqPending`                                                                                                        |
 | 0x08 | `GATE_TARGET`  | RW   | [27:0] 目标闸门计数（低速时钟周期数），按字节选通写入                                                                                                                                                          |
-| 0x0C | `RESULT_GATE`  | RO   | 最新结果的 `gateCnt`，实际闸门计数                                                                                                                                                                             |
-| 0x10 | `RESULT_EDGE`  | RO   | 最新结果的 `edgeCnt`，窗口内参考信号上升沿数                                                                                                                                                                   |
-| 0x14 | `RESULT_PHASE` | RO   | 最新结果的 `phaseCnt`，相位计数                                                                                                                                                                                |
-| 0x18 | `RESULT_SEQ`   | RO   | 最新结果的记录序号                                                                                                                                                                                             |
+| 0x0C | `RESULT_GATE`  | RO   | 最新结果的 `gateCnt`，实际闸门计数（不复位，须 `resultValid=1`）                                                                                                                                                |
+| 0x10 | `RESULT_EDGE`  | RO   | 最新结果的 `edgeCnt`，窗口内参考信号上升沿数（不复位，须 `resultValid=1`）                                                                                                                                     |
+| 0x14 | `RESULT_PHASE` | RO   | 最新结果的 `phaseCnt`，相位计数（不复位，须 `resultValid=1`）                                                                                                                                                  |
+| 0x18 | `RESULT_SEQ`   | RO   | 最新结果的记录序号（复位为 0，须 `resultValid=1`）                                                                                                                                                             |
 | 0x1C | `LOST_COUNT`   | RO   | 结果未被读走即被覆盖的次数                                                                                                                                                                                     |
 | 0x20 | `IRQ_STATUS`   | W1C  | [0] 中断挂起、[1] `resultValid`（写 1 表示结果已读走）、[2] 丢失计数：均写 1 清除                                                                                                                              |
 | 0x24 | `VERSION`      | RO   | `0x4450_4D02`（"DPM2"）                                                                                                                                                                                        |
@@ -135,7 +135,7 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
 4. 依次读 `RESULT_GATE` / `RESULT_EDGE` / `RESULT_PHASE` / `RESULT_SEQ`，得到一条完整结果；
 5. 写 `IRQ_STATUS = (1<<0) | (1<<1)`：清中断挂起位，同时告诉 PL「结果已读走」——否则下一次测量的结果会被记为丢失。
 
-结果寄存器只保留最新一条：软件还没读走就再次测量，旧结果会被覆盖、`LOST_COUNT` 加一。需要重新开始计数或丢弃旧结果时写 `CTRL` 的 `clear` 位；需要中止卡住的在途测量时发 `STOP` 命令（PS 写 `CTRL.forceStop`；`clear` 不清 `busy`、也不中止测量）。与 `Controller` 交互的时序要点：启动时锁存 `GATE_TARGET`（测量期间改写不影响本次测量）；结果在 `out.valid` 那一拍一次性锁存并置中断；「软件清标志」与「新结果到达」同拍时按新结果优先。
+结果寄存器只保留最新一条：软件还没读走就再次测量，旧结果会被覆盖、`LOST_COUNT` 加一。结果寄存器**不复位**：在四个结果字中，系统复位只把 `RESULT_SEQ` 置 0，`RESULT_GATE`/`RESULT_EDGE`/`RESULT_PHASE` 保持复位前的值（上电后为未定义值），因此复位后、首次测量完成前以及任何 `resultValid = 0` 的时刻都不得解释这些字段；需要清零结果区时写 `CTRL` 的 `clear` 位。需要中止卡住的在途测量时发 `STOP` 命令（PS 写 `CTRL.forceStop`；`clear` 不清 `busy`、也不中止测量）。与 `Controller` 交互的时序要点：启动时锁存 `GATE_TARGET`（测量期间改写不影响本次测量）；结果在 `out.valid` 那一拍一次性锁存并置中断；「软件清标志」与「新结果到达」同拍时按新结果优先。
 
 ## 目录结构
 
@@ -206,7 +206,7 @@ xmake run Controller                      # 单个测试目标（定位问题用
 
 构建测试目标前会自动调用生成入口：每个 `<Name>Verilator` 目标先执行 `./mill emit <Name>`（只生成该目标对应的模块；`test/xmake.lua` 用 `mill.verilator.shared` 规则接入，规则定义在 `script/rule.lua`），再把 `build/chisel/<Name>/filelist.f` 列出的 SV 交给 Verilator。因此改完 RTL 不需要先手工跑 `./mill emit`；要强制重新生成时用 `./mill emit --force <Name>`。
 
-覆盖 `Controller`（复位、闸门/相位计数、窗口跟随、连续测量一致性、强制停止中止在途测量）、`PhaseMeter`（停止握手与强制停止）、`EdgeDetector`、`ResetSynchronizer`、`DspCounter`、`MmcmDrpController`，以及顶层 IP 的 `DigitalPhaseMeterTop`：用 AXI4-Lite BFM 按真实基地址 `0x43C0_0000 + 偏移` 驱动，覆盖复位/寄存器默认值、写数据先到与字节选通、测量启动与中断时序、W1C 与只读寄存器写忽略、结果锁存与 `LOST_COUNT`、`CTRL.clear`、`CTRL.forceStop`（含「无沿卡住 → 强制停止 → busy 清零 → 重新测量」）、目标闸门锁存，以及片内源/外部输入切换。**顶层 AXI 寄存器通路由它守门**：动 `Axi*.scala`、`ControlRegs.scala` 或 `DigitalPhaseMeterTop.scala` 必须跑 `xmake test -v`，并把新寄存器纳入 [`test/DigitalPhaseMeterTop.cpp`](test/DigitalPhaseMeterTop.cpp)。测试目标的注册方式、时间精度与常见陷阱见 [`.agents/skills/dpm-verilator-testing`](.agents/skills/dpm-verilator-testing/SKILL.md)。
+覆盖 `Controller`（复位、闸门/相位计数、窗口跟随、连续测量一致性、强制停止中止在途测量）、`PhaseMeter`（停止握手与强制停止）、`EdgeDetector`、`ResetSynchronizer`、`DspCounter`、`MmcmDrpController`，以及顶层 IP 的 `DigitalPhaseMeterTop`：用 AXI4-Lite BFM 按真实基地址 `0x43C0_0000 + 偏移` 驱动，覆盖复位/寄存器默认值（结果字 `RESULT_GATE/EDGE/PHASE` 不复位、`RESULT_SEQ` 复位为 0）、写数据先到与字节选通、测量启动与中断时序、W1C 与只读寄存器写忽略、结果锁存与 `LOST_COUNT`、`CTRL.clear`、`CTRL.forceStop`（含「无沿卡住 → 强制停止 → busy 清零 → 重新测量」）、目标闸门锁存，以及片内源/外部输入切换。**顶层 AXI 寄存器通路由它守门**：动 `Axi*.scala`、`ControlRegs.scala` 或 `DigitalPhaseMeterTop.scala` 必须跑 `xmake test -v`，并把新寄存器纳入 [`test/DigitalPhaseMeterTop.cpp`](test/DigitalPhaseMeterTop.cpp)。测试目标的注册方式、时间精度与常见陷阱见 [`.agents/skills/dpm-verilator-testing`](.agents/skills/dpm-verilator-testing/SKILL.md)。
 
 ### xsim 仿真（MMCM 联调）
 

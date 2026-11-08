@@ -36,10 +36,10 @@
 #define DPM_REG_CTRL 0x00u        /**< 混合：b0 start（只写）、b1 irqEnable、b2 clear（只写）、b3 forceStop（只写） */
 #define DPM_REG_STATUS 0x04u      /**< 只读 */
 #define DPM_REG_GATE_TARGET 0x08u /**< 读写：目标闸门计数（28 位有效），字节选通写入 */
-#define DPM_REG_RESULT_GATE 0x0Cu /**< 只读：最新结果的 gateCnt */
-#define DPM_REG_RESULT_EDGE 0x10u /**< 只读：最新结果的 edgeCnt */
-#define DPM_REG_RESULT_PHASE 0x14u/**< 只读：最新结果的 phaseCnt */
-#define DPM_REG_RESULT_SEQ 0x18u  /**< 只读：最新结果的记录序号 */
+#define DPM_REG_RESULT_GATE 0x0Cu /**< 只读：最新结果的 gateCnt（不复位；须 resultValid=1） */
+#define DPM_REG_RESULT_EDGE 0x10u /**< 只读：最新结果的 edgeCnt（不复位；须 resultValid=1） */
+#define DPM_REG_RESULT_PHASE 0x14u/**< 只读：最新结果的 phaseCnt（不复位；须 resultValid=1） */
+#define DPM_REG_RESULT_SEQ 0x18u  /**< 只读：最新结果的记录序号（复位为 0；须 resultValid=1） */
 #define DPM_REG_LOST_COUNT 0x1Cu  /**< 只读：结果被覆盖丢失的次数 */
 #define DPM_REG_IRQ_STATUS 0x20u  /**< W1C：b0 irqPending、b1 resultValid、b2 lostCount */
 #define DPM_REG_VERSION 0x24u     /**< 只读：0x44504D02 */

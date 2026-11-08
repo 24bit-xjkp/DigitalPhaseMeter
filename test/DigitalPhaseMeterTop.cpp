@@ -450,7 +450,7 @@ namespace
 
 TEST_SUITE("DigitalPhaseMeterTop")
 {
-    TEST_CASE("reset keeps the AXI slave idle and releases registers to their defaults")
+    TEST_CASE("reset keeps the AXI slave idle and returns control/status registers to their defaults")
     {
         dut_context_t ctx{ctx_opt};
         ctx.set_base_name("DigitalPhaseMeterTop.reset");
@@ -524,9 +524,8 @@ TEST_SUITE("DigitalPhaseMeterTop")
             check_sig_status(value, false, false, false, true);
 
             const auto record{co_await read_record(port)};
-            CHECK_EQ(record.gate_cnt, 0u);
-            CHECK_EQ(record.edge_cnt, 0u);
-            CHECK_EQ(record.phase_cnt, 0u);
+            // RESULT_GATE/EDGE/PHASE 不复位：首次复位后是未定义值，不能当默认值检查；
+            // RESULT_SEQ 随序号计数器复位为 0。结果只在 STATUS.resultValid = 1 时才可解释。
             CHECK_EQ(record.seq, 0u);
 
             co_await port.stimulate(2zu);
@@ -1063,6 +1062,9 @@ TEST_SUITE("DigitalPhaseMeterTop")
             value = co_await axi_read(port, reg_status);
             check_status(value, true, false, false, false);
 
+            // 结果字不复位：先记录复位后的（未定义）值，用于验证 forceStop 不会改动结果区
+            const auto result_before{co_await read_record(port)};
+
             // CTRL.forceStop：撤销 busy，不产生结果、不置中断挂起位，也不改动结果区
             co_await axi_write(port, reg_ctrl, bit_mask(ctrl_irq_enable) | bit_mask(ctrl_force_stop));
             co_await port.stimulate(2zu);
@@ -1071,14 +1073,12 @@ TEST_SUITE("DigitalPhaseMeterTop")
             CHECK_EQ(port.interrupt, 0u);
             value = co_await axi_read(port, reg_irq_status);
             check_irq_status(value, false, false, false);
-            value = co_await axi_read(port, reg_result_gate);
-            CHECK_EQ(value, 0u);
-            value = co_await axi_read(port, reg_result_edge);
-            CHECK_EQ(value, 0u);
-            value = co_await axi_read(port, reg_result_phase);
-            CHECK_EQ(value, 0u);
-            value = co_await axi_read(port, reg_result_seq);
-            CHECK_EQ(value, 0u);
+            const auto result_after{co_await read_record(port)};
+            CHECK_EQ(result_after.gate_cnt, result_before.gate_cnt);
+            CHECK_EQ(result_after.edge_cnt, result_before.edge_cnt);
+            CHECK_EQ(result_after.phase_cnt, result_before.phase_cnt);
+            CHECK_EQ(result_after.seq, result_before.seq);
+            CHECK_EQ(result_after.seq, 0u);
             value = co_await axi_read(port, reg_lost_count);
             CHECK_EQ(value, 0u);
 
@@ -1098,7 +1098,7 @@ TEST_SUITE("DigitalPhaseMeterTop")
         MESSAGE(ctx.stats());
     }
 
-    TEST_CASE("a second reset returns status and configuration to their defaults")
+    TEST_CASE("a second reset returns status/configuration to their defaults but keeps measurement results")
     {
         dut_context_t ctx{ctx_opt};
         ctx.set_base_name("DigitalPhaseMeterTop.second_reset");
@@ -1115,6 +1115,7 @@ TEST_SUITE("DigitalPhaseMeterTop")
 
             // 先让 DUT 处于「有结果、片内源已选中」的非默认状态
             CHECK_MESSAGE(co_await run_measurement(port, gate_fast), "测量的中断超时");
+            const auto result_before{co_await read_record(port)};
             co_await axi_write(port, reg_sig_ctrl, bit_mask(sig_enable) | bit_mask(sig_select));
 
             // 复位再次生效：中断清除、状态归零、AXI 从口重新不接受传输
@@ -1134,8 +1135,12 @@ TEST_SUITE("DigitalPhaseMeterTop")
             check_status(value, false, false, false, false);
             value = co_await axi_read(port, reg_gate_target);
             CHECK_EQ(value, 0u);
-            value = co_await axi_read(port, reg_result_seq);
-            CHECK_EQ(value, 0u);
+            // 结果字不复位：二次复位保留上一次测量值；只有 RESULT_SEQ 随序号计数器复位为 0
+            const auto result_after{co_await read_record(port)};
+            CHECK_EQ(result_after.gate_cnt, result_before.gate_cnt);
+            CHECK_EQ(result_after.edge_cnt, result_before.edge_cnt);
+            CHECK_EQ(result_after.phase_cnt, result_before.phase_cnt);
+            CHECK_EQ(result_after.seq, 0u);
             value = co_await axi_read(port, reg_version);
             CHECK_EQ(value, version_value);
             value = co_await axi_read(port, reg_sig_ctrl);

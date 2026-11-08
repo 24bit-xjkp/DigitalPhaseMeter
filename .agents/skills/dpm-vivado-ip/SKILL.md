@@ -166,12 +166,13 @@ xsim <snapshot> -runall
   - `run_handoff_tb.sh` 默认每次走 `./mill emit` 生成入口（按内容缓存判断是否重跑，与其它生成入口一致）；
     确认产物最新时用 `--no-gen`。
 - **顶层 AXI 寄存器通路的守门人是 Verilator 顶层用例 `test/DigitalPhaseMeterTop.cpp`**：它用
-  AXI4-Lite BFM 按真实基地址 `0x43C0_0000 + 偏移` 驱动，覆盖复位/寄存器默认值、写数据先到与
+  AXI4-Lite BFM 按真实基地址 `0x43C0_0000 + 偏移` 驱动，覆盖复位/寄存器默认值（结果字
+  `RESULT_GATE/EDGE/PHASE` 不复位、`RESULT_SEQ` 复位为 0）、写数据先到与
   字节选通、测量启动与中断/W1C 时序、结果锁存与 `CTRL.clear`、输入源切换等。本仓库实测过一次
   「寄存器堆往测量域的配置输出被 firtool 优化成常量 0」的缺陷——Verilator 单元测试全绿、
   只有经过寄存器堆的顶层用例能抓到。因此**动 AXI 寄存器通路必须跑 `xmake test -v`**（含
   `DigitalPhaseMeterTop`），并把新寄存器纳入 `test/DigitalPhaseMeterTop.cpp`（读回、字节选通、
-  复位默认值、以及「配置真的改变了测量结果」这类有区分度的断言）。
+  复位默认值（结果字按「不复位」语义检查）、以及「配置真的改变了测量结果」这类有区分度的断言）。
 
 ## 片内信号源：裸 MMCM + 极简 DRP 控制器（当前实现）
 

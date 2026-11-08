@@ -29,11 +29,8 @@ for _, file in ipairs(os.files("*.cpp")) do
         add_values("mill.target", name)
         -- chisel3.ltl.AssertProperty 的 checker/bind 在 build/chisel/<Name>/verification 下；
         -- bind 文件用 `include "layers-*.sv"`，需要把 verification 目录加入 include 搜索路径
-        local target_options = {}
-        for _, option in ipairs(verilator_options) do
-            table.insert(target_options, option)
-        end
-        local verification_dir = path.join(os.projectdir(), "build/chisel", name, "verification")
+        local target_options = table.clone(verilator_options)
+        local verification_dir = path.join(get_config("builddir"), "chisel", name, "verification")
         table.insert(target_options, "-I" .. verification_dir)
         table.insert(target_options, "-I" .. path.join(verification_dir, "assert"))
         add_values("verilator.flags", target_options)

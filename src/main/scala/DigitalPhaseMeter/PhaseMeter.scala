@@ -99,7 +99,7 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
     private val phaseCntEnable = RegInit(false.B)
     // forceStop 必须与 idle 同拍撤销使能：否则「sig1 之后、sig2 之前」被中止时使能会残留，
     // 下一次测量在下一个 sig2 沿之前启动，相位计数器就会从退出 idle 起提前开窗，phaseCnt 偏大。
-    when(forceStop || state === sIdle || pulseSig2Valid) { phaseCntEnable := false.B }
+    when(forceStop || isIdle || pulseSig2Valid) { phaseCntEnable := false.B }
         .elsewhen(pulseSig1Valid) { phaseCntEnable := true.B }
     AssertProperty(!(isIdle && phaseCntEnable), "phaseCntEnable must be low while idle")
 
