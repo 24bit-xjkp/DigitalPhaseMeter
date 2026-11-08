@@ -1,7 +1,7 @@
 package DigitalPhaseMeter
 
 import chisel3._
-import chisel3.ltl._
+import chisel3.ltl.AssertProperty
 import chisel3.util._
 
 /** 相位计输入信号，sig1为参考信号，sig2为被测信号

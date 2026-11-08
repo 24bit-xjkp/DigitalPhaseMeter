@@ -1,8 +1,8 @@
 package DigitalPhaseMeter
 
 import chisel3._
-import chisel3.experimental.BundleLiterals._
-import chisel3.experimental.dataview._
+import chisel3.experimental.BundleLiterals.AddBundleLiteralConstructor
+import chisel3.experimental.dataview.RecordUpcastable
 import chisel3.util._
 
 /** 控制器输入负载

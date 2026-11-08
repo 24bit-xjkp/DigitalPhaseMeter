@@ -1,10 +1,10 @@
 package DigitalPhaseMeter
 
 import chisel3._
-import chisel3.layer._
-import chisel3.layers._
-import chisel3.ltl.Sequence._
-import chisel3.ltl._
+import chisel3.layer.block
+import chisel3.layers.Verification
+import chisel3.ltl.AssertProperty
+import chisel3.ltl.Sequence.BoolSequence
 import chisel3.util._
 
 /** AXI4-Lite 从口

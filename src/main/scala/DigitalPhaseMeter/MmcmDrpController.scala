@@ -1,8 +1,8 @@
 package DigitalPhaseMeter
 
 import chisel3._
-import chisel3.ltl.Sequence._
-import chisel3.ltl._
+import chisel3.ltl.AssertProperty
+import chisel3.ltl.Sequence.BoolSequence
 import chisel3.util._
 
 /** MMCM 动态重配置（DRP）控制器
