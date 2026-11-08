@@ -1,6 +1,6 @@
 ---
 name: dpm-chisel-rtl
-description: 'Use when: 在本仓库（DigitalPhaseMeter）新增、修改或重构 Chisel RTL（src/main/scala/DigitalPhaseMeter/*.scala），或需要生成、更新供 Verilator 测试与综合使用的 SystemVerilog。覆盖模块与 Emit 主类写法、生成入口的正确调用形式（Verilator 测试目标构建时会自动调用）、产物目录（每个模块一份，仿真与综合共用）、filelist.f 的消费方式、时钟域与复位分配约定，以及 Chisel 信号名到 SV 端口名的映射。'
+description: 'Use when: 在本仓库（DigitalPhaseMeter）新增、修改或重构 Chisel RTL（src/*.scala），或需要生成、更新供 Verilator 测试与综合使用的 SystemVerilog。覆盖模块与 Emit 主类写法、生成入口的正确调用形式（Verilator 测试目标构建时会自动调用）、产物目录（每个模块一份，仿真与综合共用）、filelist.f 的消费方式、时钟域与复位分配约定，以及 Chisel 信号名到 SV 端口名的映射。'
 argument-hint: '要新增或修改的 RTL 模块（如 Controller、PhaseMeter）'
 ---
 
@@ -8,7 +8,7 @@ argument-hint: '要新增或修改的 RTL 模块（如 Controller、PhaseMeter�
 
 ## 适用场景
 
-- 新增或修改 `src/main/scala/DigitalPhaseMeter/` 下的模块、参数与端口。
+- 新增或修改 `src/` 下的模块、参数与端口（Mill 扁平布局：`.scala` 直接放在 `src/`，没有 `main/scala` 与包目录层级）。
 - 重新生成 SystemVerilog，供 `test/` 下的 Verilator 测试或后续 Vivado 综合使用。
 - 排查"测试看不到新端口""生成的 SV 是旧版本""输出文件位置不对"这类问题。
 

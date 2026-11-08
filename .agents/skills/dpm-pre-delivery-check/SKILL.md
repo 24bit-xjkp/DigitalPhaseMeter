@@ -22,7 +22,7 @@ argument-hint: '本次要交付的改动'
 | C++ | `clang-format -i <改动的 .cpp>`（配置 `.clang-format`，`ColumnLimit = 130`、4 空格缩进） |
 | Scala | `scalafmt`（就地格式化）；`scalafmt --test` 只检查、不改文件 |
 
-格式化范围包括 `src/main/scala/**/*.scala` 与 Mill 构建定义 `build.mill`（Scala 3 语法，按 Scala 3 方言格式化）；`build/`、`target/`、`out/` 等构建缓存/产物目录不参与格式检查。`scalafmt --test` 只检查不改文件，是提交前的最低要求；就地修复用 `scalafmt`。
+格式化范围包括 `src/**/*.scala` 与 Mill 构建定义 `build.mill`（Scala 3 语法，按 Scala 3 方言格式化）；`build/`、`target/`、`out/` 等构建缓存/产物目录不参与格式检查。`scalafmt --test` 只检查不改文件，是提交前的最低要求；就地修复用 `scalafmt`。
 
 ## 2. 静态检查
 
@@ -78,7 +78,7 @@ scalafmt                               # 格式化；scalafmt --test 只检查�
   - `-infer-structural` 关闭（即 `-Xlint:_,-infer-structural`）：Chisel 每个模块的 `io` 都是匿名 `Bundle`，访问其成员会合法触发「推断结构类型 / reflective call」告警。
   - 不启用 `-Wvalue-discard` 与 `-Wnonunit-statement`：Chisel 的 `when(...)` 返回 `WhenContext` 且几乎总在语句位置，这两条会把所有条件赋值误报成 unused value。
 - **误报的处理约定**：确属误报时用行内 `// scalafix:off <Rule>` / `// scalafix:on <Rule>` 精确抑制并写清原因；编译器告警用 `@nowarn` 精确抑制，不要整体关闭规则或检查项。本仓库当前没有需要抑制的告警。
-- **覆盖范围**：Scalafix 只作用于 `src/main/scala`（Mill 模块源码）。`build.mill` 是 Mill 构建定义（Scala 3 语法，由 Mill 自己编译），不在 Scalafix 规则范围内，其编译错误与格式问题要单独处理。
+- **覆盖范围**：Scalafix 只作用于 `src`（Mill 模块源码）。`build.mill` 是 Mill 构建定义（Scala 3 语法，由 Mill 自己编译），不在 Scalafix 规则范围内，其编译错误与格式问题要单独处理。
 - 当前代码里已按下述方式处理过这类告警，改动时不要重新引入：5 处未使用 import 已删除，导入分组顺序统一交给 `OrganizeImports` 维护；`CdcToggleHandShake.Sender.send` 改成显式空参列表的 `def send(): Unit`（原 nullary-unit 写法容易被误当纯函数调用）；`EdgeDetector` 对 `Enumeration` 的 match 补 `case _` 覆盖 `both`（`Type` 不是 sealed 类型，行为不变）。
 
 ## 3. 回归测试

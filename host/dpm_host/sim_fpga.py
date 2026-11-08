@@ -2,7 +2,7 @@
 
 模型分三块，语义分别对齐 RTL / 协议文档：
 
-1. **寄存器语义**（对齐 `src/main/scala/DigitalPhaseMeter/ControlRegs.scala` 与
+1. **寄存器语义**（对齐 `src/ControlRegs.scala` 与
    `ps/include/dpm_regs.h`）：
 
    | 偏移  | 名称          | 语义                                                       |

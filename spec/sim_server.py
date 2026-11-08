@@ -13,7 +13,7 @@
     python3 spec/sim_server.py --pty --freq-hz 25e6 --phase-mdeg 90e3 --gate 2000
     python3 spec/sim_server.py --pty --lock-lost           # 模拟 MMCM 失锁（sourceReady=0）
 
-实现的寄存器语义与 `src/main/scala/DigitalPhaseMeter/ControlRegs.scala` 一致：
+实现的寄存器语义与 `src/ControlRegs.scala` 一致：
 CTRL/STATUS/GATE_TARGET/四个结果寄存器/LOST_COUNT/IRQ_STATUS(W1C)/VERSION/CAPS/
 SIG_CTRL/SIG_STATUS，以及「结果未读走即被覆盖 → lostCount++」「busy 期间忽略 start」
 「GATE_TARGET 在启动拍锁存（测量期间改写不影响本次测量）」

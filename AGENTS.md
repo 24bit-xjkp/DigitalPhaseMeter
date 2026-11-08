@@ -13,7 +13,7 @@
 ## 目录结构与任务优先级
 
 ```text
-├── src/main/scala/DigitalPhaseMeter/   # Chisel RTL：每个模块一个 .scala，附 Emit<Name> 生成主类
+├── src/                                # Chisel RTL：每个模块一个 .scala，附 Emit<Name> 生成主类
 ├── test/                               # Verilator C++ 测试：每个 <Name>.cpp 自动注册一个测试目标（构建时自动生成对应 Chisel 产物）
 ├── sim/                                # xsim 的 SystemVerilog 激励与运行脚本（只做真实 MMCM 联调）
 ├── vivado/                             # IP 打包、block design、综合实现脚本与顶层约束

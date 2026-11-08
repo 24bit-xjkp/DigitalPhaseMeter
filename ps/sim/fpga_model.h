@@ -6,7 +6,7 @@
  * 因此 `dpm_cmd.c` 不需要任何条件编译。
  *
  * 建模范围与假设（写进 `ps/README.md`，避免把模型当成硬件）：
- *   1. 寄存器语义逐个对齐 `src/main/scala/DigitalPhaseMeter/ControlRegs.scala`：
+ *   1. 寄存器语义逐个对齐 `src/ControlRegs.scala`：
  *      start 脉冲（busy 期间忽略）、busy/resultValid/lost/irqPending、
  *      结果被覆盖即 lostCount++、IRQ_STATUS 的 W1C、
  *      CTRL.clear 写当拍生效（只复位结果区与标志，不清 busy；在途测量继续跑完并照常锁存结果）、

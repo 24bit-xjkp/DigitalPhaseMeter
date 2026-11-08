@@ -4,7 +4,7 @@
  * 本文件**不接触板级外设**：所有 PL 访问经 `dpm_io_t`，因此 PS 侧与宿主机验证台
  * 共用同一份实现（见 `ps/include/dpm_cmd.h`）。
  *
- * 与 PL 的交互要点（`src/main/scala/DigitalPhaseMeter/ControlRegs.scala`）：
+ * 与 PL 的交互要点（`src/ControlRegs.scala`）：
  *   - 每次写 CTRL 都要带上当前 irqEnable（b1 是普通读写位）；
  *   - 结果读走后必须写 IRQ_STATUS = PENDING | RESULT_READ，否则下一次结果被记为丢失；
  *   - 片内源配置（SIG_CTRL）写入后，写通道可能被拉低 ready，配置要轮询 SIG_STATUS 确认；

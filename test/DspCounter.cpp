@@ -7,7 +7,7 @@ import verilator_utils.full;
 #include <verilator_bwd.hpp>
 
 // DspCounter 是 450MHz 测量域里的 32 位使能计数器（DSP48E1 累加器实现，见
-// src/main/scala/DigitalPhaseMeter/DspCounter.scala）。它在 PhaseMeter 里分别累计
+// src/DspCounter.scala）。它在 PhaseMeter 里分别累计
 // edgeCnt 与 phaseCnt，因此要验证三件事：使能计数、清零优先、以及计数超过 16 位后仍然正确
 // （实现上把 `cnt + enable` 交给 DSP，位宽行为靠断言与观测确认）。
 // Controller 的测量用例已经覆盖「计数器在真实测量通路里的行为」，这里补的是模块级语义。

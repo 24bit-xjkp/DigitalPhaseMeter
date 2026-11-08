@@ -18,7 +18,7 @@ import java.security.MessageDigest
 import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
 
-object `package` extends SbtModule with ScalafixModule {
+object `package` extends ScalaModule with ScalafixModule {
     def scalaVersion = "2.13.18"
     def chiselVersion = "7.16.0"
 

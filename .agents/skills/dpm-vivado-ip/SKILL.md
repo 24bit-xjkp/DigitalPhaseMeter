@@ -184,7 +184,7 @@ dpm_src_drp（AXI4-Lite @0x43C1_0000）──► DRP 口 + mmcm_reset ──► 
 
 - `vivado/rtl/dpm_mmcm_src.v`：`MMCME2_ADV` 薄封装（BUFG 反馈 + 每个输出一路 `BUFGCE`/`BUFH`
   的 8 拍 Safe Clock Startup）。
-- `src/main/scala/DigitalPhaseMeter/MmcmDrpController.scala` → `vivado/package_src_ip.tcl`
+- `src/MmcmDrpController.scala` → `vivado/package_src_ip.tcl`
   打包成 `xjkp.org:dpm:dpm_src_drp:1.0`。
 - 重配置时序由控制器内部完成（软件只写 8 个 16 位寄存器镜像 + `0x28` LOAD）：
   `RST=1`（≥8 个 DCLK）→ 8 笔 DRP 写（DEN/DWE 各一拍，等 DRDY）→ `RST=0` → MMCM 重新锁定。

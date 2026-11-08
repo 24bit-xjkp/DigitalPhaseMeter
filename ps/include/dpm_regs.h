@@ -2,7 +2,7 @@
  *  @brief PL 侧 AXI4-Lite 寄存器映射（PS 视角）与 MMCM 动态重配置口定义。
  *
  * 本文件是 PS 侧软件对 PL 的唯一 ABI 描述：偏移量与位域必须与
- * `src/main/scala/DigitalPhaseMeter/ControlRegs.scala` 完全一致（同一次提交内保持一致）。
+ * `src/ControlRegs.scala` 完全一致（同一次提交内保持一致）。
  * 权威来源是 Verilog/Chisel 侧，本文件只用宏把它表达出来，不改语义。
  *
  * 约定：

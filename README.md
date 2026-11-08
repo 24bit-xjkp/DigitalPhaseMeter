@@ -140,7 +140,7 @@ DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高�
 ## 目录结构
 
 ```text
-src/main/scala/DigitalPhaseMeter/   Chisel 源码，每个模块一个文件，附 Emit<Name> 生成主类
+src/                                Chisel 源码，每个模块一个文件，附 Emit<Name> 生成主类
 test/                               Verilator C++ 测试（测量通路与顶层 IP），每个 <Name>.cpp 自动注册一个测试目标（构建时自动生成对应 Chisel 产物）
 sim/                                Vivado xsim 的 SystemVerilog 激励与运行脚本（只做真实 MMCM 联调）
 vivado/                             Vivado IP 打包、block design、综合实现脚本与顶层约束
@@ -195,7 +195,7 @@ Verilator 测试目标在编译 SV 之前会自动调用下文「生成 SystemVe
 scalafmt --test                # 格式检查（scalafmt 就地修复）
 ```
 
-Scalafix 通过 Mill 的 scalafix 插件执行，规则与配置仍在 `.scalafix.conf`，只作用于 `src/main/scala`。Mill 构建定义 `build.mill` 由 Mill 自己编译（Scala 3），不在 Scalafix 规则范围内，但同样要按 scalafmt 风格格式化；格式化用 scalafmt CLI，不是 Mill 任务。规则内容、有意关闭的检查项与验证报告要求见 [`.agents/skills/dpm-pre-delivery-check`](.agents/skills/dpm-pre-delivery-check/SKILL.md)。
+Scalafix 通过 Mill 的 scalafix 插件执行，规则与配置仍在 `.scalafix.conf`，只作用于 `src`。Mill 构建定义 `build.mill` 由 Mill 自己编译（Scala 3），不在 Scalafix 规则范围内，但同样要按 scalafmt 风格格式化；格式化用 scalafmt CLI，不是 Mill 任务。规则内容、有意关闭的检查项与验证报告要求见 [`.agents/skills/dpm-pre-delivery-check`](.agents/skills/dpm-pre-delivery-check/SKILL.md)。
 
 ### Verilator 测试（测量通路与顶层 IP）
 
