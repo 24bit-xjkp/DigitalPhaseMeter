@@ -48,12 +48,14 @@ if {![file exists [file join $rtl_dir filelist.f]]} {
     error "找不到 $rtl_dir/filelist.f，请先运行 ./mill emit 生成入口（见文件头注释）"
 }
 
-# 读取 filelist.f（firtool 的拓扑顺序即编译顺序）
+# 读取 filelist.f（firtool 的拓扑顺序即编译顺序）。
+# `verification/` 下是 chisel3.ltl.AssertProperty 提取出的 SVA checker/bind 文件，只给仿真用；
+# IP 综合不定义任何仿真宏，读进去会被 Vivado 报 `Synth 8-2898`，因此打包时直接剔除。
 set sources {}
 set fp [open [file join $rtl_dir filelist.f] r]
 foreach line [split [read $fp] "\n"] {
     set line [string trim $line]
-    if {$line ne ""} {
+    if {$line ne "" && [string first "verification/" $line] != 0} {
         lappend sources [file join $rtl_dir $line]
     }
 }

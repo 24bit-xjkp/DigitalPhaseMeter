@@ -2,6 +2,7 @@ package DigitalPhaseMeter
 
 import chisel3._
 import chisel3.experimental.dataview.RecordUpcastable
+import chisel3.ltl._
 import chisel3.util._
 
 /** 控制/状态与测量结果寄存器堆
@@ -167,6 +168,9 @@ class ControlRegs(
     // response.valid 时撤销，因此请求只会在 Controller idle 且 busy=0 的周期出现
     io.request.valid := startPulse && !busy
     io.request.bits.targetGate := targetGate.take(gateCntWidth)
+    // 结果只应属于一笔在途测量；启动脉冲与结果锁存不能同拍（busy 门控与 Controller 状态机共同保证）
+    AssertProperty(!(io.response.fire && !busy), "response while not busy")
+    AssertProperty(!(io.request.fire && io.response.fire), "request and response in the same cycle")
     when(io.request.fire) { busy := true.B }
 
     // ---- 结果锁存：只保留最新一条，被覆盖的旧结果计入丢失 ----

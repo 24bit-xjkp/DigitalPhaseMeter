@@ -26,9 +26,12 @@ object EmitFoo extends Main {
 
 - `Main`（定义在 `Utils.scala`）提供 `emitSystemVerilog`：创建输出目录、调用 `ChiselStage.emitSystemVerilogFile`；程序收到的参数原样转交给 `ChiselStage`（不再有 `--type` 之类被 `Main` 摘掉的选项，见下文）。
 - 输出目录为 `build/chisel/<Name>/`（**每个模块只有一份产物**），`<Name>` 由主类名剥离 `Emit` 前缀得到（`EmitFoo` → `Foo`）。需要与类名不同的目录名时显式传第二个参数。
-- 传给 firtool 的固定选项是 `-disable-all-randomization`、`-default-layer-specialization=enable`、
-  `--lowering-options=emittedLineLength=120` 与 `--preserve-aggregate=1d-vec`；`--split-verilog` 与
-  `--target-dir` 由 `emitSystemVerilog` 自动追加。`emittedLineLength` 只改输出格式（单行代码上限
+- 传给 firtool 的固定选项是 `-disable-all-randomization`、`--lowering-options=emittedLineLength=120`、
+  `--preserve-aggregate=1d-vec` 与 `--verification-flavor=sva`；`--split-verilog` 与
+  `--target-dir` 由 `emitSystemVerilog` 自动追加。**不要**加 `-default-layer-specialization=enable`：
+  它会把 `AssertProperty` 的断言直接内联到主 SV，丢失 layer 提取，Vivado 综合会对每条并发断言报
+  `[Synth 8-2898]`（见下文「硬件断言与形式化」）。
+  `emittedLineLength` 只改输出格式（单行代码上限
   放宽到 120 字符）；`--preserve-aggregate=1d-vec` 让一维 `Vec`（如 `MmcmDrpController` 的
   `daddrTable`/`diTable`）保留为具名 packed array，不改变端口与逻辑（对未改动模块，生成的 SV 除
   位置注释外与关闭该选项时逐字节相同）。位置注释保持 firtool 默认的 `// <源文件> <行列>` 形式
@@ -228,6 +231,11 @@ Verilator 与 xsim / Vivado 都能直接编译。
   `finishMeasure`（中止的测量不锁存结果），`PhaseMeter` 门控启动/停止应答。复位后还要保证脉冲寄存器
   有确定初值，不能依赖 `--x-assign unique` 下的随机值。顶层用例要覆盖「源无边沿 → busy 卡死 →
   写 forceStop → busy 清零 → 重新启动测量成功」。
+- **`PhaseMeter` 的 `phaseCntEnable` 必须随 `forceStop`/idle 同拍清零**：只在 `pulseSig2Valid` 清会让
+  「sig1 沿之后、sig2 沿之前」被强制停止的使能残留；下一次测量若在下一个 sig2 沿之前启动，
+  `clearCnt` 释放后相位计数器会从退出 idle 起就开窗，`phaseCnt` 多计「退出 idle → 第一个 sig1 沿」
+  的间隙（最多接近一个参考周期）。现有 Controller/PhaseMeter 用例在 forceStop 后都等了超过一个
+  sig2 周期才重启，碰不到这条。`PhaseMeter` 里的 `assert(!(isIdle && phaseCntEnable))` 守住它。
 - **数据量只有几个字时不要引入片内存储**：一次测量的结果只有 4 个字，直接把结果锁存进可由 PS 读回的
   只读寄存器（GPIO 式数据通道）远比「BRAM + 独立 AXI4 突发口」简单——后者要 AXI4 全速从口、双口 RAM、
   突发/选通/`SLVERR` 处理与地址译码，前者只要几个寄存器加一次 `out.valid` 锁存。选通道先看数据量，
@@ -322,6 +330,30 @@ Verilator 与 xsim / Vivado 都能直接编译。
 - 跨域模块的目的域复位**由调用方给**（如 DSP 域复位由 `Controller` 产生、传给它例化的高速域模块），
   不要在模块内部用 `Module.reset` 重新派生一份——复位释放必须与消费它的时钟同域。
 - 不要为了仿真方便改变寄存器的复位方式；测试侧通过复位序列获得确定初值（见 `dpm-verilator-testing`）。
+
+## 硬件断言与形式化
+
+- 模块内的不变量用 `chisel3.ltl.AssertProperty(cond, "message")`（`require` 是 elaboration 期检查，
+  不是硬件断言）。`AssertProperty` 默认使用内建的 `Verification.Assert` 层（`LayerConfig.Extract`）：
+  firtool 把断言提取到 `build/chisel/<Name>/verification/assert/<Module>_Verification_Assert.sv`
+  （checker）和 `layers-<Module>-Verification-Assert.sv`（bind），主 SV 里没有断言。
+- `Utils.emitSystemVerilog` 在生成后把 `verification/` 下的 bind 文件补进 `filelist.f`；Verilator 与
+  xsim 需要 checker+bind，并分别用 `test/xmake.lua` 的 `-I`、`sim/run_handoff_tb.sh` 的 `-i` 把
+  `build/chisel/<Name>/verification` 加入 include 搜索路径。Vivado 的 `package_ip.tcl` /
+  `package_src_ip.tcl` 按 `verification/` 前缀过滤 filelist，综合看不到断言，因此 0 warning。
+- 只断言测试看不到的性质：跨模块协议/FSM 状态一致性、厂商 DRC、状态与控制标志的一致性（例如
+  `PhaseMeter` 的 request 可接收状态、`MmcmDrpController` 的 RST 有效 + 只写、`ControlRegs` 的
+  busy/结果一致性）。需要“上一拍”/时序性质时直接用 `chisel3.ltl` 的 `Property`/`Sequence`/`|=>`
+  写 `AssertProperty`：checker 只进仿真，不占综合，也不需要再为断言引入只服务断言的触发器。当前 10 条：
+  6 条组合条件 + 4 条时序（AXI `bvalid`/`rvalid` 保持、`rdata` 稳定、DRP `DEN` 单拍）。需要“上一拍”
+  数据时，把寄存器放进 `block(Verification.Assert)`（如 `Axi4LiteSlave` 的 `rDataLast`），它会随
+  checker 一起被提取，不会进综合。
+- 断言里不要引用无复位值的寄存器（`Reg(Bool())` 在 xsim 复位后可能是 X）；用 `RegInit` 的寄存器。
+- `AssertProperty` 会自动生成 `hasBeenResetReg` + `disable iff`：复位同步完成前不检查断言，因此**不需要**
+  额外的原始复位端口。在 `+verilator+rand+reset+2` 下验证过：复位前不误报；复位撤销后断言生效
+  （临时去掉 `phaseCntEnable` 的清零项会被 checker 抓住）。
+- `chisel3.ltl` 的 `eventually/always` 需要 formal/BMC 流程（本仓库没有）；`|->`/`|=>` 在 Verilator
+  与 xsim 都可用。需要完整形式化时用独立的 formal harness。
 
 ## 格式与检查
 

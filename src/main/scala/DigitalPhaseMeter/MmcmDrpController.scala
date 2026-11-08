@@ -1,6 +1,8 @@
 package DigitalPhaseMeter
 
 import chisel3._
+import chisel3.ltl.Sequence._
+import chisel3.ltl._
 import chisel3.util._
 
 /** MMCM 动态重配置（DRP）控制器
@@ -173,6 +175,12 @@ class MmcmDrpController extends TopModule {
     drp_dwe := isWrite
     // 复位在「按住 + 8 笔写 + 等 DRDY」期间保持拉高，写完放开
     mmcm_reset := state.isOneOf(sResetHold, sWrite, sWait)
+
+    // unisim 对 DRP 写的硬性要求（上板同样必须遵守）：RST 有效期间才能改配置、DEN/DWE 只高一拍。
+    // AssertProperty 会自动加 hasBeenResetReg/disable iff，复位同步完成前不会检查。
+    AssertProperty(!drp_den || mmcm_reset, "DRP access while MMCM is not held in reset")
+    AssertProperty(drp_dwe === drp_den, "DRP controller only performs writes")
+    AssertProperty(drp_den |=> !drp_den, label = Some("DRP DEN must be high for a single cycle"))
 
     switch(state) {
         is(sIdle) { when(loadPending) { state := sResetHold } }

@@ -39,6 +39,13 @@ vivado -mode batch -source vivado/query_runs.tcl        # 查看 run 的策略/�
 IP 打包同样按 `filelist.f` 取文件，因此生成模块名/文件名变化（例如 `EdgeDetector` 按 `desiredName`
 生成 `EdgeDetectorRising.sv`）不需要改 Tcl；但这类改动会让旧 XSA/bitstream 过期，需要重跑流程。
 
+**RTL 断言在 `verification/` 独立文件里**：`chisel3.ltl.AssertProperty` 默认使用内建
+`Verification.Assert` 层的 `LayerConfig.Extract`，firtool 生成 checker + `layers-*.sv` bind 文件，主 SV
+不含断言。Verilator / xsim 把 `filelist.f` 里的 checker/bind 一起编译；`package_ip.tcl` /
+`package_src_ip.tcl` 按 `verification/` 前缀过滤 filelist，因此 IP 打包与综合看不到断言，0 warning。
+不要给综合流程加这些 checker/bind，也不要设 `-default-layer-specialization=enable`（会把断言内联回主
+SV，Vivado 报 `Synth 8-2898`）。
+
 ## 增量流程（dpm-vivado-flow）
 
 入口是根 uv workspace 成员 `vivado/flow`（Python，运行时只用标准库）；Tcl worker 在

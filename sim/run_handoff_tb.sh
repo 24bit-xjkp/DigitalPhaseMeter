@@ -103,7 +103,14 @@ for d in "${TOP_RTL_DIR}" "${DRP_RTL_DIR}"; do
 done
 
 echo "== 编译 RTL（dpm_top ${TOP_RTL_DIR##*/} + DRP 控制器 + 裸 MMCM + glbl，共 ${#gen_files[@]} 个生成文件）=="
-"${XVLOG}" --sv --work work "${gen_files[@]}" "${MMCM_RTL}" "${GLBL}"
+# chisel3.ltl.AssertProperty 的绑定文件在 verification/assert 下，include 路径要一并传
+xvlog_includes=()
+for d in "${TOP_RTL_DIR}" "${DRP_RTL_DIR}"; do
+    if [[ -d "${d}/verification" ]]; then
+        xvlog_includes+=(-i "${d}/verification" -i "${d}/verification/assert")
+    fi
+done
+"${XVLOG}" --sv --work work "${xvlog_includes[@]}" "${gen_files[@]}" "${MMCM_RTL}" "${GLBL}"
 
 echo "== 编译测试激励 =="
 "${XVLOG}" --sv --work work "${ROOT_DIR}/sim/${TB_NAME}.sv"

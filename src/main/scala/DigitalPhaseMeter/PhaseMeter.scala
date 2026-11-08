@@ -1,6 +1,7 @@
 package DigitalPhaseMeter
 
 import chisel3._
+import chisel3.ltl._
 import chisel3.util._
 
 /** 相位计输入信号，sig1为参考信号，sig2为被测信号
@@ -63,7 +64,8 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
 
     import PhaseMeterStateEnum._
     private val state = RegInit(sIdle)
-    private val needSendResponse = Reg(Bool())
+    // 复位值取 true：空闲拍本来就会重新置位；给出确定初值，避免 xsim 复位后第一拍为 X
+    private val needSendResponse = RegInit(true.B)
     switch(state) {
         is(sIdle) { when(request) { state := sWaitStart } }
         is(sWaitStart) { when(pulseSig1) { state := sMeasuring } }
@@ -72,6 +74,12 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
     }
     when(forceStop) { state := sIdle }
     private val isIdle = dontTouch(state === sIdle)
+    // 请求只可能在 sIdle（启动）或 sMeasuring（停止）被接收；落到别的状态说明两侧 FSM 失配，
+    // 该请求会被静默丢弃，随后握手永远等不到应答。依赖 50MHz/450MHz 下 CDC 往返短于一个慢周期。
+    AssertProperty(
+        !(request && !state.isOneOf(sIdle, sMeasuring)),
+        "request in a state that cannot accept it"
+    )
     when(isIdle) { needSendResponse := true.B }
     // 强制停止同拍不发送启动/停止应答：本次测量已被中止，慢域不会使用这些应答
     when(state === sWaitStart && pulseSig1 && !forceStop) { responseValid.send() }
@@ -89,7 +97,11 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
     private val pulseSig2Valid = RegNext(pulseSig2)
     // 无复位值在 xsim 里是 X，在第一次测量时经 `cnt + enable` 污染计数器
     private val phaseCntEnable = RegInit(false.B)
-    when(pulseSig2Valid) { phaseCntEnable := false.B }.elsewhen(pulseSig1Valid) { phaseCntEnable := true.B }
+    // forceStop 必须与 idle 同拍撤销使能：否则「sig1 之后、sig2 之前」被中止时使能会残留，
+    // 下一次测量在下一个 sig2 沿之前启动，相位计数器就会从退出 idle 起提前开窗，phaseCnt 偏大。
+    when(forceStop || state === sIdle || pulseSig2Valid) { phaseCntEnable := false.B }
+        .elsewhen(pulseSig1Valid) { phaseCntEnable := true.B }
+    AssertProperty(!(isIdle && phaseCntEnable), "phaseCntEnable must be low while idle")
 
     io.response.bits.edgeCnt := DspCounter(edgeCntWidth, clearCnt, pulseSig1Valid, false)
     io.response.bits.phaseCnt := DspCounter(phaseCntWidth, clearCnt, phaseCntEnable, false)

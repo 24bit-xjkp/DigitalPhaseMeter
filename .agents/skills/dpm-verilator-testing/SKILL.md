@@ -27,7 +27,7 @@ argument-hint: '要测试的模块或用例（如 Controller 的相位测量精�
 
 - **新增测试通常只需新增 `test/<Name>.cpp`**，不要为每个测试手工加目标；`<Name>` 必须与 `build/chisel/<Name>/` 的目录名一致（即 Chisel 模块名）。
 - 测试用例通过 `add_tests("rtl", { runargs = { "+verilator+rand+reset+2", "-fc" } })` 声明；`-fc` 让 doctest 强制彩色输出。
-- **SV 编译选项**是 `--trace-fst --x-assign unique --x-initial unique --coverage -Wno-SYMRSVDWORD`（没有开 `-Wall`，生效的是 Verilator 默认告警集；`SYMRSVDWORD` 是默认开启的告警，顶层端口 `interrupt` 命中 C++ 常用词，所以全局关掉这一条）：波形为 FST，**寄存器在复位前的取值是随机的**（见下文"未初始化寄存器"）。
+- **SV 编译选项**是 `--trace-fst --x-assign unique --x-initial unique --coverage -Wno-SYMRSVDWORD`，另外按目标追加 `-I build/chisel/<Name>/verification` 与 `-I build/chisel/<Name>/verification/assert`（`chisel3.ltl.AssertProperty` 的 checker/bind 文件在这个目录下；没有断言的模块该目录不存在，Verilator 会忽略）（没有开 `-Wall`，生效的是 Verilator 默认告警集；`SYMRSVDWORD` 是默认开启的告警，顶层端口 `interrupt` 命中 C++ 常用词，所以全局关掉这一条）：波形为 FST，**寄存器在复位前的取值是随机的**（见下文"未初始化寄存器"）。
 - **源文件由构建规则自动生成**：`<Name>Verilator` 目标构建时先执行 `./mill emit <Name>`（只生成该目标对应的模块；目标被重建（如 `xmake -r`）、或 `build.mill` 比 `filelist.f` 新时带 `--force`），再把 `filelist.f` 里的 `.sv` 加进编译。`emit` 自身按内容缓存，未变化时直接跳过。改完 RTL 直接跑 `xmake test` / `xmake run` 即可，不要手工先跑生成入口；生成入口本身的用法见 `dpm-chisel-rtl`。
 - **没有逐目标告警豁免表**：接口固有未使用位（`awprot` / `wstrb` 高位等）与复位同步器结构（同一根复位既做本域同步复位、又做同步链的异步复位端）在默认告警集下不会报出，因此不需要按目标关闭检查项。若临时加 `-Wall` 排查，先按 `dpm-chisel-rtl` 的说明处理这两类告警，不要用 `-Wno-fatal` 之类的整体开关。
 - **目录名、目标名与生成模块名可能不同**：模块可用 `desiredName` 改名（`EdgeDetector` 生成
@@ -162,6 +162,15 @@ AXI 互连**不剥离基地址**，从口看到的是完整 32 位地址。测 A
 要么把两个通道同拍举起、在 `@(posedge clk)` **之前**判断握手，要么按
 `test/DigitalPhaseMeterTop.cpp` 的顺序（下降沿驱动、上升沿之后评估采样：AW 握手 → 撤销 →
 W 握手 → 撤销 → 等 B）。本项目 `sim/tb_src_handoff.sv` 早期版本因为这条把整条联调卡死在第一笔写。
+
+### 10. Chisel `assert` 与 `+verilator+rand+reset+2` 的复位前误报
+
+`chisel3.ltl.AssertProperty` 使用内建的 `Verification.Assert` 层，firtool 把断言提取到
+`verification/assert/` 的 checker + bind 文件；`Utils.emitSystemVerilog` 把 bind 文件补进
+`filelist.f`，`test/xmake.lua` 再给每个目标加 `-I`，Verilator 就会像普通源文件一样编译它们（bind
+由 Verilator 的 bind 支持应用）。`AssertProperty` 自带 `hasBeenResetReg` + `disable iff`：复位同步
+完成前不检查，因此不需要额外的复位保护端口；在 `+verilator+rand+reset+2` 下验证过复位前不误报；复位撤销后断言生效（临时删掉 `phaseCntEnable` 清零项会被 checker 抓住）。详细约定见
+`dpm-chisel-rtl` 的“硬件断言与形式化”。
 
 ## 顶层 IP 测试（`test/DigitalPhaseMeterTop.cpp`）
 
