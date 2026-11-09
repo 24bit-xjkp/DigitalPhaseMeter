@@ -619,7 +619,14 @@ static uint32_t handle_set_sig(dpm_cmd_ctx_t* c, const uint8_t* payload, uint8_t
     int rc;
 
     if(dpm_dec_set_sig(payload, len, &freq, &phase) == 0u) { return cmd_reply_err(c, DPM_RESP_ERR_PARAM, out, cap); }
-    if(freq == 0u || phase >= DPM_MMCM_PHASE_FULL_SCALE_MDEG)
+    /* 尼奎斯特上界：片内源由 DSP 域采样/计数，f_sig 不得超过 f_dsp/2（默认 225MHz）。
+     * 必须先于求解判掉——求解器只关心 VCO/D 编码，能把 300MHz 精确解成 600MHz/D=2，
+     * 不判就会把一个会混叠的工作点真的写进 MMCM。 */
+    if(dpm_sig_freq_within_nyquist(freq, c->clk.dsp_hz) == 0)
+    {
+        return cmd_reply_err(c, DPM_RESP_ERR_PARAM, out, cap);
+    }
+    if(phase >= DPM_MMCM_PHASE_FULL_SCALE_MDEG)
     {
         /* 相位请求的**协议范围**是 [0, 360000)：360° 与 0° 同义，满量程不接收。
          * 「能不能实现」由 9 位相位码决定且与 D 有关，要等求解出 D 后再判（见下）。 */

@@ -222,6 +222,30 @@ static void test_phase_bounds(void)
           "10MHz/229.95° 的相位码应为 511（D=%u 相位=%u）", sig.div, sig.phase_milli_deg);
 }
 
+static void test_nyquist(void)
+{
+    dpm_sig_t sig;
+    dpm_sig_solve_t st;
+
+    printf("== 尼奎斯特上界：片内源 f_sig <= f_dsp/2\n");
+    CHECK(dpm_sig_freq_within_nyquist(225000000u, G_F_DSP_HZ) == 1,
+          "225MHz 在 450MHz 的尼奎斯特上界上（含边界）");
+    CHECK(dpm_sig_freq_within_nyquist(225000001u, G_F_DSP_HZ) == 0,
+          "225MHz+1Hz 应越界（上界是 f_dsp/2，不是近似值）");
+    /* 300MHz 在 VCO/D 约束内是精确解（600MHz/D=2）：求解器会接受它，因此尼奎斯特
+     * 检查必须在求解前独立判掉，不能指望频率容差把它挡下来。 */
+    dpm_sig_solve(300000000u, 0u, G_F_SLOW_HZ, &sig, &st);
+    CHECK(st.ok == 1 && st.error_milli_hz == 0u,
+          "300MHz 在 VCO/D 约束内是精确解（证明需要独立的尼奎斯特检查）");
+    CHECK(dpm_sig_freq_within_nyquist(300000000u, G_F_DSP_HZ) == 0, "300MHz 应被尼奎斯特检查拒绝");
+    CHECK(dpm_sig_freq_within_nyquist(0u, G_F_DSP_HZ) == 0, "0Hz 非法");
+    CHECK(dpm_sig_freq_within_nyquist(50000000u, 100000000u) == 1,
+          "上界随 dsp_hz 走：100MHz 的 DSP 时钟允许 50MHz");
+    CHECK(dpm_sig_freq_within_nyquist(50000001u, 100000000u) == 0,
+          "上界随 dsp_hz 走：100MHz 的 DSP 时钟拒绝 50MHz+1Hz");
+    CHECK(dpm_sig_freq_within_nyquist(1000000u, 0u) == 0, "dsp_hz=0 时一律拒绝");
+}
+
 static void test_drp_words(void)
 {
     dpm_sig_t sig;
@@ -300,6 +324,7 @@ int main(void)
     test_solve_all_golden();
     test_snap_and_errors();
     test_phase_bounds();
+    test_nyquist();
     test_drp_words();
     printf("== %d 项检查，%d 项失败\n", g_checks, g_fail);
     return g_fail == 0 ? 0 : 1;

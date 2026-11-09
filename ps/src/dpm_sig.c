@@ -48,6 +48,17 @@ uint32_t dpm_sig_phase_step_ps(uint32_t vco_hz)
     return (uint32_t)(125000000000ull / (uint64_t)vco_hz);
 }
 
+int dpm_sig_freq_within_nyquist(uint32_t freq_hz, uint32_t dsp_hz)
+{
+    /* 测量核心在 DSP 域对两路信号做上升沿检测；f_sig > f_dsp/2 时每个信号周期不足
+     * 两个采样点，边沿会漏检/混叠。上界与硬件无关、只由运行时 dsp_hz 决定，
+     * 因此这里用 `dsp_hz / 2` 而不是写死 225MHz（默认 450MHz 时正好是 225MHz）。 */
+    if (freq_hz == 0u || dsp_hz == 0u) {
+        return 0;
+    }
+    return (freq_hz <= DPM_SIG_NYQUIST_HZ(dsp_hz)) ? 1 : 0;
+}
+
 /* ================================ 求解 ==================================== */
 
 /** cost = |VCO - 1000MHz| / 1MHz + |D - 40|（冻结规则：越接近 BD 初始工作点越好）。 */

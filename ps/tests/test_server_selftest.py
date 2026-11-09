@@ -470,6 +470,17 @@ def test_sig_and_golden(sv: Server, golden: dict, verbose: bool) -> None:
     # 错误路径：非法频率 / 相位 / PAYLOAD 长度
     sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(3_000_000) + u32(0))  # 低于可达下限
     sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(2_000_000_000) + u32(0))  # 高于 VCO 上限（2GHz 无解）
+    # 尼奎斯特上界：片内源由 450MHz 的 DSP 域采样，f_sig 不得超过 225MHz。
+    # 300MHz 在 VCO/D 约束内是精确解（600MHz/D=2），必须由频率检查拒绝，不能靠容差。
+    sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(225_000_001) + u32(0))  # 刚过上界
+    sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(300_000_000) + u32(0))  # 超出上界但有精确 VCO/D 解
+    # 上界本身合法：225MHz = 900MHz/D=4
+    pl = sv.expect_ok(CMD_SET_SIG, u32(225_000_000) + u32(0))
+    check(
+        "SET_SIG(225MHz) 在尼奎斯特上界上合法：VCO=900MHz、D=4",
+        rd_u32(pl, 0) == 225_000_000 and rd_u32(pl, 8) == 900_000_000 and rd_u16(pl, 12) == 4,
+        pl.hex(),
+    )
     # 相位上界 = 9 位相位码（按 D 逐点）：6MHz（D=125）的 200° 需要相位码 556 > 511，
     # MMCM 的字段会截断、相位回绕，必须拒绝；D=40（25MHz）则能表示整个 0~360°。
     sv.expect_err(CMD_SET_SIG, ERR_PARAM, u32(6_000_000) + u32(200_000))
@@ -770,6 +781,23 @@ def test_clean_exit(sv: Server) -> None:
     check("host_main 收到 SIGTERM 干净退出（码 0）", rc == 0, f"rc={rc}")
 
 
+def test_host_main_rejects_above_nyquist(host_main: str) -> None:
+    """验证台的初始 --freq-hz 也遵守尼奎斯特上界（默认 450MHz → 225MHz）。"""
+    proc = subprocess.run(
+        [host_main, "--stdio", "--freq-hz", "300000000"],
+        input=b"",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10.0,
+        check=False,
+    )
+    check(
+        "host_main --freq-hz 300MHz 拒绝启动（退出码 2）",
+        proc.returncode == 2,
+        f"rc={proc.returncode} stderr={proc.stderr.decode(errors='replace').strip()}",
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="DPM 宿主机验证台端到端自测")
     ap.add_argument("--host-main", default=os.path.join(REPO, "ps", "build", "host_main"))
@@ -801,6 +829,7 @@ def main() -> int:
     test_external_source(args.host_main, golden)
     test_long_gate_bounded_wait(args.host_main)
     test_unlocked_internal(args.host_main, golden)
+    test_host_main_rejects_above_nyquist(args.host_main)
 
     failed = [r for r in RESULTS if not r[1]]
     print(f"\n== 结果: {len(RESULTS) - len(failed)}/{len(RESULTS)} 项通过 ==")

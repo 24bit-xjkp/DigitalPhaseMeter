@@ -59,6 +59,22 @@ PHASE_FIELD_MAX = 0xFF
 #: 相位字的满量程（毫度）：0..359999。
 FULL_SCALE_MILLI_DEG = 360_000
 
+
+#: 片内源的尼奎斯特上界：`f_sig <= f_dsp / 2`（默认 450MHz → 225MHz）。
+#: 与 C 侧 `DPM_SIG_NYQUIST_HZ` / `dpm_sig_freq_within_nyquist` 同一口径：测量核心在 DSP 域
+#: 做上升沿检测与相位计数，超过这个频率后每周期不足两个采样点，边沿会漏检/混叠。
+def nyquist_hz(dsp_hz: int) -> int:
+    """片内源允许的最高输出频率（Hz）；`dsp_hz <= 0` 时返回 0。"""
+    return max(0, int(dsp_hz)) // 2
+
+
+def freq_within_nyquist(freq_hz: int, dsp_hz: int) -> bool:
+    """目标频率是否落在 `(0, f_dsp / 2]` 内（与 PS 固件 SET_SIG 的检查逐条一致）。"""
+    dsp = int(dsp_hz)
+    freq = int(freq_hz)
+    return dsp > 0 and 0 < freq <= dsp // 2
+
+
 # --------------------------------------------------- DRP 寄存器镜像（方案 A）
 
 #: PL 的 `dpm_src_drp` 寄存器镜像基偏移（BD 映射在 AXI 段 0x43C1_0000 的 4KB 页内）。
@@ -900,6 +916,8 @@ __all__ = [
     "DIV_MAX",
     "PHASE_FIELD_MAX",
     "FULL_SCALE_MILLI_DEG",
+    "nyquist_hz",
+    "freq_within_nyquist",
     "DRP_OFF_BASE",
     "DRP_OFF_ID",
     "DRP_OFF_STATUS",

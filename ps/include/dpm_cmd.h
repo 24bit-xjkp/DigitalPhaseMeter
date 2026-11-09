@@ -85,6 +85,15 @@
 /** SET_SIG 的频率容差：0.1% + 1Hz（冻结频点误差为 0，非精确解一律 ERR_PARAM）。 */
 #define DPM_SIG_FREQ_TOL_MILLI_HZ(freq_hz) ((freq_hz) / 1000u + 1000u)
 
+/** 片内信号源的尼奎斯特上界：`f_sig <= f_dsp / 2`（默认 450MHz → 225MHz）。
+ *
+ * 测量核心在 DSP 时钟域对两路信号做上升沿检测与相位计数：`f_sig > f_dsp/2` 时
+ * 每个信号周期不足两个采样点，边沿会漏检/混叠，测得的频率与相位都不再有意义。
+ * 该约束与 MMCM 的 VCO/D 编码约束无关（例如 300MHz 能精确解出 600MHz/D=2），
+ * 必须在求解前单独判掉。上界随运行时 `dsp_hz` 走，不要写死 225MHz。
+ */
+#define DPM_SIG_NYQUIST_HZ(dsp_hz) ((dsp_hz) / 2u)
+
 /* ----------------------------------------------------------- PAYLOAD 结构 */
 
 /** IDENTIFY（0x02）响应。 */
@@ -285,6 +294,16 @@ size_t dpm_enc_event(uint8_t *out, size_t cap, const dpm_event_t *v);
 
 /** 相位 1 步（1/8 VCO 周期）对应的时间（ps）。步长只由 VCO 决定。 */
 uint32_t dpm_sig_phase_step_ps(uint32_t vco_hz);
+
+/** 目标频率是否落在片内源的尼奎斯特上界内（`1 <= f_sig <= f_dsp / 2`）。
+ *
+ * SET_SIG 在求解 VCO/D 之前调用：`f_sig > f_dsp/2`（默认 450MHz → 225MHz）时
+ * 边沿检测会混叠，必须回 ERR_PARAM，而不是交给求解器“就近匹配”到一个可实现的工作点。
+ * `dsp_hz == 0`（非法配置）也返回 0，避免把任意频率判成合法。
+ *
+ * @return 1 = 合法；0 = 越界。
+ */
+int dpm_sig_freq_within_nyquist(uint32_t freq_hz, uint32_t dsp_hz);
 
 /** 把请求相位吸附到硬件网格（1/8 VCO 周期 = 45°/divide）后返回实际相位（毫度）。
  *

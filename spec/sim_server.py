@@ -399,9 +399,10 @@ class Session:
             if len(payload) != 8:
                 return encode(ERR_PARAM)
             freq, phase = struct.unpack("<II", payload)
-            # 约束与 docs/ps-protocol.md 第 6.4 节一致：VCO ≥ 600MHz 且 D ≤ 126
-            # → 可实现的最低频率约 600/126 = 4.76MHz，因此 4.8MHz 以下直接拒绝。
-            if not (4_800_000 <= freq <= 60_000_000) or phase >= PHASE_FULL_SCALE_MDEG:
+            # 约束与 docs/ps-protocol.md 第 6.4 节一致：
+            #   - 上界 = 尼奎斯特频率 f_dsp/2（默认 450MHz → 225MHz）；
+            #   - 下界由 VCO ≥ 600MHz 且 D ≤ 126 决定：600/126 ≈ 4.76MHz，因此 4.8MHz 以下直接拒绝。
+            if not (4_800_000 <= freq <= F_DSP // 2) or phase >= PHASE_FULL_SCALE_MDEG:
                 return encode(ERR_PARAM)
             if not b.solve_sig(freq, phase):
                 return encode(ERR_PARAM)

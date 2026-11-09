@@ -289,6 +289,10 @@ class SimPs:
         self.fpga.poll()
         if not (0 <= int(phase_milli_deg) < S.FULL_SCALE_MILLI_DEG):
             return self._err(P.Cmd.ERR_PARAM)
+        # 尼奎斯特上界（协议 §6.4）：f_sig <= f_dsp/2（默认 225MHz）。与 PS 固件 SET_SIG
+        # 同一条判据；300MHz 能精确解成 600MHz/D=2，不能交给求解器"就近接受"。
+        if not S.freq_within_nyquist(freq_hz, self.fpga.dsp_hz):
+            return self._err(P.Cmd.ERR_PARAM)
         sol = S.solve_sig(freq_hz, phase_milli_deg, self.fpga.slow_hz, self.fpga.semantics)
         if not sol.ok:
             return self._err(P.Cmd.ERR_PARAM)

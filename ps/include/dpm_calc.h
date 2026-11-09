@@ -90,8 +90,12 @@ typedef struct {
  *   - `600MHz <= VCO <= 1200MHz`，`VCO = slow_hz * mult / divclk`；
  *   - `divclk = 1`，`mult = 12..24` 整数；
  *   - `1 <= div <= 126`：分频 = `HIGH_TIME + LOW_TIME`（各 6 位），
- *     8 位可表示到 255，但硬上限取 127（`DPM_SIG_DIV_MAX`），超出不再考虑；
+ *     8 位可表示到 255，但硬上限取 126（`DPM_SIG_DIV_MAX`），超出不再考虑；
  *   - 不使用小数分频。
+ *
+ * 本函数只约束 VCO 与分频编码，**不检查**系统级尼奎斯特上界（`f_sig <= f_dsp/2`，
+ * 默认 450MHz → 225MHz）：该上界由 `SET_SIG` 在调用本函数前用
+ * `dpm_sig_freq_within_nyquist` 判定（见 `dpm_cmd.h`）。
  *
  * 选择规则（**冻结，C / Python / `spec/gen_golden.py` 三处必须一致**）：
  *   1. 先最小化频率误差 `|VCO/div - f_target|`（用整数交叉相乘比较，避免浮点误差）；

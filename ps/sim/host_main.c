@@ -267,6 +267,13 @@ int main(int argc, char **argv)
         }
     }
 
+    /* 初始工作点也走与 SET_SIG 相同的尼奎斯特检查：验证台不应能配出真机固件拒绝的状态。 */
+    if (dpm_sig_freq_within_nyquist(freq_hz, dsp_hz) == 0) {
+        fprintf(stderr, "非法 --freq-hz：%u Hz 不在片内源范围内（0, %u] Hz（f_dsp=%u Hz）\n",
+                freq_hz, DPM_SIG_NYQUIST_HZ(dsp_hz), dsp_hz);
+        return 2;
+    }
+
     if (use_pty != 0) {
         char name[256];
 #if defined(__linux__)

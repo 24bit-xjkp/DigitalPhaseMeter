@@ -81,8 +81,8 @@ ps/build/host_main --stdio                    # 协议字节走 stdin/stdout
 ```text
 test_calc         329 项检查，0 失败   # 金标准定点输出逐位一致、除零/溢出边界
 test_proto        128 项检查，0 失败   # CRC 标准向量、组帧↔收帧、负向帧、等待上限量纲
-test_sig          584 项检查，0 失败   # 冻结频点求解、VCO/MULT/D 约束、方案 A 编码位域
-test_server_selftest  637/637 项通过  # pty 上逐条覆盖命令码、错误路径、流上报、长闸门、STOP
+test_sig          592 项检查，0 失败   # 冻结频点求解、VCO/MULT/D 约束、方案 A 编码位域、尼奎斯特上界
+test_server_selftest  639/639 项通过  # pty 上逐条覆盖命令码、错误路径、流上报、长闸门、STOP
 ```
 
 其他入口：

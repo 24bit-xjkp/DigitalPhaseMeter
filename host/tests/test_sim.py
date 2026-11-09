@@ -549,6 +549,25 @@ def test_set_sig_and_get_sig(env: PsEnv) -> None:
     assert S.mmcm_decode_phase_mdeg(fpga.drp[S.DRP_OFF_CLKOUT1], fpga.drp[S.DRP_OFF_CLKOUT1_2], fpga.div) == 45_000
 
 
+def test_set_sig_nyquist_limit(env: PsEnv) -> None:
+    """片内源不得超过尼奎斯特频率 f_dsp/2（默认 450MHz → 225MHz）。
+
+    300MHz 在 VCO/D 约束内是精确解（600MHz/D=2），所以这条必须由频域检查拒绝，
+    不能靠求解器的频率容差。
+    """
+    assert env.request(P.Cmd.SET_SIG, P.encode_set_sig(225_000_001, 0)).cmd == P.Cmd.ERR_PARAM
+    assert env.request(P.Cmd.SET_SIG, P.encode_set_sig(300_000_000, 0)).cmd == P.Cmd.ERR_PARAM
+    # 上界本身合法：225MHz = 900MHz/D=4
+    info = P.decode_sig_info(env.request(P.Cmd.SET_SIG, P.encode_set_sig(225_000_000, 0)).payload)
+    assert (info.freq_hz, info.vco_hz, info.div) == (225_000_000, 900_000_000, 4)
+    # 上界随 dsp_hz 走（不是写死 225MHz）
+    assert S.nyquist_hz(100_000_000) == 50_000_000
+    assert S.freq_within_nyquist(50_000_000, 100_000_000)
+    assert not S.freq_within_nyquist(50_000_001, 100_000_000)
+    assert not S.freq_within_nyquist(0, 450_000_000)
+    assert not S.freq_within_nyquist(1, 0)
+
+
 def test_set_sig_while_busy_is_err_busy(env: PsEnv) -> None:
     env.request(P.Cmd.START)
     assert env.fpga.busy
