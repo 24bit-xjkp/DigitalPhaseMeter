@@ -14,6 +14,5 @@ object MyShiftRegisters {
 }
 
 object MyShiftRegister {
-    def apply(in: Bool, n: Int, init: Bool = false.B): Bool =
-        MyShiftRegisters(in, n, init)(n - 1)
+    def apply(in: Bool, n: Int, init: Bool = false.B): Bool = MyShiftRegisters(in, n, init).last
 }

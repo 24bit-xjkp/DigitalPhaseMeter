@@ -81,13 +81,13 @@ class DigitalPhaseMeterTop(
     // 寄存器堆只按 `addr[5:2]` 译码，地址高位不参与任何逻辑，因此 AXI 从口只把低 6 位地址交给下游
     // （命令总线本身就是 6 位地址，不再零扩展）；数据通路是 32 位寄存器，写数据保持全宽。
     // 行为与全宽锁存完全一致，只是不再产生「未读寄存器位被 trim」的 Synth 8-3936 告警。
-    private val axiLiteSlave = Axi4LiteSlave(addrUsedWidth = axiAddrUsedWidth, dataUsedWidth = axiDataUsedWidth)
+    private val axiLiteSlave = Module(new Axi4LiteSlave(axiAddrUsedWidth, axiDataUsedWidth))
 
     // AXI4-Lite 从口 ↔ 寄存器堆
-    s_axi_lite :<>= axiLiteSlave.axi
-    controlRegs.io.wr :<>= axiLiteSlave.wr
-    controlRegs.io.rd :<>= axiLiteSlave.rd
-    axiLiteSlave.rdData := controlRegs.io.rdData
+    s_axi_lite :<>= axiLiteSlave.io.axi
+    controlRegs.io.wr :<>= axiLiteSlave.io.wr
+    controlRegs.io.rd :<>= axiLiteSlave.io.rd
+    axiLiteSlave.io.rdData := controlRegs.io.rdData
 
     // 寄存器堆 ↔ 控制器（测量请求/结果）
     controller.io.in := controlRegs.io.request

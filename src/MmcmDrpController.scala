@@ -86,9 +86,9 @@ class MmcmDrpController extends TopModule {
     // 不再零扩展回 32 位。行为与全宽锁存完全一致，只是不再产生
     // 「未读寄存器位被 trim」的 Synth 8-3936 告警。
     private val drpAddrUsedWidth = 12
-    private val axiLiteSlave = Axi4LiteSlave(addrUsedWidth = drpAddrUsedWidth, dataUsedWidth = 16)
-    axiLiteSlave.wr.ready := true.B
-    axiLiteSlave.rd.ready := true.B
+    private val axiLiteSlave = Module(new Axi4LiteSlave(drpAddrUsedWidth, 16))
+    axiLiteSlave.io.wr.ready := true.B
+    axiLiteSlave.io.rd.ready := true.B
 
     // 软件写 LOAD=1 置起本标志；状态机在 IDLE 看到它就开始重配置并清除。
     // 用「寄存器」而不是单拍脉冲，避免组合脉冲宽度依赖 AXI 握手时序。
@@ -107,8 +107,8 @@ class MmcmDrpController extends TopModule {
         // 从口已把地址截断到低 drpAddrUsedWidth 位，只需检查窗口内偏移
         Cat(addr(drpAddrUsedWidth - 1, indexWidth + 2), addr(1, 0)) === 0.U
     }
-    private val inWindowWr = inWindowOf(axiLiteSlave.wr.bits.addr)
-    private val inWindowRd = inWindowOf(axiLiteSlave.rd.bits.addr)
+    private val inWindowWr = inWindowOf(axiLiteSlave.io.wr.bits.addr)
+    private val inWindowRd = inWindowOf(axiLiteSlave.io.rd.bits.addr)
     private val indexMap = Seq(
         iVersion -> versionValue,
         iStatus -> statusValue,
@@ -123,9 +123,9 @@ class MmcmDrpController extends TopModule {
     )
 
     // LOAD 是写 1 触发，不落寄存器；用字节选通合并后的值
-    private val writeValid = axiLiteSlave.wr.fire && inWindowWr
+    private val writeValid = axiLiteSlave.io.wr.fire && inWindowWr
     when(writeValid) {
-        val wrBits = axiLiteSlave.wr.bits
+        val wrBits = axiLiteSlave.io.wr.bits
         import wrBits._
         val (addrSlice, _) = RegIndex.safe(addr(indexWidth + 1, 2))
         indexMap.drop(2).foreach { case (i, v) =>
@@ -135,9 +135,9 @@ class MmcmDrpController extends TopModule {
     }
 
     // 读数据：窗口外读回 0。寄存器的数据只用低 16 位，高 16 位恒 0。
-    axiLiteSlave.rdData := Mux(
+    axiLiteSlave.io.rdData := Mux(
         inWindowRd,
-        MuxLookup(axiLiteSlave.rd.bits.addr(indexWidth + 1, 2), 0.U)(indexMap.map { case (i, v) => (i.asUInt, v) }),
+        MuxLookup(axiLiteSlave.io.rd.bits.addr(indexWidth + 1, 2), 0.U)(indexMap.map { case (i, v) => (i.asUInt, v) }),
         0.U
     )
 
@@ -192,7 +192,7 @@ class MmcmDrpController extends TopModule {
     when(state === sIdle && loadPending) { loadPending := false.B }
 
     // AXI 从口：本模块顶层端口与 Axi4LiteSlave 的方向约定一致，直接整体连接
-    s_axi_lite :<>= axiLiteSlave.axi
+    s_axi_lite :<>= axiLiteSlave.io.axi
 }
 
 object EmitMmcmDrpController extends Main { emitSystemVerilog(new MmcmDrpController) }

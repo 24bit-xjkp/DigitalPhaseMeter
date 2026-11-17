@@ -1,8 +1,6 @@
 package DigitalPhaseMeter
 
 import chisel3._
-import chisel3.layer.block
-import chisel3.layers.Verification
 import chisel3.ltl.AssertProperty
 import chisel3.ltl.Sequence.BoolSequence
 import chisel3.util._
@@ -111,23 +109,13 @@ class Axi4LiteSlave(
     }
 
     // AXI 协议时序性质：valid 一旦拉高必须保持到握手，rdata 在握手前保持稳定。
-    // 放在 Verification.Assert 层里，checker/bind 只进仿真；rDataLast 也随之提取，不进综合。
-    block(Verification.Assert) {
-        val rDataLast = RegNext(rData)
-        AssertProperty((bValid && !io.axi.bready) |=> bValid, label = Some("bvalid must stay until bready"))
-        AssertProperty((rValid && !io.axi.rready) |=> rValid, label = Some("rvalid must stay until rready"))
-        AssertProperty(
-            (rValid && !io.axi.rready) |=> (rData === rDataLast),
-            label = Some("rdata must stay stable until rready")
-        )
-    }
-}
-
-object Axi4LiteSlave {
-    def apply(addrUsedWidth: Int = 32, dataUsedWidth: Int = 32) = {
-        val axiLiteSlave = Module(new Axi4LiteSlave(addrUsedWidth, dataUsedWidth)).suggestName("")
-        axiLiteSlave.io
-    }
+    private val rDataLast = RegNext(rData)
+    AssertProperty(bValid && !io.axi.bready |=> bValid, label = Some("bvalid must stay until bready"))
+    AssertProperty(rValid && !io.axi.rready |=> rValid, label = Some("rvalid must stay until rready"))
+    AssertProperty(
+        rValid && !io.axi.rready |=> rData === rDataLast,
+        label = Some("rdata must stay stable until rready")
+    )
 }
 
 object EmitAxi4LiteSlave extends Main { emitSystemVerilog(new Axi4LiteSlave) }

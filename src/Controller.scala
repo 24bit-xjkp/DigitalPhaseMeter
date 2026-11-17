@@ -76,15 +76,17 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
     // ResetSynchronizer 的输入是**低有效**复位（顶层接 PS 的 resetn），而隐式 reset 是高有效主复位，
     // 必须取反后接入；直接传 reset.asBool 会让 dsp 域在系统复位撤销后被永久按在复位里。
     private val dspReset = ResetSynchronizer(dspClock, !reset.asBool)
-    private val phaseMeter = withClockAndReset(dspClock, dspReset) { PhaseMeter(edgeCntWidth, phaseCntWidth) }
+    private val phaseMeter = withClockAndReset(dspClock, dspReset) {
+        Module(new PhaseMeter(edgeCntWidth, phaseCntWidth))
+    }
 
     // io.sig 由上级在本域做完使能门控与二选一后送来，这里直接进测量核心的异步采样链
-    phaseMeter.sig := io.sig
+    phaseMeter.io.sig := io.sig
 
-    private val request = CdcToggleHandShake.send(phaseMeter.request)
-    private val responseReady = CdcToggleHandShake.send(phaseMeter.response.ready)
-    private val responseValid = CdcToggleHandShake.receive(phaseMeter.response.valid)
-    private val forceStop = CdcToggleHandShake.send(phaseMeter.forceStop)
+    private val request = CdcToggleHandShake.send(phaseMeter.io.request)
+    private val responseReady = CdcToggleHandShake.send(phaseMeter.io.response.ready)
+    private val responseValid = CdcToggleHandShake.receive(phaseMeter.io.response.valid)
+    private val forceStop = CdcToggleHandShake.send(phaseMeter.io.forceStop)
 
     private val gateCntClear = Reg(Bool())
     private val (gateCnt, _) = Counter(0 to (1 << gateCntWidth) - 1, true.B, gateCntClear)
@@ -112,7 +114,7 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
     // 强制停止与停止响应同拍时按强制停止处理：被中止的测量不锁存结果、也不回停止应答
     private val finishMeasure = state === sWaitStop && responseValid && !io.forceStop
     when(finishMeasure) {
-        out.bits.viewAsSupertype(new PhaseMeterResponsePayload) := phaseMeter.response.bits
+        out.bits.viewAsSupertype(new PhaseMeterResponsePayload) := phaseMeter.io.response.bits
         out.bits.gateCnt := gateCnt
         out.valid := true.B
         responseReady.send()
