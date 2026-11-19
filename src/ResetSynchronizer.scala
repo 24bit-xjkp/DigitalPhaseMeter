@@ -11,19 +11,19 @@ class ResetSynchronizer(val n: Int = 4) extends RawModule {
     require(n >= 2)
     val clock = IO(Input(Clock()))
     // 异步复位输入，低有效
-    val resetn = IO(Input(Bool()))
+    val resetn = IO(Input(AsyncReset()))
     // 与 clock 同步的复位输出，高有效
     val reset = IO(Output(Bool()))
 
     // 复位链的寄存器用异步复位：resetn 拉低时立即清零，输出随之置位
-    reset := withClockAndReset(clock, (!resetn).asAsyncReset) { MyShiftRegister(false.B, n, true.B) }
+    reset := withClockAndReset(clock, (!resetn.asBool).asAsyncReset) { MyShiftRegister(false.B, n, true.B) }
 }
 
 object ResetSynchronizer {
-    def apply(clock: Clock, resetn: Bool, n: Int = 4): Bool = {
+    def apply(clock: Clock, resetn: Reset, n: Int = 4): Bool = {
         val resetSynchronizer = Module(new ResetSynchronizer(n))
         resetSynchronizer.clock := clock
-        resetSynchronizer.resetn := resetn
+        resetSynchronizer.resetn := resetn.asAsyncReset
         resetSynchronizer.reset
     }
 }

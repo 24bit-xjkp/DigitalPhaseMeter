@@ -21,12 +21,14 @@ trait Main extends App {
         name: String = this.getClass.getSimpleName.stripSuffix("$").stripPrefix("Emit")
     ): Unit = {
         val outputDir = Paths.get("build", "chisel", name)
-        val chiselArgs = args.toArray.concat(Array("--target-dir", outputDir.toString()))
+        val chiselArgs = args.toArray ++ Array("--target-dir", outputDir.toString(), "--warnings-as-errors")
         val firtoolOpts = Array(
             "-disable-all-randomization",
             "--lowering-options=emittedLineLength=120",
             "--preserve-aggregate=1d-vec",
-            "--verification-flavor=sva"
+            "--verification-flavor=sva",
+            "--warn-on-implicit-truncation",
+            "--warn-on-unprocessed-annotations"
         )
         Files.createDirectories(outputDir)
         ChiselStage.emitSystemVerilogFile(genModule, chiselArgs, firtoolOpts)
@@ -59,7 +61,7 @@ trait Main extends App {
 
 trait TopModule extends RawModule with ImplicitClock with ImplicitReset {
     val clock = IO(Input(Clock()))
-    val resetn = IO(Input(Bool()))
+    val resetn = IO(Input(AsyncReset()))
 
     protected val reset = ResetSynchronizer(clock, resetn)
     override protected def implicitClock = clock

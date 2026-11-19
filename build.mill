@@ -20,7 +20,7 @@ import scala.jdk.CollectionConverters.*
 
 object `package` extends ScalaModule with ScalafixModule {
     def scalaVersion = "2.13.18"
-    def chiselVersion = "7.16.0"
+    def chiselVersion = "7.17.0"
 
     def mvnDeps = Seq(mvn"org.chipsalliance::chisel:$chiselVersion")
 
