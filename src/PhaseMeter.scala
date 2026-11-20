@@ -81,9 +81,8 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
         "request in a state that cannot accept it"
     )
     when(isIdle) { needSendResponse := true.B }
-    // 强制停止同拍不发送启动/停止应答：本次测量已被中止，慢域不会使用这些应答
-    when(state === sWaitStart && pulseSig1 && !forceStop) { responseValid.send() }
-    private val sendResponse = state === sWaitStop && pulseSig2 && needSendResponse && !forceStop
+    when(state === sWaitStart && pulseSig1) { responseValid.send() }
+    private val sendResponse = state === sWaitStop && pulseSig2 && needSendResponse
     when(sendResponse) { responseValid.send(); needSendResponse := false.B }
 
     // 计数器控制脚全部寄存器化（450MHz 的关键路径）：clearCnt / pulseSig1Valid /
