@@ -1,9 +1,9 @@
 package DigitalPhaseMeter
 
-import chisel3._
+import chisel3.*
 import chisel3.ltl.AssertProperty
 import chisel3.ltl.Sequence.BoolSequence
-import chisel3.util._
+import chisel3.util.*
 
 /** AXI4-Lite 从口
   *
@@ -26,7 +26,7 @@ import chisel3.util._
 class Axi4LiteSlave(
     addrUsedWidth: Int = 32,
     dataUsedWidth: Int = 32
-) extends Module {
+) extends Module:
     // AXI4-Lite 端口固定位宽，不开放配置
     val axiAddrWidth = 32
     val axiDataWidth = 32
@@ -39,16 +39,15 @@ class Axi4LiteSlave(
     // 编进同一个仿真库时（xsim 联调）同名模块互相覆盖
     override def desiredName: String = s"Axi4LiteSlaveA${addrUsedWidth}D${dataUsedWidth}"
 
-    val io = IO(new Bundle {
+    val io = IO(new Bundle:
         // AXI4-Lite 从口（固定 32 位地址 / 32 位数据）
-        val axi = new Axi4LiteSlavePorts
+        val axi = Axi4LiteSlavePorts()
         // 写命令，到寄存器堆；地址/数据/字节选通只保留下游实际使用的低位
-        val wr = EnqIO(new AxiLiteWritePayload(addrUsedWidth, dataUsedWidth))
+        val wr = EnqIO(AxiLiteWritePayload(addrUsedWidth, dataUsedWidth))
         // 读命令，到寄存器堆；地址只保留下游实际使用的低位
-        val rd = EnqIO(new AxiLiteReadPayload(addrUsedWidth))
+        val rd = EnqIO(AxiLiteReadPayload(addrUsedWidth))
         // 读数据，由寄存器堆组合给出（AXI 侧仍是完整的 32 位）
-        val rdData = Input(UInt(dataUsedWidth.W))
-    })
+        val rdData = Input(UInt(dataUsedWidth.W)))
 
     // ---- 写通道 ----
     // 锁存寄存器只保存下游实际使用的低位，AXI 高位在握手时就被丢弃
@@ -65,15 +64,13 @@ class Axi4LiteSlave(
     io.axi.bvalid := bValid
     io.axi.bresp := AxiResp.okay.asUInt
 
-    when(io.axi.awready && io.axi.awvalid) {
+    when(io.axi.awready && io.axi.awvalid):
         awAddr := io.axi.awaddr.take(addrUsedWidth)
         awHeld := true.B
-    }
-    when(io.axi.wready && io.axi.wvalid) {
+    when(io.axi.wready && io.axi.wvalid):
         wData := io.axi.wdata.take(dataUsedWidth)
         wStrb := io.axi.wstrb.take(usedStrbWidth)
         wHeld := true.B
-    }
 
     // 地址与数据都锁存后发出写命令；写命令保持有效直到寄存器堆接收。
     // 命令总线本身就是截断后的宽度，直接交给下游，不再零扩展
@@ -81,11 +78,10 @@ class Axi4LiteSlave(
     io.wr.bits.addr := awAddr
     io.wr.bits.data := wData
     io.wr.bits.strb := wStrb
-    when(io.wr.fire) {
+    when(io.wr.fire):
         awHeld := false.B
         wHeld := false.B
         bValid := true.B
-    }
     when(bValid && io.axi.bready) { bValid := false.B }
 
     // ---- 读通道 ----
@@ -103,10 +99,9 @@ class Axi4LiteSlave(
 
     // 先默认撤销数据有效，同一拍接收新读地址时再置位（后写优先）
     when(io.axi.rvalid && io.axi.rready) { rValid := false.B }
-    when(io.rd.fire) {
+    when(io.rd.fire):
         rData := io.rdData
         rValid := true.B
-    }
 
     // AXI 协议时序性质：valid 一旦拉高必须保持到握手，rdata 在握手前保持稳定。
     private val rDataLast = RegNext(rData)
@@ -116,6 +111,5 @@ class Axi4LiteSlave(
         rValid && !io.axi.rready |=> rData === rDataLast,
         label = Some("rdata must stay stable until rready")
     )
-}
 
-object EmitAxi4LiteSlave extends Main { emitSystemVerilog(new Axi4LiteSlave) }
+object EmitAxi4LiteSlave extends Main { protected def emit = emitSystemVerilog(Axi4LiteSlave()) }

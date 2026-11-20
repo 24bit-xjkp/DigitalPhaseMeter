@@ -1,7 +1,7 @@
 package DigitalPhaseMeter
 
-import chisel3._
-import chisel3.util._
+import chisel3.*
+import chisel3.util.*
 
 /** 使能型二进制计数器（DSP48E1 累加器实现）
   *
@@ -19,29 +19,25 @@ import chisel3.util._
   * @param withReset
   *   是否给计数器加复位；`PhaseMeter` 里的两个计数器都靠 `clear` 清零，传入 false
   */
-class DspCounter(val cntWidth: Int = 48, val withReset: Boolean = true) extends Module {
+class DspCounter(val cntWidth: Int = 48, val withReset: Boolean = true) extends Module:
     require(cntWidth <= 48)
-    val io = IO(new Bundle {
+    val io = IO(new Bundle:
         val clear = Input(Bool())
         val enable = Input(Bool())
-        val value = Output(UInt(cntWidth.W))
-    })
+        val value = Output(UInt(cntWidth.W)))
 
     private val cnt = if (withReset) RegInit(0.U(cntWidth.W)) else Reg(UInt(cntWidth.W))
     addAttribute(cnt, """use_dsp = "yes"""")
     when(io.clear) { cnt := 0.U }.elsewhen(io.enable) { cnt := cnt + 1.U }
     io.value := cnt
-}
 
-object DspCounter {
-    def apply(cntWidth: Int, clear: Bool, enable: Bool, withReset: Boolean = true): UInt = {
+object DspCounter:
+    def apply(cntWidth: Int, clear: Bool, enable: Bool, withReset: Boolean = true): UInt =
         val dspCounter = Module(new DspCounter(cntWidth, withReset))
         dspCounter.io.clear := clear
         dspCounter.io.enable := enable
         dspCounter.io.value
-    }
-}
 
 // 独立产物按测量域实际使用的 32 位生成（PhaseMeter 的 edgeCnt/phaseCnt 宽度），
 // 这样 test/DspCounter.cpp 的端口类型与真实用例一致。
-object EmitDspCounter extends Main { emitSystemVerilog(new DspCounter(32)) }
+object EmitDspCounter extends Main { protected def emit = emitSystemVerilog(new DspCounter(32)) }

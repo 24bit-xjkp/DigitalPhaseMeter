@@ -1,7 +1,7 @@
 package DigitalPhaseMeter
 
-import chisel3._
-import chisel3.util._
+import chisel3.*
+import chisel3.util.*
 
 /** AXI 响应编码
   */
@@ -18,7 +18,7 @@ object AxiResp extends ChiselEnum { val okay, exOkay, slvErr, decErr = Value }
   * @param dataWidth
   *   数据宽度，必须为 8 的整数倍
   */
-class Axi4LiteSlavePorts extends Bundle {
+class Axi4LiteSlavePorts extends Bundle:
     val addrWidth = 32
     val dataWidth = 32
     // 写地址通道
@@ -45,14 +45,12 @@ class Axi4LiteSlavePorts extends Bundle {
     val rresp = Output(UInt(2.W))
     val rvalid = Output(Bool())
     val rready = Input(Bool())
-}
 
 /** 按字节选通合并数据
   *
   * AXI 的 wstrb 是字节粒度：选通的位置取新数据，其余保持旧值。
   */
-object ByteStrobe {
-
+object ByteStrobe:
     /** 按字节选通把 `data` 合并进 `old`
       *
       * @param old
@@ -64,12 +62,10 @@ object ByteStrobe {
       * @return
       *   合并结果，宽度与 `old` 相同
       */
-    def merge(old: UInt, data: UInt, strb: UInt): UInt = {
+    def merge(old: UInt, data: UInt, strb: UInt): UInt =
         require(old.getWidth % 8 == 0)
         val bytes = (0 until old.getWidth / 8).map(i => Mux(strb(i), data, old)(8 * i + 7, 8 * i))
         Cat(bytes.reverse)
-    }
-}
 
 /** AXI4-Lite 写命令：地址、数据与字节选通
   *
@@ -81,12 +77,11 @@ object ByteStrobe {
   * @param dataWidth
   *   下游实际使用的数据宽度，必须为 8 的整数倍，可能小于 AXI 端口的 32 位
   */
-class AxiLiteWritePayload(val addrWidth: Int = 32, val dataWidth: Int = 32) extends Bundle {
+class AxiLiteWritePayload(val addrWidth: Int = 32, val dataWidth: Int = 32) extends Bundle:
     require(dataWidth % 8 == 0)
     val addr = UInt(addrWidth.W)
     val data = UInt(dataWidth.W)
     val strb = UInt((dataWidth / 8).W)
-}
 
 /** AXI4-Lite 读命令：地址
   *

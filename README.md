@@ -165,6 +165,8 @@ spec/                               金标准向量、独立仿真服务端、�
 
 Verilator 测试目标在编译 SV 之前会自动调用下文「生成 SystemVerilog」里的生成入口（`script/rule.lua` 的 `mill.verilator.shared` 规则，逐目标执行 `./mill emit <模块名>`），所以跑 `xmake test` / `xmake run` 前不需要手工生成；JDK 与 Mill 因此也是跑这些测试的前提。
 
+构建定义（`build.mill`）用 Scala 3（`scalaVersion = "3.10.1"`）与 Chisel 快照：`chiselVersion = "latest.integration"` 让 Coursier 始终解析到快照仓库里最新的 Chisel 快照，而不是钉死某个 `+<构建号>-<提交哈希>`。Chisel 的正式发布只有 Scala 2.13 构件，Scala 3 构件只随快照发布，因此额外注册了 Sonatype Central Portal 的 snapshots 仓库。解析结果受 Coursier 元数据缓存 TTL（默认 24h）约束，需要立即拉取最新快照时用 `COURSIER_TTL=0s ./mill compile`（或 `emit`）。
+
 ## 使用
 
 ### 生成 SystemVerilog（产物在 `build/chisel/<Name>/`）
@@ -191,11 +193,11 @@ Verilator 测试目标在编译 SV 之前会自动调用下文「生成 SystemVe
 ```bash
 ./mill compile                 # 编译器 lint（-Werror），0 warning 门禁
 ./mill fix --check             # Scalafix 规则检查
-./mill fix                     # 自动修复可修的规则（导入排序、删除未使用导入）
+./mill fix                     # 自动修复可修的规则（导入排序等）
 scalafmt --test                # 格式检查（scalafmt 就地修复）
 ```
 
-Scalafix 通过 Mill 的 scalafix 插件执行，规则与配置仍在 `.scalafix.conf`，只作用于 `src`。Mill 构建定义 `build.mill` 由 Mill 自己编译（Scala 3），不在 Scalafix 规则范围内，但同样要按 scalafmt 风格格式化；格式化用 scalafmt CLI，不是 Mill 任务。规则内容、有意关闭的检查项与验证报告要求见 [`.agents/skills/dpm-pre-delivery-check`](.agents/skills/dpm-pre-delivery-check/SKILL.md)。
+Scalafix 通过 Mill 的 scalafix 插件执行，规则与配置仍在 `.scalafix.conf`，只作用于 `src`。`src` 与 Mill 构建定义 `build.mill` 都用 Scala 3：`build.mill` 由 Mill 自己编译，不在 Scalafix 规则范围内，但同样要按 scalafmt 风格格式化；格式化用 scalafmt CLI，不是 Mill 任务。规则内容、有意关闭的检查项与验证报告要求见 [`.agents/skills/dpm-pre-delivery-check`](.agents/skills/dpm-pre-delivery-check/SKILL.md)。
 
 ### Verilator 测试（测量通路与顶层 IP）
 

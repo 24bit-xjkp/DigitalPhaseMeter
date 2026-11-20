@@ -1,14 +1,9 @@
 package DigitalPhaseMeter
 
-import chisel3._
+import chisel3.*
 
 /** 边沿类型 */
-sealed trait EdgeType
-object EdgeType {
-    case object Rising extends EdgeType
-    case object Falling extends EdgeType
-    case object Both extends EdgeType
-}
+enum EdgeType { case Rising, Falling, Both }
 
 /** 边沿检测器
   *
@@ -17,27 +12,22 @@ object EdgeType {
   * @param edgeType
   *   边沿类型
   */
-class EdgeDetector(val n: Int = 3, val edgeType: EdgeType = EdgeType.Rising) extends Module {
+class EdgeDetector(val n: Int = 3, val edgeType: EdgeType = EdgeType.Rising) extends Module:
     require(n >= 2)
-    val io = IO(new Bundle {
+    val io = IO(new Bundle:
         val in = Input(Bool())
-        val trigger = Output(Bool())
-    })
+        val trigger = Output(Bool()))
     private val pipeline = MyShiftRegisters(io.in, n)
-    io.trigger := (edgeType match {
-        case EdgeType.Rising  => !pipeline(n - 1) && pipeline(n - 2)
-        case EdgeType.Falling => pipeline(n - 1) && !pipeline(n - 2)
-        case EdgeType.Both    => pipeline(n - 1) =/= pipeline(n - 2)
-    })
-    override def desiredName: String = s"EdgeDetector${edgeType.toString}"
-}
+    io.trigger := (edgeType match
+        case EdgeType.Rising  => !pipeline.last && pipeline.init.last
+        case EdgeType.Falling => pipeline.last && !pipeline.init.last
+        case EdgeType.Both    => pipeline.last =/= pipeline.init.last)
+    override def desiredName: String = s"EdgeDetector$edgeType"
 
-object EdgeDetector {
-    def apply(sig: Bool, edgeType: EdgeType = EdgeType.Rising, n: Int = 3): Bool = {
+object EdgeDetector:
+    def apply(sig: Bool, edgeType: EdgeType = EdgeType.Rising, n: Int = 3): Bool =
         val edgeDetector = Module(new EdgeDetector(n, edgeType))
         edgeDetector.io.in := sig
         edgeDetector.io.trigger
-    }
-}
 
-object EmitEdgeDetector extends Main { emitSystemVerilog(new EdgeDetector) }
+object EmitEdgeDetector extends Main { protected def emit = emitSystemVerilog(new EdgeDetector) }

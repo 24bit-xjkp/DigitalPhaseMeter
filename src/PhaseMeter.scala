@@ -1,8 +1,8 @@
 package DigitalPhaseMeter
 
-import chisel3._
+import chisel3.*
 import chisel3.ltl.AssertProperty
-import chisel3.util._
+import chisel3.util.*
 
 /** 相位计输入信号，sig1为参考信号，sig2为被测信号
   */
@@ -15,12 +15,11 @@ class PhaseMeterSignalPayload extends Bundle { val sig1, sig2 = Bool() }
   * @param phaseCntWidth
   *   相位计数器宽度
   */
-class PhaseMeterResponsePayload(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extends Bundle {
+class PhaseMeterResponsePayload(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extends Bundle:
     // 检测到参考信号的总边沿数
     val edgeCnt = UInt(edgeCntWidth.W)
     // 相位差计数
     val phaseCnt = UInt(phaseCntWidth.W)
-}
 
 /** 相位计状态机枚举
   */
@@ -33,17 +32,16 @@ object PhaseMeterStateEnum extends ChiselEnum { val sIdle, sWaitStart, sMeasurin
   * @param phaseCntWidth
   *   相位计数器宽度
   */
-class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extends Module {
-    val io = IO(new Bundle {
+class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extends Module:
+    val io = IO(new Bundle:
         // 输入信号
-        val sig = Input(new PhaseMeterSignalPayload)
+        val sig = Input(PhaseMeterSignalPayload())
         // 请求控制字
         val request = Input(Bool())
         // 响应控制字
-        val response = EnqIO(new PhaseMeterResponsePayload(edgeCntWidth, phaseCntWidth))
+        val response = EnqIO(PhaseMeterResponsePayload(edgeCntWidth, phaseCntWidth))
         // 强制结束测量
-        val forceStop = Input(Bool())
-    })
+        val forceStop = Input(Bool()))
 
     // 四个跨域/异步输入都先经检测器的组合输出，再统一打一拍送进 FSM 与计数器控制逻辑。
     // 这一拍是 450MHz 时序的一部分：不寄存时「检测器最后一级 → 组合脉冲 → FSM/使能译码」
@@ -66,12 +64,11 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
     private val state = RegInit(sIdle)
     // 复位值取 true：空闲拍本来就会重新置位；给出确定初值，避免 xsim 复位后第一拍为 X
     private val needSendResponse = RegInit(true.B)
-    switch(state) {
+    switch(state):
         is(sIdle) { when(request) { state := sWaitStart } }
         is(sWaitStart) { when(pulseSig1) { state := sMeasuring } }
         is(sMeasuring) { when(request) { state := sWaitStop } }
         is(sWaitStop) { when(responseReady) { state := sIdle } }
-    }
     when(forceStop) { state := sIdle }
     private val isIdle = dontTouch(state === sIdle)
     // 请求只可能在 sIdle（启动）或 sMeasuring（停止）被接收；落到别的状态说明两侧 FSM 失配，
@@ -104,6 +101,5 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
 
     io.response.bits.edgeCnt := DspCounter(edgeCntWidth, clearCnt, pulseSig1Valid, false)
     io.response.bits.phaseCnt := DspCounter(phaseCntWidth, clearCnt, phaseCntEnable, false)
-}
 
-object EmitPhaseMeter extends Main { emitSystemVerilog(new PhaseMeter) }
+object EmitPhaseMeter extends Main { protected def emit = emitSystemVerilog(PhaseMeter()) }

@@ -1,19 +1,18 @@
 package DigitalPhaseMeter
 
-import chisel3._
+import chisel3.*
 import chisel3.experimental.BundleLiterals.AddBundleLiteralConstructor
 import chisel3.experimental.dataview.RecordUpcastable
-import chisel3.util._
+import chisel3.util.*
 
 /** 控制器输入负载
   *
   * @param gateCntWidth
   *   闸门计数器宽度
   */
-class ControllerInPayload(val gateCntWidth: Int = 28) extends Bundle {
+class ControllerInPayload(val gateCntWidth: Int = 28) extends Bundle:
     // 目标闸门计数，在启动的那一拍被锁存；之后改写不影响本次测量（输入不必在测量期间保持稳定）
     val targetGate = UInt(gateCntWidth.W)
-}
 
 /** 控制器输出负载
   *
@@ -28,10 +27,9 @@ class ControllerOutPayload(
     val gateCntWidth: Int = 28,
     override val edgeCntWidth: Int = 32,
     override val phaseCntWidth: Int = 32
-) extends PhaseMeterResponsePayload(edgeCntWidth, phaseCntWidth) {
+) extends PhaseMeterResponsePayload(edgeCntWidth, phaseCntWidth):
     // 实际闸门计数
     val gateCnt = UInt(gateCntWidth.W)
-}
 
 /** 控制器，工作在低速时钟域
   *
@@ -59,16 +57,15 @@ class ControllerOutPayload(
   * @param phaseCntWidth
   *   相位计数器宽度
   */
-class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extends Module {
+class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extends Module:
     require(gateCntWidth <= 30)
     val dspClock = IO(Input(Clock()))
-    val io = IO(new Bundle {
+    val io = IO(new Bundle:
         // 被测信号：由上级在本域完成外部输入/片内源的使能门控与二选一后送来（对外部与 MMCM 源都是异步信号）
-        val sig = Input(new PhaseMeterSignalPayload)
-        val in = Flipped(ValidIO(new ControllerInPayload(gateCntWidth)))
-        val out = ValidIO(new ControllerOutPayload(gateCntWidth, edgeCntWidth, phaseCntWidth))
-        val forceStop = Input(Bool())
-    })
+        val sig = Input(PhaseMeterSignalPayload())
+        val in = Flipped(ValidIO(ControllerInPayload(gateCntWidth)))
+        val out = ValidIO(ControllerOutPayload(gateCntWidth, edgeCntWidth, phaseCntWidth))
+        val forceStop = Input(Bool()))
     private val out = RegInit(chiselTypeOf(io.out).Lit(_.valid -> false.B))
     io.out := out
 
@@ -76,9 +73,8 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
     // ResetSynchronizer 的输入是**低有效**复位（顶层接 PS 的 resetn），而隐式 reset 是高有效主复位，
     // 必须取反后接入；直接传 reset.asBool 会让 dsp 域在系统复位撤销后被永久按在复位里。
     private val dspReset = ResetSynchronizer(dspClock, !reset.asBool)
-    private val phaseMeter = withClockAndReset(dspClock, dspReset) {
-        Module(new PhaseMeter(edgeCntWidth, phaseCntWidth))
-    }
+    private val phaseMeter = withClockAndReset(dspClock, dspReset):
+        Module(PhaseMeter(edgeCntWidth, phaseCntWidth))
 
     // io.sig 由上级在本域做完使能门控与二选一后送来，这里直接进测量核心的异步采样链
     phaseMeter.io.sig := io.sig
@@ -95,12 +91,11 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
 
     import PhaseMeterStateEnum._
     private val state = RegInit(sIdle)
-    switch(state) {
+    switch(state):
         is(sIdle) { when(io.in.fire) { state := sWaitStart } }
         is(sWaitStart) { when(responseValid) { state := sMeasuring } }
         is(sMeasuring) { when(targetGateMet) { state := sWaitStop } }
         is(sWaitStop) { when(responseValid) { state := sIdle } }
-    }
     when(io.forceStop) { state := sIdle; forceStop.send() }
 
     private val isIdle = dontTouch(state === sIdle)
@@ -113,12 +108,10 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
     when(state === sMeasuring && targetGateMet) { request.send() }
     // 强制停止与停止响应同拍时按强制停止处理：被中止的测量不锁存结果、也不回停止应答
     private val finishMeasure = state === sWaitStop && responseValid && !io.forceStop
-    when(finishMeasure) {
-        out.bits.viewAsSupertype(new PhaseMeterResponsePayload) := phaseMeter.io.response.bits
+    when(finishMeasure):
+        out.bits.viewAsSupertype(PhaseMeterResponsePayload()) := phaseMeter.io.response.bits
         out.bits.gateCnt := gateCnt
         out.valid := true.B
         responseReady.send()
-    }
-}
 
-object EmitController extends Main { emitSystemVerilog(new Controller) }
+object EmitController extends Main { protected def emit = emitSystemVerilog(Controller()) }

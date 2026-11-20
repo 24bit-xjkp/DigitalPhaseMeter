@@ -20,18 +20,20 @@ argument-hint: '要新增或修改的 RTL 模块（如 Controller、PhaseMeter�
 class Foo(val width: Int = 32) extends Module { /* ... */ }
 
 object EmitFoo extends Main {
-    emitSystemVerilog(new Foo)
+    protected def emitModule = emitSystemVerilog(new Foo)
 }
 ```
 
-- `Main`（定义在 `Utils.scala`）提供 `emitSystemVerilog`：创建输出目录、调用 `ChiselStage.emitSystemVerilogFile`；程序收到的参数原样转交给 `ChiselStage`（不再有 `--type` 之类被 `Main` 摘掉的选项，见下文）。
+- `Main`（定义在 `Utils.scala`）提供显式 `main` 与 `emitSystemVerilog`：Scala 3 的 `App` 已废弃，JVM 入口 `main` 把命令行参数交给 `emitModule`，后者调用 `emitSystemVerilog` 创建输出目录、调用 `ChiselStage.emitSystemVerilogFile`；`stageArgs` 原样转交给 `ChiselStage`（不再有 `--type` 之类被 `Main` 摘掉的选项，见下文）。
 - 输出目录为 `build/chisel/<Name>/`（**每个模块只有一份产物**），`<Name>` 由主类名剥离 `Emit` 前缀得到（`EmitFoo` → `Foo`）。需要与类名不同的目录名时显式传第二个参数。
-- 传给 firtool 的固定选项是 `-disable-all-randomization`、`--lowering-options=emittedLineLength=120`、
-  `--preserve-aggregate=1d-vec` 与 `--verification-flavor=sva`；`--split-verilog` 与
+- 传给 firtool 的固定选项是 `-disable-all-randomization`、
+  `--lowering-options=emittedLineLength=120,svVarDeclStyle=reg`、`--preserve-aggregate=1d-vec` 与
+  `--verification-flavor=sva`；`--split-verilog` 与
   `--target-dir` 由 `emitSystemVerilog` 自动追加。**不要**加 `-default-layer-specialization=enable`：
   它会把 `AssertProperty` 的断言直接内联到主 SV，丢失 layer 提取，Vivado 综合会对每条并发断言报
   `[Synth 8-2898]`（见下文「硬件断言与形式化」）。
-  `emittedLineLength` 只改输出格式（单行代码上限
+  `svVarDeclStyle=reg` 固定模块级变量声明为 `reg`：firtool 1.163 起默认改成 `var logic`，本仓库的
+  Vivado 综合签核基于 `reg` 输出，不要让升级顺手改变声明风格。`emittedLineLength` 只改输出格式（单行代码上限
   放宽到 120 字符）；`--preserve-aggregate=1d-vec` 让一维 `Vec`（如 `MmcmDrpController` 的
   `daddrTable`/`diTable`）保留为具名 packed array，不改变端口与逻辑（对未改动模块，生成的 SV 除
   位置注释外与关闭该选项时逐字节相同）。位置注释保持 firtool 默认的 `// <源文件> <行列>` 形式
@@ -61,6 +63,13 @@ object EmitFoo extends Main {
 
 Mill 专属的注意点：
 
+- **依赖版本**：`scalaVersion = "3.10.1"`、`chiselVersion = "latest.integration"`——总是解析到 snapshots 仓库里
+  最新的 Chisel 快照，不钉死某个 `+<构建号>-<提交哈希>` 版本。Chisel 的正式发布只提供 Scala 2.13 构件
+  （`chisel_2.13`），Scala 3 构件（`chisel_3` 与 `chisel-plugin_3.10.1`）只随快照发布，因此 `build.mill` 额外注册
+  Sonatype Central Portal 的 snapshots 仓库（`https://central.sonatype.com/repository/maven-snapshots`）。
+  Coursier 对快照元数据有 24h 缓存 TTL，需要立即刷新时用 `COURSIER_TTL=0s ./mill ...`；升级后编译产物与
+  emit 缓存按键里的依赖标识（jar 路径 + 大小）自动失效。注意 `latest.integration` 会跟随 Chisel 的版本线，
+  `scalaVersion` 必须与该快照发布编译器插件的 Scala 版本对应（当前 3.10.1）。
 - **一条命令可传多个模块名**：`emit` 的位置参数就是模块名（可写 `Controller`、`EmitController` 或主类全名），
   需要生成多个模块时写在同一条命令里即可，不要拆成多条重复命令。
 - **`--force` / `--check` 必须写在模块名之前**：模块名之后的选项不会被当作选项解析，必须写成
@@ -142,7 +151,9 @@ Verilator 与 xsim / Vivado 都能直接编译。
   `clock`/`resetn`/`s_axi_lite_*`/`drp_*`/`mmcm_reset`，内部名没有 `impl_` 前缀（如 `state`、
   `clkFbOut`、`loadPending`；子模块连线 `_axiLiteSlave__io_*`，复位同步器实例
   `reset_resetSynchronizer`）。`DigitalPhaseMeterTop` 同样继承 `TopModule`，主时钟域复位就是
-  `TopModule.reset`。写断言或看波形时按这些名字找。
+  `TopModule.reset`。写断言或看波形时按这些名字找。Chisel 快照的 `Counter` 内部寄存器在生成 SV 里
+  叫 `c_value` / `c_value_1`（Scala 2.13 版按 `val` 名生成 `gateCnt` / `idx` / `holdCntTrigger_c_value`）；
+  端口与逻辑不变，看波形时按 `c_value` 找。
 - `Axi4LiteSlave.apply` / `PhaseMeter.apply` 里的 `.suggestName("")` 只是去掉「实例名 + 模块名」的
   重复前缀（生成实例 `axiLiteSlave_`/`phaseMeter_`，内部线名 `_axiLiteSlave__io_*`/`_phaseMeter__io_*`），
   不影响连接与端口名。
@@ -358,7 +369,7 @@ Verilator 与 xsim / Vivado 都能直接编译。
 ## 格式与检查
 
 - Scala 代码用 `scalafmt` 格式化（配置见 `.scalafmt.conf`，`maxColumn = 120`、4 空格缩进）：`scalafmt` 就地格式化，`scalafmt --test` 只检查。提交前保证 `scalafmt --test` 通过。
-- 静态分析工具链：Mill 的 Scalafix 插件（`com.goyeau::mill-scalafix`，规则与配置在 `.scalafix.conf`）+ 编译器 lint（`build.mill` 的 `scalacOptions`）。规则一句话：Scalafix 禁 `var` / `throw` / `null` / `while` / `return` 等语法（改用 Chisel 的 `Reg` / `Wire` / `require` 写法）并整理导入，编译器侧统一打开 `-Xlint` / `-Wunused` / `-Wdead-code`，且 `-Werror` 让告警变成构建失败。检查命令：`./mill compile`（编译器 lint）、`./mill fix --check`（Scalafix 检查）、自动修复 `./mill fix`、格式检查 `scalafmt --test`；标准都是 0 warning。
+- 静态分析工具链：Mill 的 Scalafix 插件（`com.goyeau::mill-scalafix`，规则与配置在 `.scalafix.conf`）+ 编译器 lint（`build.mill` 的 `scalacOptions`）。规则一句话：Scalafix 禁 `var` / `throw` / `null` / `while` / `return` 等语法（改用 Chisel 的 `Reg` / `Wire` / `require` 写法）并整理导入，编译器侧打开 `-Wunused:imports,privates,locals,patvars,implicits,explicits`，且 `-Werror` 让告警变成构建失败（Scala 3.10 已移除 Scala 2 时代的 `-Xlint` / `-Wdead-code` / `-Xcheckinit` / `-Ymacro-annotations`，不要加回来）。检查命令：`./mill compile`（编译器 lint）、`./mill fix --check`（Scalafix 检查）、自动修复 `./mill fix`、格式检查 `scalafmt --test`；标准都是 0 warning。
 - 改完 RTL 先保证上述检查通过：`-Werror` 下任何告警都会让 `compile` 失败，带着告警去生成没有意义。跑 `xmake test` 时构建目标会自动调用生成入口；单独生成、或为 xsim / Vivado 准备产物时再手工跑 `./mill emit`。新增/重命名模块、调整导入时尤其注意未使用 import、非穷尽 match 与 nullary-unit 这几类告警（检查项与有意关闭的规则见 `dpm-pre-delivery-check` 第 2 节）。
 - 注释遵循仓库根目录 `AGENTS.md` 的语言约定，风格为 Doxygen（`/** ... */`，参数用 `@param`）；公共模块类的文档注释要说明它在哪个时钟域、各参数含义。
 - 新增模块后同步补齐：生成入口（`Emit<Name>`）、必要时 `test/<Name>.cpp`，并把新踩到的坑写回本 skill。

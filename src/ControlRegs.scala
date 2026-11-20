@@ -1,10 +1,10 @@
 package DigitalPhaseMeter
 
-import chisel3._
+import chisel3.*
 import chisel3.experimental.BundleLiterals.AddBundleLiteralConstructor
 import chisel3.experimental.dataview.RecordUpcastable
 import chisel3.ltl.AssertProperty
-import chisel3.util._
+import chisel3.util.*
 
 /** 控制/状态与测量结果寄存器堆
   *
@@ -70,7 +70,7 @@ class ControlRegs(
     val gateCntWidth: Int = 28,
     val edgeCntWidth: Int = 32,
     val phaseCntWidth: Int = 32
-) extends Module {
+) extends Module:
     require(dataWidth == 32, "寄存器堆当前只支持 32 位数据宽度")
     // 每条测量结果占用的字数
     val recordWords = 4
@@ -81,10 +81,9 @@ class ControlRegs(
       *
       * 声明顺序即寄存器索引（写译码与读 mux 都用 `.asUInt`），不要插入或改变顺序。
       */
-    private object RegIndex extends ChiselEnum {
+    private object RegIndex extends ChiselEnum:
         val iCtrl, iStatus, iGateTarget, iResultGate, iResultEdge, iResultPhase, iResultSeq, iLostCnt, iIrqStatus,
             iVersion, iCaps, iSigCtrl, iSigStatus = Value
-    }
     import RegIndex._
     private val indexWidth = RegIndex.getWidth
     // 地址译码用 addr[indexWidth+1:2]，因此命令总线至少要能容纳寄存器索引与字内偏移
@@ -96,17 +95,17 @@ class ControlRegs(
     private val hasSignalSource = true.B
     private val capsValue = Cat(hasSignalSource, true.B, resultDepth.U(8.W), recordWords.U(8.W))
 
-    val io = IO(new Bundle {
+    val io = IO(new Bundle:
         // 来自 AXI4-Lite 从口的写命令
-        val wr = DeqIO(new AxiLiteWritePayload(addrWidth, dataWidth))
+        val wr = DeqIO(AxiLiteWritePayload(addrWidth, dataWidth))
         // 来自 AXI4-Lite 从口的读命令
-        val rd = DeqIO(new AxiLiteReadPayload(addrWidth))
+        val rd = DeqIO(AxiLiteReadPayload(addrWidth))
         // 组合读数据
         val rdData = Output(UInt(dataWidth.W))
         // 测量请求，接 Controller 的 in
-        val request = ValidIO(new ControllerInPayload(gateCntWidth))
+        val request = ValidIO(ControllerInPayload(gateCntWidth))
         // 测量结果，接 Controller 的 out
-        val response = Flipped(ValidIO(new ControllerOutPayload(gateCntWidth, edgeCntWidth, phaseCntWidth)))
+        val response = Flipped(ValidIO(ControllerOutPayload(gateCntWidth, edgeCntWidth, phaseCntWidth)))
         // 测量完成中断，高有效电平
         val interrupt = Output(Bool())
         // MMCM 锁定状态（异步输入，寄存器堆内部同步后供状态位使用）
@@ -114,8 +113,7 @@ class ControlRegs(
         // 片内信号源使能与输入选择（主时钟域电平），接主时钟域的 `SignalInputMux`
         val sigEnable = Output(Bool())
         val srcSelect = Output(Bool())
-        val forceStop = Output(Bool())
-    })
+        val forceStop = Output(Bool()))
 
     // ---- 寄存器 ----
     private val targetGate = RegInit(0.U(dataWidth.W))
@@ -125,10 +123,9 @@ class ControlRegs(
     private val resultValid = RegInit(false.B)
     private val lostCnt = Counter(1 << 16)
     // 最新一条结果的 4 个字（记录序号在锁存时取当时的 `seq`，随后 `seq` 自增）
-    private class ResultBundle extends ControllerOutPayload(gateCntWidth, edgeCntWidth, phaseCntWidth) {
+    private class ResultBundle extends ControllerOutPayload(gateCntWidth, edgeCntWidth, phaseCntWidth):
         val seqCnt = UInt(16.W)
-    }
-    private val result = RegInit((new ResultBundle).Lit(_.seqCnt -> 0.U))
+    private val result = RegInit(ResultBundle().Lit(_.seqCnt -> 0.U))
     // 下一条结果的记录序号：与结果寄存器分开保存，锁存时先取旧值再自增（首条结果序号为 0）
     private val seq = Counter(1 << 16)
     // 片内信号源与输入选择：软件侧寄存器，直接驱动主时钟域的组合输入选择
@@ -145,24 +142,22 @@ class ControlRegs(
     private val clearPulse = WireDefault(false.B)
     // 写通道不挂起任何命令：配置与输入选择同在本域生效，不需要等跨时钟域送达
     io.wr.ready := true.B
-    when(io.wr.fire) {
-        import io.wr.bits._
+    private val wrBits = io.wr.bits
+    when(io.wr.fire):
+        import wrBits._
         val (addrSlice, _) = RegIndex.safe(addr(indexWidth + 1, 2))
-        when(addrSlice === iCtrl && strb(0)) {
+        when(addrSlice === iCtrl && strb(0)):
             startPulse := data(0)
             irqEnable := data(1)
             clearPulse := data(2)
             forceStop := data(3)
-        }
         when(addrSlice === iGateTarget) { targetGate := ByteStrobe.merge(targetGate, data, strb) }
         val isIrqStatus = addrSlice === iIrqStatus && strb(0)
-        when(isIrqStatus) {
+        when(isIrqStatus):
             when(data(0)) { irqPending := false.B }
             when(data(1)) { resultValid := false.B }
             when(data(2)) { lostCnt.reset() }
-        }
         when(addrSlice === iSigCtrl && strb(0)) { sigEnable := data(0); srcSelect := data(1) }
-    }
 
     // ---- 输入选择输出：直接驱动主时钟域的组合门控与二选一，同拍生效 ----
     io.sigEnable := sigEnable
@@ -182,8 +177,8 @@ class ControlRegs(
     // ---- 结果锁存：只保留最新一条，被覆盖的旧结果计入丢失 ----
     // 本块写在写通道之后：同一拍 IRQ_STATUS 的 W1C 与新结果竞争时新结果优先（后写优先）；
     // CTRL.clear 写在更后面，同拍清零优先
-    when(io.response.fire) {
-        result.viewAsSupertype(new ControllerOutPayload) := io.response.bits
+    when(io.response.fire):
+        result.viewAsSupertype(ControllerOutPayload()) := io.response.bits
         // 先保存本次的序号，再自增给下一条结果：首条结果序号为 0
         result.seqCnt := seq.value
         seq.inc()
@@ -191,7 +186,6 @@ class ControlRegs(
         irqPending := true.B
         resultValid := true.B
         when(resultValid) { lostCnt.inc() }
-    }
 
     // ---- 强制停止 ----
     // 写 CTRL.forceStop 后的一拍撤销 busy，Controller 同步回到 idle 并让 PhaseMeter 中止在途测量。
@@ -202,13 +196,12 @@ class ControlRegs(
 
     // ---- 清零 ----
     // 写 CTRL.clear 当拍生效（不挂起）：只复位结果区与标志，不动 busy，正在进行的测量继续跑完并照常锁存结果
-    when(clearPulse) {
+    when(clearPulse):
         lostCnt.reset()
         seq.reset()
         irqPending := false.B
         resultValid := false.B
         result := 0.U.asTypeOf(result)
-    }
 
     io.interrupt := irqPending && irqEnable
 
@@ -218,7 +211,7 @@ class ControlRegs(
     private val sourceReady = !srcSelect || (sigEnable && srcLocked)
     private val lostFlag = lostCnt.value =/= 0.U
     io.rd.ready := true.B
-    io.rdData := MuxLookup(io.rd.bits.addr(indexWidth + 1, 2), 0.U)(
+    io.rdData := MuxLookup(io.rd.bits.addr(indexWidth + 1, 2), 0.U):
         Seq(
             iCtrl -> Cat(irqEnable, 0.U(1.W)),
             iStatus -> Cat(irqPending, lostFlag, resultValid, busy),
@@ -233,8 +226,6 @@ class ControlRegs(
             iCaps -> capsValue,
             iSigCtrl -> Cat(srcSelect, sigEnable),
             iSigStatus -> Cat(sourceReady, srcLocked, srcSelect, sigEnable)
-        ).map { case (i, v) => (i.asUInt, v.pad(dataWidth)) }
-    )
-}
+        ).map((i, v) => (i.asUInt, v.pad(dataWidth)))
 
-object EmitControlRegs extends Main { emitSystemVerilog(new ControlRegs) }
+object EmitControlRegs extends Main { protected def emit = emitSystemVerilog(ControlRegs()) }

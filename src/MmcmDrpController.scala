@@ -1,9 +1,9 @@
 package DigitalPhaseMeter
 
-import chisel3._
+import chisel3.*
 import chisel3.ltl.AssertProperty
 import chisel3.ltl.Sequence.BoolSequence
-import chisel3.util._
+import chisel3.util.*
 
 /** MMCM 动态重配置（DRP）控制器
   *
@@ -43,9 +43,9 @@ import chisel3.util._
   *
   * 重配置期间 MMCM 会失锁、输出停止，因此软件必须在测量空闲（`STATUS.busy = 0`）时改。
   */
-class MmcmDrpController extends TopModule {
+class MmcmDrpController extends TopModule:
     // AXI4-Lite 从口（固定 32 位地址 / 32 位数据）
-    val s_axi_lite = IO(new Axi4LiteSlavePorts)
+    val s_axi_lite = IO(Axi4LiteSlavePorts())
     // MMCM 动态重配置口
     val drp_daddr = IO(Output(UInt(7.W)))
     val drp_di = IO(Output(UInt(16.W)))
@@ -86,7 +86,7 @@ class MmcmDrpController extends TopModule {
     // 不再零扩展回 32 位。行为与全宽锁存完全一致，只是不再产生
     // 「未读寄存器位被 trim」的 Synth 8-3936 告警。
     private val drpAddrUsedWidth = 12
-    private val axiLiteSlave = Module(new Axi4LiteSlave(drpAddrUsedWidth, 16))
+    private val axiLiteSlave = Module(Axi4LiteSlave(drpAddrUsedWidth, 16))
     axiLiteSlave.io.wr.ready := true.B
     axiLiteSlave.io.rd.ready := true.B
 
@@ -97,16 +97,14 @@ class MmcmDrpController extends TopModule {
     // 地址译码：BD 把本 IP 映射到 4KB 段（0x43C1_0000）。
     // 地址在从口处已截断到页内偏移 addr[11:0]：`addr[11:6]` 必须为 0（寄存器区只有 0x00..0x28）、
     // `addr[1:0]` 必须为 0（32 位对齐）；AXI 的高位不参与译码，由 BD 的地址段保证只有本段传输到达本 IP。
-    private object RegIndex extends ChiselEnum {
+    private object RegIndex extends ChiselEnum:
         val iVersion, iStatus, iClkFbOut, iClkFbOut2, iClkOut0, iClkOut0_2, iClkOut1, iClkOut1_2, iDivClk, iPower,
             iLoadPending = Value
-    }
     private val indexWidth = RegIndex.getWidth
     import RegIndex._
-    def inWindowOf(addr: UInt): Bool = {
+    private def inWindowOf(addr: UInt): Bool =
         // 从口已把地址截断到低 drpAddrUsedWidth 位，只需检查窗口内偏移
         Cat(addr(drpAddrUsedWidth - 1, indexWidth + 2), addr(1, 0)) === 0.U
-    }
     private val inWindowWr = inWindowOf(axiLiteSlave.io.wr.bits.addr)
     private val inWindowRd = inWindowOf(axiLiteSlave.io.rd.bits.addr)
     private val indexMap = Seq(
@@ -124,20 +122,17 @@ class MmcmDrpController extends TopModule {
 
     // LOAD 是写 1 触发，不落寄存器；用字节选通合并后的值
     private val writeValid = axiLiteSlave.io.wr.fire && inWindowWr
-    when(writeValid) {
+    when(writeValid):
         val wrBits = axiLiteSlave.io.wr.bits
         import wrBits._
         val (addrSlice, _) = RegIndex.safe(addr(indexWidth + 1, 2))
-        indexMap.drop(2).foreach { case (i, v) =>
-            when(addrSlice === i) { v := ByteStrobe.merge(v, data, strb) }
-        }
+        indexMap.drop(2).foreach((i, v) => when(addrSlice === i) { v := ByteStrobe.merge(v, data, strb) })
         loadPending := addrSlice === iLoadPending && strb(0) && data(0)
-    }
 
     // 读数据：窗口外读回 0。寄存器的数据只用低 16 位，高 16 位恒 0。
     axiLiteSlave.io.rdData := Mux(
         inWindowRd,
-        MuxLookup(axiLiteSlave.io.rd.bits.addr(indexWidth + 1, 2), 0.U)(indexMap.map { case (i, v) => (i.asUInt, v) }),
+        MuxLookup(axiLiteSlave.io.rd.bits.addr(indexWidth + 1, 2), 0.U)(indexMap.map((i, v) => (i.asUInt, v))),
         0.U
     )
 
@@ -163,7 +158,7 @@ class MmcmDrpController extends TopModule {
     private val (_, holdCntTrigger) = Counter(0 until 8, holdCntEnable, isIdle)
 
     private val daddrTable = VecInit(0x14.U, 0x15.U, 0x08.U, 0x09.U, 0x0a.U, 0x0b.U, 0x16.U, 0x28.U)
-    private val diTable = VecInit(indexMap.drop(2).map { case (_, v) => v })
+    private val diTable = VecInit(indexMap.drop(2).map((_, v) => v))
 
     drp_daddr := daddrTable(idx)
     drp_di := diTable(idx)
@@ -182,17 +177,16 @@ class MmcmDrpController extends TopModule {
     AssertProperty(drp_dwe === drp_den, "DRP controller only performs writes")
     AssertProperty(drp_den |=> !drp_den, label = Some("DRP DEN must be high for a single cycle"))
 
-    switch(state) {
+    switch(state):
         is(sIdle) { when(loadPending) { state := sResetHold } }
         // 复位至少要按住几拍（MMCM 数据手册要求 RST 有效宽度；这里取 8 个 CLK）。
         is(sResetHold) { when(holdCntTrigger) { state := sWrite } }
         is(sWrite) { state := sWait }
         is(sWait) { when(drp_drdy) { state := Mux(idxTrigger, sIdle, sWrite) } }
-    }
+
     when(state === sIdle && loadPending) { loadPending := false.B }
 
     // AXI 从口：本模块顶层端口与 Axi4LiteSlave 的方向约定一致，直接整体连接
     s_axi_lite :<>= axiLiteSlave.io.axi
-}
 
-object EmitMmcmDrpController extends Main { emitSystemVerilog(new MmcmDrpController) }
+object EmitMmcmDrpController extends Main { protected def emit = emitSystemVerilog(MmcmDrpController()) }

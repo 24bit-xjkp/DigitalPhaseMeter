@@ -1,13 +1,13 @@
 package DigitalPhaseMeter
 
-import chisel3._
+import chisel3.*
 
 /** 复位同步器：异步置位、同步释放
   *
   * @param n
   *   同步释放的延迟级数
   */
-class ResetSynchronizer(val n: Int = 4) extends RawModule {
+class ResetSynchronizer(val n: Int = 4) extends RawModule:
     require(n >= 2)
     val clock = IO(Input(Clock()))
     // 异步复位输入，低有效
@@ -17,15 +17,12 @@ class ResetSynchronizer(val n: Int = 4) extends RawModule {
 
     // 复位链的寄存器用异步复位：resetn 拉低时立即清零，输出随之置位
     reset := withClockAndReset(clock, (!resetn.asBool).asAsyncReset) { MyShiftRegister(false.B, n, true.B) }
-}
 
-object ResetSynchronizer {
-    def apply(clock: Clock, resetn: Reset, n: Int = 4): Bool = {
+object ResetSynchronizer:
+    def apply(clock: Clock, resetn: Reset, n: Int = 4): Bool =
         val resetSynchronizer = Module(new ResetSynchronizer(n))
         resetSynchronizer.clock := clock
         resetSynchronizer.resetn := resetn.asAsyncReset
         resetSynchronizer.reset
-    }
-}
 
-object EmitResetSynchronizer extends Main { emitSystemVerilog(new ResetSynchronizer) }
+object EmitResetSynchronizer extends Main { protected def emit = emitSystemVerilog(new ResetSynchronizer) }

@@ -1,6 +1,6 @@
 package DigitalPhaseMeter
 
-import chisel3._
+import chisel3.*
 
 /** 数字相位计顶层
   *
@@ -46,7 +46,7 @@ class DigitalPhaseMeterTop(
     val gateCntWidth: Int = 28,
     val edgeCntWidth: Int = 32,
     val phaseCntWidth: Int = 32
-) extends TopModule {
+) extends TopModule:
     // AXI4-Lite 端口固定 32 位地址 / 32 位数据；寄存器堆只按 addr[5:2] 译码，
     // 因此从口只把低 6 位地址交给下游，写数据保持全宽（数据通路是 32 位寄存器）
     private val axiAddrUsedWidth = 6
@@ -55,21 +55,21 @@ class DigitalPhaseMeterTop(
     // 高速测量时钟
     val dspClock = IO(Input(Clock()))
     // 外部被测信号输入（异步）
-    val extSig = IO(Input(new PhaseMeterSignalPayload))
+    val extSig = IO(Input(PhaseMeterSignalPayload()))
     // 片内信号源：PL 内 MMCM 产生的两路同频、相位差可调的时钟（异步于测量时钟域）
-    val intSig = IO(Input(new PhaseMeterSignalPayload))
+    val intSig = IO(Input(PhaseMeterSignalPayload()))
     // 片内信号源 MMCM 的锁定指示（异步电平）
     val srcLocked = IO(Input(Bool()))
     // 控制/状态与结果寄存器从口（AXI4-Lite，固定 32 位地址 / 32 位数据）
-    val s_axi_lite = IO(new Axi4LiteSlavePorts)
+    val s_axi_lite = IO(Axi4LiteSlavePorts())
     // 测量完成中断，高有效电平
     val interrupt = IO(Output(Bool()))
 
-    private val controller = Module(new Controller(gateCntWidth, edgeCntWidth, phaseCntWidth))
+    private val controller = Module(Controller(gateCntWidth, edgeCntWidth, phaseCntWidth))
     controller.dspClock := dspClock
 
     private val controlRegs = Module(
-        new ControlRegs(axiAddrUsedWidth, axiDataUsedWidth, gateCntWidth, edgeCntWidth, phaseCntWidth)
+        ControlRegs(axiAddrUsedWidth, axiDataUsedWidth, gateCntWidth, edgeCntWidth, phaseCntWidth)
     )
     // MMCM 的 locked 异步于主时钟，同步后再进状态寄存器
     controlRegs.io.srcLocked := srcLocked
@@ -81,7 +81,7 @@ class DigitalPhaseMeterTop(
     // 寄存器堆只按 `addr[5:2]` 译码，地址高位不参与任何逻辑，因此 AXI 从口只把低 6 位地址交给下游
     // （命令总线本身就是 6 位地址，不再零扩展）；数据通路是 32 位寄存器，写数据保持全宽。
     // 行为与全宽锁存完全一致，只是不再产生「未读寄存器位被 trim」的 Synth 8-3936 告警。
-    private val axiLiteSlave = Module(new Axi4LiteSlave(axiAddrUsedWidth, axiDataUsedWidth))
+    private val axiLiteSlave = Module(Axi4LiteSlave(axiAddrUsedWidth, axiDataUsedWidth))
 
     // AXI4-Lite 从口 ↔ 寄存器堆
     s_axi_lite :<>= axiLiteSlave.io.axi
@@ -95,6 +95,5 @@ class DigitalPhaseMeterTop(
     controller.io.forceStop := controlRegs.io.forceStop
 
     interrupt := controlRegs.io.interrupt
-}
 
-object EmitDigitalPhaseMeterTop extends Main { emitSystemVerilog(new DigitalPhaseMeterTop) }
+object EmitDigitalPhaseMeterTop extends Main { protected def emit = emitSystemVerilog(DigitalPhaseMeterTop()) }
