@@ -6,7 +6,8 @@ import chisel3.util.*
 
 /** 相位计输入信号，sig1为参考信号，sig2为被测信号
   */
-class PhaseMeterSignalPayload extends Bundle { val sig1, sig2 = Bool() }
+class PhaseMeterSignalPayload extends Bundle:
+    val sig1, sig2 = Bool()
 
 /** 相位计响应负载
   *
@@ -15,7 +16,7 @@ class PhaseMeterSignalPayload extends Bundle { val sig1, sig2 = Bool() }
   * @param phaseCntWidth
   *   相位计数器宽度
   */
-class PhaseMeterResponsePayload(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extends Bundle:
+open class PhaseMeterResponsePayload(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extends Bundle:
     // 检测到参考信号的总边沿数
     val edgeCnt = UInt(edgeCntWidth.W)
     // 相位差计数
@@ -23,7 +24,8 @@ class PhaseMeterResponsePayload(val edgeCntWidth: Int = 32, val phaseCntWidth: I
 
 /** 相位计状态机枚举
   */
-object PhaseMeterStateEnum extends ChiselEnum { val sIdle, sWaitStart, sMeasuring, sWaitStop = Value }
+object PhaseMeterStateEnum extends ChiselEnum:
+    val sIdle, sWaitStart, sMeasuring, sWaitStop = Value
 
 /** 相位计，工作在高速时钟域
   *
@@ -60,7 +62,7 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
     private val responseValid = CdcToggleHandShake.send(io.response.valid)
     private val forceStop = CdcToggleHandShake.receive(io.forceStop)
 
-    import PhaseMeterStateEnum._
+    import PhaseMeterStateEnum.*
     private val state = RegInit(sIdle)
     // 复位值取 true：空闲拍本来就会重新置位；给出确定初值，避免 xsim 复位后第一拍为 X
     private val needSendResponse = RegInit(true.B)
@@ -80,7 +82,9 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
     when(isIdle) { needSendResponse := true.B }
     when(state === sWaitStart && pulseSig1) { responseValid.send() }
     private val sendResponse = state === sWaitStop && pulseSig2 && needSendResponse
-    when(sendResponse) { responseValid.send(); needSendResponse := false.B }
+    when(sendResponse):
+        responseValid.send()
+        needSendResponse := false.B
 
     // 计数器控制脚全部寄存器化（450MHz 的关键路径）：clearCnt / pulseSig1Valid /
     // pulseSig2Valid / phaseCntEnable 都是寄存器，直接驱动 DSP48E1 的 RSTP/CEP 控制脚。
@@ -102,4 +106,5 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
     io.response.bits.edgeCnt := DspCounter(edgeCntWidth, clearCnt, pulseSig1Valid, false)
     io.response.bits.phaseCnt := DspCounter(phaseCntWidth, clearCnt, phaseCntEnable, false)
 
-object EmitPhaseMeter extends Main { protected def emit = emitSystemVerilog(PhaseMeter()) }
+object EmitPhaseMeter extends Main:
+    protected def emit = emitSystemVerilog(PhaseMeter())

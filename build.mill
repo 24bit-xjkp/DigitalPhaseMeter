@@ -20,13 +20,9 @@ import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
 
 object `package` extends ScalaModule with ScalafixModule:
-    // 当前 Chisel 快照的 Scala 3 编译器插件按 3.10.1 发布（`chisel-plugin_3.10.1`）
     def scalaVersion = "3.10.1"
 
-    // 总是使用 Chisel 的最新快照：latest.integration 让 Coursier 在 snapshots 仓库里取当前最新的快照构建，
-    // 不绑定到某个具体的 +<构建号>-<提交哈希>。代价是构建不可复现、且会跟随 Chisel 的版本线升级；
-    // 快照元数据有缓存 TTL（默认 24h），需要立刻拉取最新时用 COURSIER_TTL=0s ./mill ... 强制刷新。
-    // 若快照只发布了新的 Scala 版本，还要同步调整 scalaVersion。
+    // 总是使用 Chisel 的最新快照：latest.integration 让 Coursier 在 snapshots 仓库里取当前最新的快照构建
     def chiselVersion = "latest.integration"
 
     def mvnDeps = Seq(mvn"org.chipsalliance::chisel:$chiselVersion")
@@ -34,14 +30,14 @@ object `package` extends ScalaModule with ScalafixModule:
     def scalacPluginMvnDeps = Seq(mvn"org.chipsalliance:::chisel-plugin:$chiselVersion")
 
     override def repositoriesTask = Task.Anon:
-        super.repositoriesTask() ++ Seq(MavenRepository("https://central.sonatype.com/repository/maven-snapshots"))
+        super.repositoriesTask() :+ MavenRepository("https://central.sonatype.com/repository/maven-snapshots")
 
     def scalacOptions = Seq(
-        "-language:reflectiveCalls",
         "-deprecation",
         "-feature",
         "-Wunused:imports,privates,locals,patvars,implicits,explicits",
-        "-Werror"
+        "-Werror",
+        "-source:future-migration"
     )
 
     // 避免Scala 3.10在JDK 24+上产生Unsafe.objectFieldOffset警告

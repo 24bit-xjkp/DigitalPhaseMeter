@@ -25,4 +25,5 @@ object ResetSynchronizer:
         resetSynchronizer.resetn := resetn.asAsyncReset
         resetSynchronizer.reset
 
-object EmitResetSynchronizer extends Main { protected def emit = emitSystemVerilog(new ResetSynchronizer) }
+object EmitResetSynchronizer extends Main:
+    protected def emit = emitSystemVerilog(new ResetSynchronizer)

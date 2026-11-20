@@ -84,7 +84,7 @@ class ControlRegs(
     private object RegIndex extends ChiselEnum:
         val iCtrl, iStatus, iGateTarget, iResultGate, iResultEdge, iResultPhase, iResultSeq, iLostCnt, iIrqStatus,
             iVersion, iCaps, iSigCtrl, iSigStatus = Value
-    import RegIndex._
+    import RegIndex.*
     private val indexWidth = RegIndex.getWidth
     // 地址译码用 addr[indexWidth+1:2]，因此命令总线至少要能容纳寄存器索引与字内偏移
     require(addrWidth >= indexWidth + 2, "addrWidth 必须能容纳寄存器索引与字内偏移")
@@ -142,9 +142,9 @@ class ControlRegs(
     private val clearPulse = WireDefault(false.B)
     // 写通道不挂起任何命令：配置与输入选择同在本域生效，不需要等跨时钟域送达
     io.wr.ready := true.B
-    private val wrBits = io.wr.bits
     when(io.wr.fire):
-        import wrBits._
+        val wrBits = io.wr.bits
+        import wrBits.*
         val (addrSlice, _) = RegIndex.safe(addr(indexWidth + 1, 2))
         when(addrSlice === iCtrl && strb(0)):
             startPulse := data(0)
@@ -157,7 +157,9 @@ class ControlRegs(
             when(data(0)) { irqPending := false.B }
             when(data(1)) { resultValid := false.B }
             when(data(2)) { lostCnt.reset() }
-        when(addrSlice === iSigCtrl && strb(0)) { sigEnable := data(0); srcSelect := data(1) }
+        when(addrSlice === iSigCtrl && strb(0)):
+            sigEnable := data(0)
+            srcSelect := data(1)
 
     // ---- 输入选择输出：直接驱动主时钟域的组合门控与二选一，同拍生效 ----
     io.sigEnable := sigEnable
@@ -228,4 +230,5 @@ class ControlRegs(
             iSigStatus -> Cat(sourceReady, srcLocked, srcSelect, sigEnable)
         ).map((i, v) => (i.asUInt, v.pad(dataWidth)))
 
-object EmitControlRegs extends Main { protected def emit = emitSystemVerilog(ControlRegs()) }
+object EmitControlRegs extends Main:
+    protected def emit = emitSystemVerilog(ControlRegs())

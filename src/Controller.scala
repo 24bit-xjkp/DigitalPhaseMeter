@@ -23,7 +23,7 @@ class ControllerInPayload(val gateCntWidth: Int = 28) extends Bundle:
   * @param phaseCntWidth
   *   相位计数器宽度
   */
-class ControllerOutPayload(
+open class ControllerOutPayload(
     val gateCntWidth: Int = 28,
     override val edgeCntWidth: Int = 32,
     override val phaseCntWidth: Int = 32
@@ -89,21 +89,27 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
     private val targetGate = Reg(UInt(gateCntWidth.W))
     private val targetGateMet = gateCnt === targetGate
 
-    import PhaseMeterStateEnum._
+    import PhaseMeterStateEnum.*
     private val state = RegInit(sIdle)
     switch(state):
         is(sIdle) { when(io.in.fire) { state := sWaitStart } }
         is(sWaitStart) { when(responseValid) { state := sMeasuring } }
         is(sMeasuring) { when(targetGateMet) { state := sWaitStop } }
         is(sWaitStop) { when(responseValid) { state := sIdle } }
-    when(io.forceStop) { state := sIdle; forceStop.send() }
+    when(io.forceStop):
+        state := sIdle
+        forceStop.send()
 
     private val isIdle = dontTouch(state === sIdle)
-    when(isIdle) { gateCntClear := true.B; out.valid := false.B }
+    when(isIdle):
+        gateCntClear := true.B
+        out.valid := false.B
     // 强制停止优先于同一拍的新启动：否则 Controller 回 idle 而 request 已经送给 PhaseMeter，
     // 两边状态机会失配（PhaseMeter 停在 sMeasuring/sWaitStop，之后再也等不到停止应答）。
     private val startRequestReceived = isIdle && io.in.fire && !io.forceStop
-    when(startRequestReceived) { targetGate := io.in.bits.targetGate; request.send() }
+    when(startRequestReceived):
+        targetGate := io.in.bits.targetGate
+        request.send()
     when(state === sWaitStart && responseValid) { gateCntClear := false.B }
     when(state === sMeasuring && targetGateMet) { request.send() }
     // 强制停止与停止响应同拍时按强制停止处理：被中止的测量不锁存结果、也不回停止应答
@@ -114,4 +120,5 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
         out.valid := true.B
         responseReady.send()
 
-object EmitController extends Main { protected def emit = emitSystemVerilog(Controller()) }
+object EmitController extends Main:
+    protected def emit = emitSystemVerilog(Controller())

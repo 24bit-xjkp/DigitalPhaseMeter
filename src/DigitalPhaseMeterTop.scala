@@ -96,4 +96,5 @@ class DigitalPhaseMeterTop(
 
     interrupt := controlRegs.io.interrupt
 
-object EmitDigitalPhaseMeterTop extends Main { protected def emit = emitSystemVerilog(DigitalPhaseMeterTop()) }
+object EmitDigitalPhaseMeterTop extends Main:
+    protected def emit = emitSystemVerilog(DigitalPhaseMeterTop())

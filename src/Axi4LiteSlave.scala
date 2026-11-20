@@ -112,4 +112,5 @@ class Axi4LiteSlave(
         label = Some("rdata must stay stable until rready")
     )
 
-object EmitAxi4LiteSlave extends Main { protected def emit = emitSystemVerilog(Axi4LiteSlave()) }
+object EmitAxi4LiteSlave extends Main:
+    protected def emit = emitSystemVerilog(Axi4LiteSlave())

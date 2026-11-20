@@ -8,9 +8,11 @@ import chisel3.*
 import circt.stage.ChiselStage
 
 trait Main:
-    protected val args = Array[String]()
+    protected var args = Array[String]() // scalafix:ok DisableSyntax.var
 
-    final def main(args: Array[String]): Unit = this.args.concat(args); emit
+    final def main(args: Array[String]): Unit =
+        this.args = args
+        emit
 
     protected def emit: Unit
 
@@ -47,7 +49,7 @@ trait Main:
     private def appendVerificationBinds(outputDir: Path): Unit =
         val filelist = outputDir.resolve("filelist.f")
         val verificationDir = outputDir.resolve("verification")
-        if (Files.isRegularFile(filelist) && Files.isDirectory(verificationDir))
+        if Files.isRegularFile(filelist) && Files.isDirectory(verificationDir) then
             val lines = Files.readAllLines(filelist).asScala.toSeq
             val stream = Files.walk(verificationDir)
             val binds =
@@ -58,7 +60,7 @@ trait Main:
                         .toSeq
                 finally stream.close()
             val missing = binds.distinct.sorted.filterNot(lines.contains)
-            if (missing.nonEmpty) Files.write(filelist, (lines ++ missing).asJava)
+            if missing.nonEmpty then Files.write(filelist, (lines ++ missing).asJava)
 
 trait TopModule extends RawModule with ImplicitClock with ImplicitReset:
     val clock = IO(Input(Clock()))

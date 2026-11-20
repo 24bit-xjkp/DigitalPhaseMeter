@@ -5,7 +5,8 @@ import chisel3.util.*
 
 /** AXI 响应编码
   */
-object AxiResp extends ChiselEnum { val okay, exOkay, slvErr, decErr = Value }
+object AxiResp extends ChiselEnum:
+    val okay, exOkay, slvErr, decErr = Value
 
 /** AXI4-Lite 从口信号
   *
@@ -90,4 +91,5 @@ class AxiLiteWritePayload(val addrWidth: Int = 32, val dataWidth: Int = 32) exte
   * @param addrWidth
   *   下游实际使用的地址宽度，可能小于 AXI 端口的 32 位
   */
-class AxiLiteReadPayload(val addrWidth: Int = 32) extends Bundle { val addr = UInt(addrWidth.W) }
+class AxiLiteReadPayload(val addrWidth: Int = 32) extends Bundle:
+    val addr = UInt(addrWidth.W)

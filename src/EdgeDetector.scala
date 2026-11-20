@@ -3,7 +3,8 @@ package DigitalPhaseMeter
 import chisel3.*
 
 /** 边沿类型 */
-enum EdgeType { case Rising, Falling, Both }
+enum EdgeType:
+    case Rising, Falling, Both
 
 /** 边沿检测器
   *
@@ -30,4 +31,5 @@ object EdgeDetector:
         edgeDetector.io.in := sig
         edgeDetector.io.trigger
 
-object EmitEdgeDetector extends Main { protected def emit = emitSystemVerilog(new EdgeDetector) }
+object EmitEdgeDetector extends Main:
+    protected def emit = emitSystemVerilog(new EdgeDetector)

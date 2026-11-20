@@ -101,7 +101,7 @@ class MmcmDrpController extends TopModule:
         val iVersion, iStatus, iClkFbOut, iClkFbOut2, iClkOut0, iClkOut0_2, iClkOut1, iClkOut1_2, iDivClk, iPower,
             iLoadPending = Value
     private val indexWidth = RegIndex.getWidth
-    import RegIndex._
+    import RegIndex.*
     private def inWindowOf(addr: UInt): Bool =
         // 从口已把地址截断到低 drpAddrUsedWidth 位，只需检查窗口内偏移
         Cat(addr(drpAddrUsedWidth - 1, indexWidth + 2), addr(1, 0)) === 0.U
@@ -124,7 +124,7 @@ class MmcmDrpController extends TopModule:
     private val writeValid = axiLiteSlave.io.wr.fire && inWindowWr
     when(writeValid):
         val wrBits = axiLiteSlave.io.wr.bits
-        import wrBits._
+        import wrBits.*
         val (addrSlice, _) = RegIndex.safe(addr(indexWidth + 1, 2))
         indexMap.drop(2).foreach((i, v) => when(addrSlice === i) { v := ByteStrobe.merge(v, data, strb) })
         loadPending := addrSlice === iLoadPending && strb(0) && data(0)
@@ -145,8 +145,9 @@ class MmcmDrpController extends TopModule:
     //   * 上板实测：不拉 RST 时**分频字立即生效、相位字不生效**（写相位字段后输出
     //     相位纹丝不动），因为相位延迟单元只在复位/重新锁定时重新初始化。
     // 因此重配置的完整时序是：RST=1 → 8 笔 DRP 写 → RST=0 → MMCM 重新锁定。
-    private object StateEnum extends ChiselEnum { val sIdle, sResetHold, sWrite, sWait = Value }
-    import StateEnum._
+    private object StateEnum extends ChiselEnum:
+        val sIdle, sResetHold, sWrite, sWait = Value
+    import StateEnum.*
     private val state = RegInit(sIdle)
     private val isIdle = state === sIdle
     // 「重配置进行中」状态位：由状态派生（不在 IDLE，或已收到 LOAD 但状态机还没进
@@ -189,4 +190,5 @@ class MmcmDrpController extends TopModule:
     // AXI 从口：本模块顶层端口与 Axi4LiteSlave 的方向约定一致，直接整体连接
     s_axi_lite :<>= axiLiteSlave.io.axi
 
-object EmitMmcmDrpController extends Main { protected def emit = emitSystemVerilog(MmcmDrpController()) }
+object EmitMmcmDrpController extends Main:
+    protected def emit = emitSystemVerilog(MmcmDrpController())

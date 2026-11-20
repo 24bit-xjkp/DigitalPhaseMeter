@@ -7,6 +7,7 @@ import chisel3.*
   * 用「电平翻转 + 同步链」表达跨域事件：发送方翻转电平，接收方用同步链采到翻转沿即得到 一个目的域脉冲。位宽为 1，因此不需要额外的数据通路。
   */
 object CdcToggleHandShake:
+    import scala.language.implicitConversions
     def receive(sig: Bool): Bool = EdgeDetector(sig, EdgeType.Both)
 
     class Sender(name: String):
@@ -14,8 +15,7 @@ object CdcToggleHandShake:
         def send() = sig := !sig
 
     object Sender:
-        import scala.language.implicitConversions
-        implicit def toBool(self: Sender): Bool = self.sig
+        given Conversion[Sender, Bool] = _.sig
 
     def send(sig: Bool) =
         val toggleHandShaker = Sender(s"${sig.name}HandShaker")

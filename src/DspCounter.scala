@@ -26,7 +26,7 @@ class DspCounter(val cntWidth: Int = 48, val withReset: Boolean = true) extends 
         val enable = Input(Bool())
         val value = Output(UInt(cntWidth.W)))
 
-    private val cnt = if (withReset) RegInit(0.U(cntWidth.W)) else Reg(UInt(cntWidth.W))
+    private val cnt = if withReset then RegInit(0.U(cntWidth.W)) else Reg(UInt(cntWidth.W))
     addAttribute(cnt, """use_dsp = "yes"""")
     when(io.clear) { cnt := 0.U }.elsewhen(io.enable) { cnt := cnt + 1.U }
     io.value := cnt
@@ -40,4 +40,5 @@ object DspCounter:
 
 // 独立产物按测量域实际使用的 32 位生成（PhaseMeter 的 edgeCnt/phaseCnt 宽度），
 // 这样 test/DspCounter.cpp 的端口类型与真实用例一致。
-object EmitDspCounter extends Main { protected def emit = emitSystemVerilog(new DspCounter(32)) }
+object EmitDspCounter extends Main:
+    protected def emit = emitSystemVerilog(new DspCounter(32))

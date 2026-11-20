@@ -35,4 +35,5 @@ object SignalInputMux:
         signalInputMux.io.intSig := intSig
         signalInputMux.io.outSig
 
-object EmitSignalInputMux extends Main { protected def emit = emitSystemVerilog(new SignalInputMux) }
+object EmitSignalInputMux extends Main:
+    protected def emit = emitSystemVerilog(new SignalInputMux)
