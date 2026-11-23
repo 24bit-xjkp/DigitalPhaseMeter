@@ -8,7 +8,7 @@ import chisel3.*
   */
 object CdcToggleHandShake:
     import scala.language.implicitConversions
-    def receive(sig: Bool): Bool = EdgeDetector(sig, EdgeType.Both)
+    def receive(sig: Bool)(using cfg: Config): Bool = EdgeDetector(sig, EdgeType.Both)
 
     class Sender(name: String):
         private val sig = RegInit(false.B).suggestName(name)

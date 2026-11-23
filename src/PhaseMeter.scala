@@ -11,16 +11,14 @@ class PhaseMeterSignalPayload extends Bundle:
 
 /** 相位计响应负载
   *
-  * @param edgeCntWidth
-  *   边沿计数器宽度
-  * @param phaseCntWidth
-  *   相位计数器宽度
+  * @param cfg
+  *   全局配置；`edgeCnt` / `phaseCnt` 的宽度分别取 `cfg.edgeCntWidth` / `cfg.phaseCntWidth`
   */
-open class PhaseMeterResponsePayload(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extends Bundle:
+open class PhaseMeterResponsePayload(using val cfg: Config) extends Bundle:
     // 检测到参考信号的总边沿数
-    val edgeCnt = UInt(edgeCntWidth.W)
+    val edgeCnt = UInt(cfg.edgeCntWidth.W)
     // 相位差计数
-    val phaseCnt = UInt(phaseCntWidth.W)
+    val phaseCnt = UInt(cfg.phaseCntWidth.W)
 
 /** 相位计状态机枚举
   */
@@ -29,19 +27,18 @@ object PhaseMeterStateEnum extends ChiselEnum:
 
 /** 相位计，工作在高速时钟域
   *
-  * @param edgeCntWidth
-  *   边沿计数器宽度
-  * @param phaseCntWidth
-  *   相位计数器宽度
+  * @param cfg
+  *   全局配置：边沿/相位计数器位宽与复位风格；模块名带 `cfg.suffix`
   */
-class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extends Module:
+class PhaseMeter(using val cfg: Config) extends Module:
+    override def desiredName: String = s"PhaseMeter${cfg.suffix}"
     val io = IO(new Bundle:
         // 输入信号
         val sig = Input(PhaseMeterSignalPayload())
         // 请求控制字
         val request = Input(Bool())
         // 响应控制字
-        val response = EnqIO(PhaseMeterResponsePayload(edgeCntWidth, phaseCntWidth))
+        val response = EnqIO(PhaseMeterResponsePayload())
         // 强制结束测量
         val forceStop = Input(Bool()))
 
@@ -103,8 +100,8 @@ class PhaseMeter(val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extend
         .elsewhen(pulseSig1Valid) { phaseCntEnable := true.B }
     AssertProperty(!(isIdle && phaseCntEnable), "phaseCntEnable must be low while idle")
 
-    io.response.bits.edgeCnt := DspCounter(edgeCntWidth, clearCnt, pulseSig1Valid, false)
-    io.response.bits.phaseCnt := DspCounter(phaseCntWidth, clearCnt, phaseCntEnable, false)
+    io.response.bits.edgeCnt := DspCounter(cfg.edgeCntWidth, clearCnt, pulseSig1Valid, false)
+    io.response.bits.phaseCnt := DspCounter(cfg.phaseCntWidth, clearCnt, phaseCntEnable, false)
 
 object EmitPhaseMeter extends Main:
     protected def emit = emitSystemVerilog(PhaseMeter())

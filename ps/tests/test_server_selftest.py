@@ -721,7 +721,7 @@ def test_long_gate_bounded_wait(host_main: str) -> None:
     * 精确的数值判据在 `ps/tests/test_proto.c` 的 `test_wait_budget`（与机器速度无关），
       这里只钉住端到端的「有界」性质，阈值留了 30 倍余量，避免换机器就抖。
     """
-    gate = 0x0FFFFFFF  # 28 位闸门计数器的上界（RTL gateCntWidth = 28）
+    gate = 0x0FFFFFFF  # 28 位闸门计数器的上界（RTL Config.gateCntWidth = 28）
     sv = Server(host_main, gate=gate)
     try:
         sv.expect_ok(CMD_SET_SOURCE, bytes([0]))  # 外部引脚；验证台默认没接信号

@@ -4,7 +4,7 @@
 
 ## 项目概览
 
-基于 Chisel 的数字相位计：测量两路同频信号的相位差。测量通路在高速时钟域（DSP 域，当前 450MHz，由 PL 内 MMCM 从 50MHz 倍频得到），控制、闸门计数与 AXI4-Lite 接口在低速时钟域（50MHz）。PS↔PL 的数据交换走 AXI4-Lite 寄存器（GPIO 式，一次测量只有 4 个字，不用 BRAM），并用测量完成中断通知 PS。测量输入有两条通路：外部引脚（`extSig_sig1`/`extSig_sig2`，默认约束到 W18/W19）与片内信号源（裸 MMCM 时基，频率与相位差由 PS 写 MMCM 寄存器镜像设定），由 PL 内的寄存器在两者之间切换。
+基于 Chisel 的数字相位计：测量两路同频信号的相位差。测量通路在高速时钟域（DSP 域，当前 450MHz，由 PL 内 MMCM 从 50MHz 倍频得到），控制、闸门计数与 AXI4-Lite 接口在低速时钟域（50MHz）。PS↔PL 的数据交换走 AXI4-Lite 寄存器（GPIO 式，一次测量只有 4 个字，不用 BRAM），并用测量完成中断通知 PS。测量输入有两条通路：外部引脚（`extSig_sig1`/`extSig_sig2`，默认约束到 W18/W19）与片内信号源（裸 MMCM 时基，频率与相位差由 PS 写 MMCM 寄存器镜像设定），由 PL 内的寄存器在两者之间切换。RTL 的计数器位宽与复位风格由 `src/Utils.scala` 的 `Config` 集中控制；顶层用 `chisel3.choice` 同时生成 FPGA（同步复位，后缀 `S`）与 ASIC（异步复位，后缀 `A`）两个分支，本仓库打包、综合与仿真只选 FPGA 分支。
 
 **工程已完成并通过实测验收（2026-10-19）**：PL 侧测量与控制 RTL、PS↔PL 互联、Vivado IP 与 block design、PS 侧裸机软件、PC 侧上位机均已实现，Verilator / xsim / 综合实现 / 上板验收均已跑通。当前工作以维护（缺陷修复、补充测试、文档更新）为主。
 

@@ -1,8 +1,11 @@
 // DigitalPhaseMeterTop 的 Verilator 测试（顶层 IP：AXI4-Lite 寄存器通路 + 测量 + 输入源切换）
 //
 // 被测对象是 Chisel 生成的 DigitalPhaseMeterTop（build/chisel/DigitalPhaseMeterTop/，与综合、
-// xsim 联调消费同一份产物）。顶层不含任何厂商原语，因此寄存器通路与测量通路的连接由本测试
-// 覆盖；依赖真实 MMCME2_ADV 的联调仍在 sim/tb_src_handoff.sv 里用 xsim 跑。
+// xsim 联调消费同一份产物）。生成顶层用 chisel3.choice 在 FPGA/ASIC 两个实现分支间选择；
+// 本测试由 test/xmake.lua 定义 `targets$Platform$FPGA`（并用 `--top DigitalPhaseMeterTop`
+// 指定顶层），因此实际被测实现是同步复位的 DigitalPhaseMeterTopImplS。顶层不含任何厂商原语，
+// 因此寄存器通路与测量通路的连接由本测试覆盖；依赖真实 MMCME2_ADV 的联调仍在
+// sim/tb_src_handoff.sv 里用 xsim 跑。
 //
 // 数据通道是 GPIO 式的寄存器：一次测量的结果只有 4 个字，锁存在 ControlRegs 的只读寄存器里，
 // PS 收到中断后读走即可，IP 内部没有 BRAM，对外也只有 s_axi_lite 一个 AXI4-Lite 从口。覆盖：

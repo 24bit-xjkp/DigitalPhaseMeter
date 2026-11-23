@@ -7,29 +7,21 @@ import chisel3.util.*
 
 /** 控制器输入负载
   *
-  * @param gateCntWidth
-  *   闸门计数器宽度
+  * @param cfg
+  *   全局配置；`targetGate` 的宽度取 `cfg.gateCntWidth`
   */
-class ControllerInPayload(val gateCntWidth: Int = 28) extends Bundle:
+class ControllerInPayload(using val cfg: Config) extends Bundle:
     // 目标闸门计数，在启动的那一拍被锁存；之后改写不影响本次测量（输入不必在测量期间保持稳定）
-    val targetGate = UInt(gateCntWidth.W)
+    val targetGate = UInt(cfg.gateCntWidth.W)
 
 /** 控制器输出负载
   *
-  * @param gateCntWidth
-  *   闸门计数器宽度
-  * @param edgeCntWidth
-  *   边沿计数器宽度
-  * @param phaseCntWidth
-  *   相位计数器宽度
+  * @param cfg
+  *   全局配置；`gateCnt` 取 `cfg.gateCntWidth`，`edgeCnt` / `phaseCnt` 取 `PhaseMeterResponsePayload` 里的对应宽度
   */
-open class ControllerOutPayload(
-    val gateCntWidth: Int = 28,
-    override val edgeCntWidth: Int = 32,
-    override val phaseCntWidth: Int = 32
-) extends PhaseMeterResponsePayload(edgeCntWidth, phaseCntWidth):
+open class ControllerOutPayload(using override val cfg: Config) extends PhaseMeterResponsePayload:
     // 实际闸门计数
-    val gateCnt = UInt(gateCntWidth.W)
+    val gateCnt = UInt(cfg.gateCntWidth.W)
 
 /** 控制器，工作在低速时钟域
   *
@@ -46,25 +38,23 @@ open class ControllerOutPayload(
   *
   * 两者共用 `PhaseMeter` 的异步采样链，因此切换不改变测量通路的延迟，相位差只是被量化到 1 个测量时钟周期（即相位计本身的分辨率）。使能无效时片内源在上级被门成恒低。
   *
-  * 时钟与复位：闸门计数 FSM 与结果锁存工作在隐式 `clock` / `reset`（低速域，主复位是高有效），`PhaseMeter` 例化在 `withClockAndReset(dspClock, dspReset)`
-  * 里。高速域的 `dspReset` 由本模块内部的 `ResetSynchronizer` 从主复位同步得到（异步置位、与 `dspClock` 同步释放，同步链带
-  * `ASYNC_REG`），因此复位释放与消费它的时钟同域。注意该模块的复位输入是**低有效**的（顶层接 PS 的 `resetn`），主复位是高有效，接入前必须取反。
+  * 时钟与复位：闸门计数 FSM 与结果锁存工作在隐式 `clock` / `reset`（低速域），`PhaseMeter` 例化在 `withClockAndReset(dspClock, dspReset)` 里。高速域的
+  * `dspReset` 由本模块内部的 `ResetSynchronizer` 从主复位同步得到（异步置位、与 `dspClock` 同步释放，同步链带 `ASYNC_REG`），因此复位释放与消费它的
+  * 时钟同域。注意该模块的复位输入是**低有效**的（顶层接 PS 的 `resetn`），主复位是高有效，接入前必须取反。 `cfg.asyncReset` 决定 `reset` / `dspReset` 的类型：FPGA 分支是同步
+  * `Bool`，ASIC 分支是 `AsyncReset`。
   *
-  * @param gateCntWidth
-  *   闸门计数器宽度
-  * @param edgeCntWidth
-  *   边沿计数器宽度
-  * @param phaseCntWidth
-  *   相位计数器宽度
+  * @param cfg
+  *   全局配置：闸门/边沿/相位计数器位宽与复位风格；模块名带 `cfg.suffix`
   */
-class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val phaseCntWidth: Int = 32) extends Module:
-    require(gateCntWidth <= 30)
+class Controller(using val cfg: Config) extends Module:
+    require(cfg.gateCntWidth <= 30)
+    override def desiredName: String = s"Controller${cfg.suffix}"
     val dspClock = IO(Input(Clock()))
     val io = IO(new Bundle:
         // 被测信号：由上级在本域完成外部输入/片内源的使能门控与二选一后送来（对外部与 MMCM 源都是异步信号）
         val sig = Input(PhaseMeterSignalPayload())
-        val in = Flipped(ValidIO(ControllerInPayload(gateCntWidth)))
-        val out = ValidIO(ControllerOutPayload(gateCntWidth, edgeCntWidth, phaseCntWidth))
+        val in = Flipped(ValidIO(ControllerInPayload()))
+        val out = ValidIO(ControllerOutPayload())
         val forceStop = Input(Bool()))
     private val out = RegInit(chiselTypeOf(io.out).Lit(_.valid -> false.B))
     io.out := out
@@ -73,8 +63,7 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
     // ResetSynchronizer 的输入是**低有效**复位（顶层接 PS 的 resetn），而隐式 reset 是高有效主复位，
     // 必须取反后接入；直接传 reset.asBool 会让 dsp 域在系统复位撤销后被永久按在复位里。
     private val dspReset = ResetSynchronizer(dspClock, !reset.asBool)
-    private val phaseMeter = withClockAndReset(dspClock, dspReset):
-        Module(PhaseMeter(edgeCntWidth, phaseCntWidth))
+    private val phaseMeter = withClockAndReset(dspClock, dspReset) { Module(PhaseMeter()) }
 
     // io.sig 由上级在本域做完使能门控与二选一后送来，这里直接进测量核心的异步采样链
     phaseMeter.io.sig := io.sig
@@ -85,8 +74,8 @@ class Controller(val gateCntWidth: Int = 28, val edgeCntWidth: Int = 32, val pha
     private val forceStop = CdcToggleHandShake.send(phaseMeter.io.forceStop)
 
     private val gateCntClear = Reg(Bool())
-    private val (gateCnt, _) = Counter(0 to (1 << gateCntWidth) - 1, true.B, gateCntClear)
-    private val targetGate = Reg(UInt(gateCntWidth.W))
+    private val (gateCnt, _) = Counter(0 to (1 << cfg.gateCntWidth) - 1, true.B, gateCntClear)
+    private val targetGate = Reg(UInt(cfg.gateCntWidth.W))
     private val targetGateMet = gateCnt === targetGate
 
     import PhaseMeterStateEnum.*

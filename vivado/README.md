@@ -18,7 +18,9 @@ block design（BD），完成综合、实现、bitstream 与 XSA 导出。工程
 ## 前提与环境
 
 1. 先用仓库根的 `./mill emit DigitalPhaseMeterTop MmcmDrpController` 生成两个 IP 需要的
-   SystemVerilog（每个模块只有一份产物，仿真与综合共用；一条命令生成两个模块）。
+   SystemVerilog（每个模块只有一份产物，仿真与综合共用；一条命令生成两个模块）。顶层产物同时含
+   FPGA/ASIC 两套平台分支（`*S.sv` / `*A.sv`）；打包只读 FPGA 分支，综合宏由流程注入（见下文
+   「综合 / 实现策略与签核」）。
 
 2. Vivado 在 PATH 中（本项目在 **Vivado 2025.2** 上验证）；**固定器件 `xc7z010clg400-1`**
    （ALINX AX7010 的芯片）。`create_bd.tcl` 建工程后与 Python 流程的 build 阶段打开工程后
@@ -187,6 +189,16 @@ dpm-vivado-flow（Python，根 .venv）
 
 要点：
 
+- **综合宏（`chisel3.choice` 的 `Platform` 分支）要在打包与综合两处注入**：生成的顶层用
+  `` `ifdef targets$Platform$FPGA `` 选择 FPGA 实现（`DigitalPhaseMeterTopImplS` + 复位同步），
+  两个分支都不定义时综合会命中 `$error`。`package_ip.tcl` 给打包工程的 fileset 设了
+  `verilog_define`，`ipx::package_project` 才会把 FPGA 分支（含顶层与 `*S.sv`）当成可达文件；
+  打包工程同时只读 FPGA 分支文件（ASIC 变体 `*A.sv` 不读，否则会报
+  `[IP_Flow 19-3833] Unreferenced file`）。但 **IP-XACT 不记录 fileset 的 `verilog_define`**，
+  该设置带不到 BD 工程；build worker 在 reset 之后还要把它写到 `dpm_top` 的 OOC run 同名
+  fileset（run 名去掉 `_synth_1`，即 `dpm_system_dpm_top_0_0`），Vivado 生成 run 脚本时才展开为
+  `synth_design -verilog_define {targets$Platform$FPGA}`。宏参与综合 run 指纹，结果里用
+  `SYNTH_DEFINES_APPLIED` 记录实际写入的 run；xsim 侧用 `xvlog -d 'targets$Platform$FPGA'`。
 - **BD 工程里 IP 的 OOC 综合 run 不继承 `synth_1` 的参数**。真正含 450MHz 逻辑的是 `dpm_top` 的
   out-of-context run，只改 `synth_1` 等于没改。worker 按 IP 实例名匹配 run 并两处同时写；新建 BD
   工程刚打开时 IP run 还不存在，先 `launch_runs synth_1 -scripts_only` 把它物化出来（BD 管理的

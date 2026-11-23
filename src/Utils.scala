@@ -5,9 +5,34 @@ import java.nio.file.*
 import scala.jdk.CollectionConverters.*
 
 import chisel3.*
+import chisel3.choice.*
 import circt.stage.ChiselStage
 
+/** 全局配置
+  *
+  * 集中控制计数器位宽与复位风格。各模块通过 `(using cfg: Config)` 取得配置；同一个模块在两种 复位风格下会生成实现不同、名字不同的两份 RTL（见 `suffix`），因此 FPGA 与 ASIC 两个平台
+  * 分支可以同时编进同一个仿真库而不互相覆盖。
+  *
+  * @param asyncReset
+  *   true 时隐式复位与 `ResetSynchronizer` 的输出取 `AsyncReset`（ASIC 分支），false 时取 同步复位 `Bool`（FPGA 分支）
+  * @param gateCntWidth
+  *   闸门计数器宽度（`Controller`）
+  * @param edgeCntWidth
+  *   边沿计数器宽度（`PhaseMeter` / `Controller`）
+  * @param phaseCntWidth
+  *   相位计数器宽度（`PhaseMeter` / `Controller`）
+  */
+case class Config(
+    val asyncReset: Boolean = false,
+    val gateCntWidth: Int = 28,
+    val edgeCntWidth: Int = 32,
+    val phaseCntWidth: Int = 32
+):
+    /** 模块名后缀：同步复位分支为 `S`，异步复位分支为 `A` */
+    def suffix = if asyncReset then "A" else "S"
+
 trait Main:
+    given cfg: Config = Config()
     protected var args = Array[String]() // scalafix:ok DisableSyntax.var
 
     final def main(args: Array[String]): Unit =
@@ -62,10 +87,25 @@ trait Main:
             val missing = binds.distinct.sorted.filterNot(lines.contains)
             if missing.nonEmpty then Files.write(filelist, (lines ++ missing).asJava)
 
-trait TopModule extends RawModule with ImplicitClock with ImplicitReset:
+/** 带显式时钟/复位的公共顶层
+  *
+  * 对外端口固定为 `clock` / `resetn`（低有效异步复位），内部由 `ResetSynchronizer` 生成 主时钟域的复位并同时作为 `ImplicitClock` /
+  * `ImplicitReset`。`MmcmDrpController` 直接继承 本 trait；`DigitalPhaseMeterTop` 因为要按平台分支选择实现，改用 `RawModule` 包一层
+  * `ModuleChoice`，实现分支再用 `FixedIORawModule` 复用同一份端口定义（见 `DigitalPhaseMeterTop.scala`）。
+  */
+trait TopModule(using cfg: Config) extends RawModule with ImplicitClock with ImplicitReset:
     val clock = IO(Input(Clock()))
     val resetn = IO(Input(AsyncReset()))
 
     protected val reset = ResetSynchronizer(clock, resetn)
     override protected def implicitClock = clock
     override protected def implicitReset = reset
+
+/** `chisel3.choice` 的平台选择组
+  *
+  * `DigitalPhaseMeterTop` 用它把 FPGA（同步复位）与 ASIC（异步复位）两个实现分支编进同一份 生成的 SV；firtool 输出 `` `ifdef targets$Platform$FPGA `` /
+  * `` `ifdef targets$Platform$ASIC `` 条件分支，消费方必须定义且只定义一个宏。
+  */
+object Platform extends Group:
+    object FPGA extends Case
+    object ASIC extends Case

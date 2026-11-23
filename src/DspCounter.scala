@@ -3,6 +3,20 @@ package DigitalPhaseMeter
 import chisel3.*
 import chisel3.util.*
 
+/** 计数器的复位类型
+  *
+  * 决定是否声明复位端口以及端口的类型；模块名后缀与之一一对应。
+  */
+enum DspCounterResetType:
+    /** 同步复位：`reset: Bool`，模块名后缀 `S` */
+    case Sync
+
+    /** 异步复位：`reset: AsyncReset`，模块名后缀 `A` */
+    case Async
+
+    /** 不复位：不声明复位端口，模块名不带后缀（`PhaseMeter` 的两个计数器靠 `clear` 清零） */
+    case None
+
 /** 使能型二进制计数器（DSP48E1 累加器实现）
   *
   * 语义：`clear` 优先；`clear` 无效且 `enable` 有效时 +1；否则保持（模 `2^cntWidth`）。
@@ -16,24 +30,54 @@ import chisel3.util.*
   *
   * @param cntWidth
   *   计数器宽度，上限 48
-  * @param withReset
-  *   是否给计数器加复位；`PhaseMeter` 里的两个计数器都靠 `clear` 清零，传入 false
+  * @param resetType
+  *   复位类型（见 `DspCounterResetType`）：`Sync` / `Async` 分别声明同步 / 异步复位端口， `None` 不声明复位端口。`DspCounter.apply` 按
+  *   `Config.asyncReset` 与 `withReset` 选择； `PhaseMeter` 里的两个计数器都靠 `clear` 清零，因此传 `withReset = false`（即 `None`）
   */
-class DspCounter(val cntWidth: Int = 48, val withReset: Boolean = true) extends Module:
+class DspCounter(val cntWidth: Int = 48, val resetType: DspCounterResetType = DspCounterResetType.Sync)
+    extends RawModule
+    with ImplicitClock:
     require(cntWidth <= 48)
+    // RawModule 不提供隐式时钟，显式声明并由 `DspCounter.apply` 接到父模块的时钟
+    val clock = IO(Input(Clock()))
+    // 复位端口的类型与是否存在由 resetType 决定；`suffix` 只用于 desiredName，不是硬件
+    val reset = FlatIO(new Bundle {
+        val (reset, suffix) = resetType match
+            case DspCounterResetType.Sync  => Some(Input(Bool())) -> "S"
+            case DspCounterResetType.Async => Some(Input(AsyncReset())) -> "A"
+            case DspCounterResetType.None  => None -> ""
+    })
+
+    override protected def implicitClock: Clock = clock
+    override def desiredName: String = s"DspCounter${reset.suffix}"
     val io = IO(new Bundle:
         val clear = Input(Bool())
         val enable = Input(Bool())
         val value = Output(UInt(cntWidth.W)))
 
-    private val cnt = if withReset then RegInit(0.U(cntWidth.W)) else Reg(UInt(cntWidth.W))
+    private val cnt = reset.reset match
+        case Some(r) => chisel3.withReset(r) { RegInit(0.U(cntWidth.W)) }
+        case None    => Reg(UInt(cntWidth.W))
     addAttribute(cnt, """use_dsp = "yes"""")
     when(io.clear) { cnt := 0.U }.elsewhen(io.enable) { cnt := cnt + 1.U }
     io.value := cnt
 
 object DspCounter:
-    def apply(cntWidth: Int, clear: Bool, enable: Bool, withReset: Boolean = true): UInt =
-        val dspCounter = Module(new DspCounter(cntWidth, withReset))
+    /** 例化计数器并接到当前隐式时钟/复位
+      *
+      * @param withReset
+      *   false 时不声明复位端口（`PhaseMeter` 的计数器靠 `clear` 清零）；true 时按 `cfg.asyncReset` 选择同步（`Bool`）或异步（`AsyncReset`）复位
+      */
+    def apply(cntWidth: Int, clear: Bool, enable: Bool, withReset: Boolean = true)(using cfg: Config): UInt =
+        def getReset = (withReset, cfg.asyncReset) match
+            case (false, _)    => DspCounterResetType.None
+            case (true, true)  => DspCounterResetType.Async
+            case (true, false) => DspCounterResetType.Sync
+        val dspCounter = Module(new DspCounter(cntWidth, getReset))
+        dspCounter.clock := Module.clock
+        dspCounter.reset.reset match
+            case Some(reset) => reset := Module.reset
+            case None        =>
         dspCounter.io.clear := clear
         dspCounter.io.enable := enable
         dspCounter.io.value

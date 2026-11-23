@@ -36,8 +36,11 @@ vivado -mode batch -source vivado/query_runs.tcl        # 查看 run 的策略/�
 **每个模块只有一份产物**：BD、综合与 xsim 都消费 `build/chisel/<Name>/`（顶层是
 `build/chisel/DigitalPhaseMeterTop/`，`package_ip.tcl` 的 `rtl_dir` 就指这里）；复位同步是纯 RTL 的
 `ResetSynchronizer`，产物里没有 XPM 原语，Verilator 与 xsim / Vivado 编译的是同一份文件。
-IP 打包同样按 `filelist.f` 取文件，因此生成模块名/文件名变化（例如 `EdgeDetector` 按 `desiredName`
-生成 `EdgeDetectorRising.sv`）不需要改 Tcl；但这类改动会让旧 XSA/bitstream 过期，需要重跑流程。
+IP 打包同样按 `filelist.f` 取文件，因此生成模块名/文件名变化（例如 `EdgeDetector` 在 FPGA 分支按
+`desiredName` 生成 `EdgeDetectorRisingS.sv`，ASIC 分支是 `...A.sv`）不需要改 Tcl；但这类改动会让旧
+XSA/bitstream 过期，需要重跑流程。**顶层产物同时包含 `*S.sv` 与 `*A.sv` 两套平台分支**：
+`package_ip.tcl` 只把 FPGA 分支读进打包工程（过滤 `*A.sv`），综合宏的注入见下文「增量流程的实测坑」；
+`filelist.f` 本身仍列出两套文件，手工读 filelist 时要自己按分支过滤。
 
 **RTL 断言在 `verification/` 独立文件里**：`chisel3.ltl.AssertProperty` 默认使用内建
 `Verification.Assert` 层的 `LayerConfig.Extract`，firtool 生成 checker + `layers-*.sv` bind 文件，主 SV
@@ -79,6 +82,7 @@ SV，Vivado 报 `Synth 8-2898`）。
 | 坑 | 现象/处理 |
 | --- | --- |
 | **`reset_run` 会清步骤属性** | 先 reset 再写策略/hook/增量属性；worker 只对本次实际 reset 的 run 写属性，未 reset 的 run 不碰 |
+| **`verilog_define` 要在打包与综合两处注入** | 生成顶层用 `` `ifdef targets$Platform$FPGA `` 选 `chisel3.choice` 的 Platform 分支。`package_ip.tcl` 必须给打包工程 fileset 设 `verilog_define`，否则 `ipx::package_project` 按可达性打包成 ASIC 分支，并把未选中的 `*A.sv`/顶层报 `[IP_Flow 19-3833]`；打包工程只读 FPGA 分支文件（ASIC 变体 `*A.sv` 不读）。IP-XACT 不记录该属性，BD 工程里 build worker 还要在 reset 后写 **IP OOC run 同名 fileset**（run 名去掉 `_synth_1`）的 `verilog_define`，run 脚本才展开成 `synth_design -verilog_define {targets$Platform$FPGA}`；宏计入综合指纹（结果看 `SYNTH_DEFINES_APPLIED`），xsim 用 `xvlog -d 'targets$Platform$FPGA'` |
 | **`STATUS=Out-of-date` 不等于 DCP 不能复用** | 复用看「指纹 + DCP 存在」；不要因为 STATUS 把未变化 IP 全 reset |
 | **`generate_target` 不会自动把受影响 run 标成过期** | IP 内容变化必须由 Python 的 IP 哈希/run 指纹显式触发 reset，否则会静默复用旧网表 |
 | **原位刷新后 `synth_1` 可能需要先 reset** | `launch_runs synth_1 -scripts_only` 报 `[Common 17-69]` 时，worker 先 `reset_run synth_1` 再重试一次 |
@@ -94,6 +98,12 @@ SV，Vivado 报 `Synth 8-2898`）。
 - 用 `read_verilog -sv` 按 `filelist.f` 顺序读入生成的 SV（顺序即拓扑序），
   再 `ipx::package_project -root_dir <ip_root>/<ip_name>`。**不要**用 `-in_memory` 建工程：
   Vivado 会报 `Command ipx::package_project in non project mode is not supported`。
+- 读 `DigitalPhaseMeterTop` 的 filelist 时要**过滤掉 `*A.sv`**（只打包 FPGA 分支），并在
+  `read_verilog` 前给当前 fileset 设
+  `set_property verilog_define {targets$Platform$FPGA} [current_fileset]`；宏名含 `$`，只能放在
+  花括号里。少了这个宏，`ipx::package_project` 的可达性分析会把未选中的 ASIC 分支报
+  `[IP_Flow 19-3833]`。IP-XACT 不记录 fileset 的 `verilog_define`，BD 工程的综合阶段还要再注入一次
+  （见「增量流程的实测坑」）。
 - `ipx::package_project` 的 `-vendor_display_name` / `-company_url` 选项在 2025.2 上不存在，
   公司信息用 `set_property company_url ... [ipx::current_core]`。
 - **AXI 接口靠端口名推断**：顶层 RTL 的端口命名成 `s_axi_lite_awaddr` 这种形式，
@@ -141,12 +151,14 @@ xsim 的职责只有**真实 MMCM 联调**：`tb_src_handoff.sv` 把 BD 里真�
 测量通路。命令行三段式，脚本已封装：
 
 ```bash
-xvlog --sv --work work <filelist.f 补全成绝对路径> vivado/rtl/dpm_mmcm_src.v <Vivado>/data/verilog/src/glbl.v
+xvlog --sv --work work -d 'targets$Platform$FPGA' <filelist.f 补全成绝对路径> vivado/rtl/dpm_mmcm_src.v <Vivado>/data/verilog/src/glbl.v
 xvlog --sv --work work sim/tb_src_handoff.sv
 xelab --debug typical --timescale 1ns/1ps tb_src_handoff glbl -s <snapshot> -L unisims_ver
 xsim <snapshot> -runall
 ```
 
+- `xvlog` 必须给平台宏 `-d 'targets$Platform$FPGA'`（宏名含 `$`，用单引号原样传；不定义时生成顶层
+  会命中 `$error`）。顶层目录里的 `*A.sv` 也会被编译，但宏让实例化落在 FPGA 分支。
 - `xelab` **没有** `--work` 选项；工作库用 `-L work` 或默认 `work`。
 - 被测 RTL 取生成产物目录 `build/chisel/DigitalPhaseMeterTop/` 与 `build/chisel/MmcmDrpController/`，
   另加手写的 `vivado/rtl/dpm_mmcm_src.v`。

@@ -77,7 +77,8 @@ DSP 时钟按整数比缩放（`sim/tb_src_handoff.sv` 取 `T_MAIN=18900ps` / `T
 
 ## 位宽决定参数上限
 
-`Controller(gateCntWidth = 28, edgeCntWidth = 32, phaseCntWidth = 32)`，低速时钟 50MHz、高速时钟 450MHz 时：
+`Config(gateCntWidth = 28, edgeCntWidth = 32, phaseCntWidth = 32)`（`Controller` / `PhaseMeter` 通过
+`(using cfg: Config)` 取得），低速时钟 50MHz、高速时钟 450MHz 时：
 
 | 量 | 上限 |
 | --- | --- |
@@ -85,7 +86,7 @@ DSP 时钟按整数比缩放（`sim/tb_src_handoff.sv` 取 `T_MAIN=18900ps` / `T
 | 相位计数 | `2^32` 个高速周期 ≈ 9.54 s 的连续累加（450MHz） |
 | 边沿计数 | `2^32` 个参考沿 |
 
-`targetGate` 与闸门计数器同为 28 位（`UInt(gateCntWidth.W)`），所以 5.37 s 是**可达上限**而不是饱和点：想要更长的闸门时间必须同时加宽 `gateCntWidth` 与 `targetGate` 的位宽。`in.bits.targetGate` 在启动拍被锁存，测量期间可自由改写。`DspCounter`（DSP48E1 累加器实现）另有一条 `width <= 48` 的约束，加宽时两处都要改。
+`targetGate` 与闸门计数器同为 28 位（`UInt(cfg.gateCntWidth.W)`），所以 5.37 s 是**可达上限**而不是饱和点：想要更长的闸门时间必须同时加宽 `cfg.gateCntWidth` 与 `targetGate` 的位宽（改 `Utils.scala` 的 `Config`，不要在各模块里单独传宽度）。`in.bits.targetGate` 在启动拍被锁存，测量期间可自由改写。`DspCounter`（DSP48E1 累加器实现）另有一条 `width <= 48` 的约束，加宽时两处都要改。
 
 ## 已知局限
 

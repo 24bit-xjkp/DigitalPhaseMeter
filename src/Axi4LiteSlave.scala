@@ -22,11 +22,10 @@ import chisel3.util.*
   *   下游实际使用的地址宽度：内部只锁存低这么多位地址，各类命令总线也只交回这些位（默认 32，即全宽）
   * @param dataUsedWidth
   *   下游实际使用的写数据宽度：内部只锁存低这么多位数据、字节选通只保留对应字节，写命令总线也只交回这些位；必须是 8 的整数倍（默认 32，即全宽）
+  * @param cfg
+  *   全局配置；这里只用 `cfg.suffix` 区分同步/异步复位分支的模块名
   */
-class Axi4LiteSlave(
-    addrUsedWidth: Int = 32,
-    dataUsedWidth: Int = 32
-) extends Module:
+class Axi4LiteSlave(addrUsedWidth: Int = 32, dataUsedWidth: Int = 32)(using val cfg: Config) extends Module:
     // AXI4-Lite 端口固定位宽，不开放配置
     val axiAddrWidth = 32
     val axiDataWidth = 32
@@ -37,7 +36,7 @@ class Axi4LiteSlave(
 
     // 下游位宽不同的两个实例端口宽度也不同；模块名带上位宽，避免把多个 IP 的生成文件
     // 编进同一个仿真库时（xsim 联调）同名模块互相覆盖
-    override def desiredName: String = s"Axi4LiteSlaveA${addrUsedWidth}D${dataUsedWidth}"
+    override def desiredName: String = s"Axi4LiteSlaveA${addrUsedWidth}D${dataUsedWidth}${cfg.suffix}"
 
     val io = IO(new Bundle:
         // AXI4-Lite 从口（固定 32 位地址 / 32 位数据）

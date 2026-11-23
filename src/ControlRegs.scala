@@ -17,7 +17,7 @@ import chisel3.util.*
   * |:-----|:-------------|:----|:------------------------------------------------------------------------------------------------------------|
   * | 0x00 | CTRL         | 混合  | b0 start（写 1 启动，只写）、b1 irqEnable（读写）、b2 clear（写 1 当拍复位结果区与标志，不清 busy）、b3 forceStop（写 1 强制中止在途测量并撤销 busy，只写） |
   * | 0x04 | STATUS       | 只读  | b0 busy、b1 resultValid、b2 lost、b3 irqPending                                                                |
-  * | 0x08 | GATE_TARGET  | 读写  | 目标闸门计数（低 `gateCntWidth` 位有效）                                                                                |
+  * | 0x08 | GATE_TARGET  | 读写  | 目标闸门计数（低 `cfg.gateCntWidth` 位有效）                                                                            |
   * | 0x0C | RESULT_GATE  | 只读  | 最新结果的 gateCnt（实际闸门计数）                                                                                       |
   * | 0x10 | RESULT_EDGE  | 只读  | 最新结果的 edgeCnt（窗口内参考信号上升沿数）                                                                                  |
   * | 0x14 | RESULT_PHASE | 只读  | 最新结果的 phaseCnt（相位计数）                                                                                        |
@@ -57,21 +57,12 @@ import chisel3.util.*
   *   来自 AXI4-Lite 从口的命令总线地址宽度（已由从口截断到实际译码位宽，本寄存器堆用 6 位，即 `addr[5:2]` 加字内偏移与对齐位）
   * @param dataWidth
   *   命令总线数据宽度，当前只支持 32
-  * @param gateCntWidth
-  *   闸门计数器宽度，与 `Controller` 一致
-  * @param edgeCntWidth
-  *   边沿计数器宽度，与 `Controller` 一致
-  * @param phaseCntWidth
-  *   相位计数器宽度，与 `Controller` 一致
+  * @param cfg
+  *   全局配置：闸门/边沿/相位计数器位宽与复位风格；`GATE_TARGET` 只保留 `cfg.gateCntWidth` 位，模块名带 `cfg.suffix`
   */
-class ControlRegs(
-    val addrWidth: Int = 32,
-    val dataWidth: Int = 32,
-    val gateCntWidth: Int = 28,
-    val edgeCntWidth: Int = 32,
-    val phaseCntWidth: Int = 32
-) extends Module:
+class ControlRegs(val addrWidth: Int = 32, val dataWidth: Int = 32)(using val cfg: Config) extends Module:
     require(dataWidth == 32, "寄存器堆当前只支持 32 位数据宽度")
+    override def desiredName: String = s"ControlRegs${cfg.suffix}"
     // 每条测量结果占用的字数
     val recordWords = 4
     // 结果寄存器只能保留最新一条
@@ -103,9 +94,9 @@ class ControlRegs(
         // 组合读数据
         val rdData = Output(UInt(dataWidth.W))
         // 测量请求，接 Controller 的 in
-        val request = ValidIO(ControllerInPayload(gateCntWidth))
+        val request = ValidIO(ControllerInPayload())
         // 测量结果，接 Controller 的 out
-        val response = Flipped(ValidIO(ControllerOutPayload(gateCntWidth, edgeCntWidth, phaseCntWidth)))
+        val response = Flipped(ValidIO(ControllerOutPayload()))
         // 测量完成中断，高有效电平
         val interrupt = Output(Bool())
         // MMCM 锁定状态（异步输入，寄存器堆内部同步后供状态位使用）
@@ -123,7 +114,7 @@ class ControlRegs(
     private val resultValid = RegInit(false.B)
     private val lostCnt = Counter(1 << 16)
     // 最新一条结果的 4 个字（记录序号在锁存时取当时的 `seq`，随后 `seq` 自增）
-    private class ResultBundle extends ControllerOutPayload(gateCntWidth, edgeCntWidth, phaseCntWidth):
+    private class ResultBundle extends ControllerOutPayload():
         val seqCnt = UInt(16.W)
     private val result = RegInit(ResultBundle().Lit(_.seqCnt -> 0.U))
     // 下一条结果的记录序号：与结果寄存器分开保存，锁存时先取旧值再自增（首条结果序号为 0）
@@ -170,7 +161,7 @@ class ControlRegs(
     // 锁存正确性依赖「busy ⇔ Controller 非 idle」：request.valid 被 !busy 门控，busy 只在
     // response.valid 时撤销，因此请求只会在 Controller idle 且 busy=0 的周期出现
     io.request.valid := startPulse && !busy
-    io.request.bits.targetGate := targetGate.take(gateCntWidth)
+    io.request.bits.targetGate := targetGate.take(cfg.gateCntWidth)
     // 结果只应属于一笔在途测量；启动脉冲与结果锁存不能同拍（busy 门控与 Controller 状态机共同保证）
     AssertProperty(!(io.response.fire && !busy), "response while not busy")
     AssertProperty(!(io.request.fire && io.response.fire), "request and response in the same cycle")

@@ -24,9 +24,19 @@ from ..tclgen import write_plan, write_wrapper
 SYNTH_MAIN = "synth_1"
 IMPL_MAIN = "impl_1"
 MMCM_RUN = f"{BD_NAME}_dpm_mmcm_src_0_0_synth_1"
+TOP_IP_RUN = f"{BD_NAME}_dpm_top_0_0_synth_1"
 CUSTOM_RUN_TO_IP = {f"{BD_NAME}_{spec['cell']}_synth_1": ip for ip, spec in CUSTOM_IPS.items()}
 KNOWN_SYNTH_RUNS = {SYNTH_MAIN, MMCM_RUN, *CUSTOM_RUN_TO_IP}
 DEFAULT_DSP_BUDGET = 2
+
+# 顶层生成产物用 chisel3.choice 选择 Platform 分支：
+#   `ifdef targets$Platform$FPGA → DigitalPhaseMeterTopImplS（FPGA，含复位同步）
+#   `ifdef targets$Platform$ASIC → DigitalPhaseMeterTopImplA
+# 两个都不定义时综合会命中 `$error`。宏只在自研顶层 IP 的 RTL 里出现，因此注入到
+# 它 OOC 综合 run 同名 fileset 的 verilog_define：Vivado 生成 run 脚本时会写成
+# `synth_design -verilog_define {targets$Platform$FPGA}`（IP-XACT 不记录该属性，
+# 打包阶段写 fileset 不会带进 BD 工程，见 dpm-vivado-ip）。
+SYNTH_VERILOG_DEFINES = ("targets$Platform$FPGA",)
 
 
 @dataclass(frozen=True)
@@ -49,6 +59,7 @@ class BuildDecision:
     materialize: bool
     report_only: bool
     strategy_targets: list[list[str]]
+    synth_defines: list[list[str]]
     hook_assignments: list[list[str]]
     incremental_synth: list[list[str]]
     incremental_impl: str
@@ -67,16 +78,22 @@ def _synth_props(retiming: int, dsp_budget: int) -> list[tuple[str, str]]:
 
 
 def _synth_sig(retiming: int, dsp_budget: int) -> str:
-    return compose("synth_strategy", _synth_props(retiming, dsp_budget))
+    # 综合宏参与指纹：宏变化等价于 RTL 语义变化，必须重跑综合/实现。
+    return compose("synth_strategy", _synth_props(retiming, dsp_budget), "defines", list(SYNTH_VERILOG_DEFINES))
 
 
 def strategy_rows(retiming: int, dsp_budget: int) -> list[list[str]]:
     rows: list[list[str]] = []
-    for run in (SYNTH_MAIN, f"{BD_NAME}_dpm_top_0_0_synth_1"):
+    for run in (SYNTH_MAIN, TOP_IP_RUN):
         for prop, value in _synth_props(retiming, dsp_budget):
             rows.append([run, prop, value])
     rows.append([IMPL_MAIN, "strategy", "Performance_Retiming"])
     return rows
+
+
+def synth_define_rows() -> list[list[str]]:
+    """返回 `{run define}` 行；worker 写到该 IP OOC run 同名 fileset 的 verilog_define。"""
+    return [[TOP_IP_RUN, define] for define in SYNTH_VERILOG_DEFINES]
 
 
 def discover_runs(paths: RepoPaths) -> list[str]:
@@ -273,6 +290,7 @@ def decide(
         materialize=materialize,
         report_only=report_only,
         strategy_targets=strategy_rows(options.retiming, options.dsp_budget),
+        synth_defines=synth_define_rows(),
         hook_assignments=hook_assignments(paths, vendor_runs(runs)),
         incremental_synth=incremental_synth,
         incremental_impl=incremental_impl,
@@ -290,6 +308,7 @@ def _build_plan(paths: RepoPaths, decision: BuildDecision, options: BuildOptions
         launch_synth = launch_impl = False
     # report_only 不得改策略/hook：否则会把已完成 run 标成过期。
     strategy_targets = [] if (options.report_only or decision.report_only) else decision.strategy_targets
+    synth_defines = [] if (options.report_only or decision.report_only) else decision.synth_defines
     hook_rows = [] if (options.report_only or decision.report_only) else decision.hook_assignments
     return {
         "stage": "build",
@@ -301,6 +320,7 @@ def _build_plan(paths: RepoPaths, decision: BuildDecision, options: BuildOptions
         "hook_waivers": str(paths.hook_waivers),
         "hook_vendor_ip": str(paths.hook_vendor_ip),
         "strategy_targets": strategy_targets,
+        "synth_defines": synth_defines,
         "hook_assignments": hook_rows,
         "reset_runs": decision.reset_runs if not (options.report_only or options.strategy_only) else [],
         "materialize": bool(decision.materialize and not (options.report_only or options.strategy_only)),

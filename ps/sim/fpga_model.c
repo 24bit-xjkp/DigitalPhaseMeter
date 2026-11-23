@@ -275,7 +275,7 @@ static void start_measurement(dpm_model_t *m, uint32_t target_gate)
     /* 相位先被 1 个 DSP 周期量化（整数 RNE），再乘参考沿数 */
     dsp_cycles = (edge != 0u) ? (uint64_t)rne_u64(num, den) : 0u;
 
-    m->pending_gate = (uint32_t)(gate & 0x0FFFFFFFu); /* gateCntWidth = 28 */
+    m->pending_gate = (uint32_t)(gate & 0x0FFFFFFFu); /* Config.gateCntWidth = 28 */
     m->pending_edge = (uint32_t)edge;
     m->pending_phase = (uint32_t)(dsp_cycles * edge); /* 硬件上 32 位回卷 */
     if (m->pending_edge == 0u || m->pending_gate == 0u) {

@@ -1,7 +1,11 @@
 local verilator_options = {
-    "--trace-fst", { "--x-assign", "unique" }, { "--x-initial", "unique" }, "-Wno-SYMRSVDWORD"
+    "--trace-fst", { "--x-assign", "unique" }, { "--x-initial", "unique" }, "-Wno-SYMRSVDWORD",
+    "-Dtargets$Platform$FPGA",  "-DENABLE_INITIAL_REG_"
 }
 local test_args = { "+verilator+rand+reset+2", "-fc" }
+-- 顶层产物目录同时含平台选择层与 ImplS/ImplA 两个实现分支，Verilator 无法自动选顶层；
+-- 需要显式 --top 的目录在这里登记（其它模块目录只有一个顶层模块）。
+local top_module_map = { DigitalPhaseMeterTop = "DigitalPhaseMeterTop" }
 
 target("mill.compile", function ()
     set_kind("phony")
@@ -33,6 +37,10 @@ for _, file in ipairs(os.files("*.cpp")) do
         local verification_dir = path.join(get_config("builddir"), "chisel", name, "verification")
         table.insert(target_options, "-I" .. verification_dir)
         table.insert(target_options, "-I" .. path.join(verification_dir, "assert"))
+        local top_module = top_module_map[name]
+        if top_module then
+            table.join2(target_options, { "--top", top_module })
+        end
         add_values("verilator.flags", target_options)
 
         on_load(function (target)

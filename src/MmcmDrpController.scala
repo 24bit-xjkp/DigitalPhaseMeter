@@ -42,8 +42,11 @@ import chisel3.util.*
   * `{CLKFBOUT, CLKFBOUT2, CLKOUT0, CLKOUT0_2, CLKOUT1, CLKOUT1_2, DIVCLK, POWER}` 八笔写，全部完成后回 IDLE。
   *
   * 重配置期间 MMCM 会失锁、输出停止，因此软件必须在测量空闲（`STATUS.busy = 0`）时改。
+  *
+  * @param cfg
+  *   全局配置：复位风格（`cfg.asyncReset`）；模块名带 `cfg.suffix`
   */
-class MmcmDrpController extends TopModule:
+class MmcmDrpController(using val cfg: Config) extends TopModule:
     // AXI4-Lite 从口（固定 32 位地址 / 32 位数据）
     val s_axi_lite = IO(Axi4LiteSlavePorts())
     // MMCM 动态重配置口

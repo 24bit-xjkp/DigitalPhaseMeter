@@ -27,18 +27,32 @@ argument-hint: '要测试的模块或用例（如 Controller 的相位测量精�
 
 - **新增测试通常只需新增 `test/<Name>.cpp`**，不要为每个测试手工加目标；`<Name>` 必须与 `build/chisel/<Name>/` 的目录名一致（即 Chisel 模块名）。
 - 测试用例通过 `add_tests("rtl", { runargs = { "+verilator+rand+reset+2", "-fc" } })` 声明；`-fc` 让 doctest 强制彩色输出。
-- **SV 编译选项**是 `--trace-fst --x-assign unique --x-initial unique --coverage -Wno-SYMRSVDWORD`，另外按目标追加 `-I build/chisel/<Name>/verification` 与 `-I build/chisel/<Name>/verification/assert`（`chisel3.ltl.AssertProperty` 的 checker/bind 文件在这个目录下；没有断言的模块该目录不存在，Verilator 会忽略）（没有开 `-Wall`，生效的是 Verilator 默认告警集；`SYMRSVDWORD` 是默认开启的告警，顶层端口 `interrupt` 命中 C++ 常用词，所以全局关掉这一条）：波形为 FST，**寄存器在复位前的取值是随机的**（见下文"未初始化寄存器"）。
+- **SV 编译选项**是 `--trace-fst --x-assign unique --x-initial unique -Wno-SYMRSVDWORD
+  -Dtargets$Platform$FPGA -DENABLE_INITIAL_REG_`，另外按目标追加
+  `-I build/chisel/<Name>/verification` 与 `-I build/chisel/<Name>/verification/assert`
+  （`chisel3.ltl.AssertProperty` 的 checker/bind 文件在这个目录下；没有断言的模块该目录不存在，
+  Verilator 会忽略）（没有开 `-Wall`，生效的是 Verilator 默认告警集；`SYMRSVDWORD` 是默认开启的
+  告警，顶层端口 `interrupt` 命中 C++ 常用词，所以全局关掉这一条）：波形为 FST，
+  **寄存器在复位前的取值是随机的**（见下文"未初始化寄存器"）。`-Dtargets$Platform$FPGA` 是
+  平台分支的必需宏：生成顶层用 `` `ifdef `` 在 FPGA/ASIC 实现之间选择，不定义会命中 `$error`；
+  `-DENABLE_INITIAL_REG_` 让生成 SV 里的初始值块在仿真 0 时刻生效（测试用它获得确定的初始状态，
+  不参与 Vivado 综合）。
 - **源文件由构建规则自动生成**：`<Name>Verilator` 目标构建时先执行 `./mill emit <Name>`（只生成该目标对应的模块；目标被重建（如 `xmake -r`）、或 `build.mill` 比 `filelist.f` 新时带 `--force`），再把 `filelist.f` 里的 `.sv` 加进编译。`emit` 自身按内容缓存，未变化时直接跳过。改完 RTL 直接跑 `xmake test` / `xmake run` 即可，不要手工先跑生成入口；生成入口本身的用法见 `dpm-chisel-rtl`。
 - **没有逐目标告警豁免表**：接口固有未使用位（`awprot` / `wstrb` 高位等）与复位同步器结构（同一根复位既做本域同步复位、又做同步链的异步复位端）在默认告警集下不会报出，因此不需要按目标关闭检查项。若临时加 `-Wall` 排查，先按 `dpm-chisel-rtl` 的说明处理这两类告警，不要用 `-Wno-fatal` 之类的整体开关。
-- **目录名、目标名与生成模块名可能不同**：模块可用 `desiredName` 改名（`EdgeDetector` 生成
-  `EdgeDetectorRising`/`EdgeDetectorBoth`），`build/chisel/EdgeDetector/filelist.f` 里是后者，但
-  target 仍按 `.cpp` 文件名 `EdgeDetector` 注册。`verilator.shared` 规则（由 `mill.verilator.shared`
-  接入）用 `--prefix <Name>Verilator`
-  且不传 `--top-module`，由 Verilator 自动选目录里唯一的顶层模块，所以 `test/EdgeDetector.cpp` 里的
-  `<EdgeDetectorVerilator.h>` 与 `EdgeDetectorVerilator` 类型仍然成立。前提是每个生成目录只有一个
-  顶层模块；若同一目录将输出多个顶层模块，必须显式指定顶层并同步改 `.cpp`。
-- **顶层 IP 的 `DigitalPhaseMeterTop` 目标也按上述规则注册**：编译顶层生成产物，用 AXI4-Lite
-  BFM 按真实基地址驱动，覆盖寄存器堆到测量通路的整条通路（见下文「顶层 IP 测试」）。
+- **目录名、目标名与生成模块名可能不同**：模块可用 `desiredName` 改名（`EdgeDetector` 在 FPGA
+  分支生成 `EdgeDetectorRisingS`/`EdgeDetectorBothS`，ASIC 分支是 `...A`），
+  `build/chisel/EdgeDetector/filelist.f` 里是后者，但 target 仍按 `.cpp` 文件名 `EdgeDetector`
+  注册。`verilator.shared` 规则（由 `mill.verilator.shared` 接入）用 `--prefix <Name>Verilator`，
+  默认不传 `--top-module`，由 Verilator 自动选目录里唯一的顶层模块（例如 `DspCounter` 目录里只有
+  `DspCounterS`），所以 `test/EdgeDetector.cpp` 里的 `<EdgeDetectorVerilator.h>` 与
+  `EdgeDetectorVerilator` 类型仍然成立。**一个目录含多个顶层模块时必须显式指定**：
+  `test/xmake.lua` 的 `top_module_map` 给 `DigitalPhaseMeterTop` 配了
+  `--top DigitalPhaseMeterTop`，否则 Verilator 会选错顶层。
+- **顶层 IP 的 `DigitalPhaseMeterTop` 目标**：目录里同时有平台选择层 `DigitalPhaseMeterTop` 与
+  `DigitalPhaseMeterTopImplS/A` 两个实现分支，`--top DigitalPhaseMeterTop` 与
+  `-Dtargets$Platform$FPGA` 缺一不可——前者选对顶层模块，后者让 FPGA 分支被实例化而不是命中
+  `$error`。编译顶层生成产物后，用 AXI4-Lite BFM 按真实基地址驱动，覆盖寄存器堆到测量通路的
+  整条通路（见下文「顶层 IP 测试」）。
 
 ## 运行入口
 

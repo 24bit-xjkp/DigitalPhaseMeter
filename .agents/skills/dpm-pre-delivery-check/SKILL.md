@@ -95,9 +95,12 @@ sim/run_handoff_tb.sh      # xsim：真实 MMCM 联调（SystemVerilog 激励，
   见 `script/rule.lua` 的 `mill.verilator.shared`）：改完 RTL 不需要手工先跑 `./mill emit`；为 xsim /
   Vivado 准备产物时仍按各自入口生成（`sim/run_handoff_tb.sh` 自带生成入口，Vivado 流程需要先手工跑
   `./mill emit DigitalPhaseMeterTop MmcmDrpController`）。
-- 改了 `Axi*.scala`、`ControlRegs.scala`、`DigitalPhaseMeterTop.scala` 时，
-  **必须**跑 `xmake test -v`（含 `DigitalPhaseMeterTop` 顶层用例）：这些通路只有经过 AXI 从口与
-  寄存器堆的顶层用例覆盖得到，并把新寄存器纳入该用例。
+- 改了 `Axi*.scala`、`ControlRegs.scala`、`DigitalPhaseMeterTop.scala`、`Utils.scala`（`Config` /
+  `Platform`）或 `ResetSynchronizer.scala` 时，**必须**跑 `xmake test -v`（含 `DigitalPhaseMeterTop`
+  顶层用例）：这些通路只有经过 AXI 从口与寄存器堆的顶层用例覆盖得到，并把新寄存器纳入该用例。
+  顶层用例同时验证平台宏（`test/xmake.lua` 注入 `-Dtargets$Platform$FPGA` 并显式指定
+  `--top DigitalPhaseMeterTop`）；xsim 侧由 `sim/run_handoff_tb.sh` 注入同名宏。改平台/复位风格后
+  两处都要跟着复核。
 - 只改了测量通路（`Controller` / `PhaseMeter` / `EdgeDetector` / `DspCounter`）时，
   直接跑 `xmake test -v` 即可（构建测试目标时会自动生成产物）；但顶层的端口或行为变了也要把顶层用例跑齐。
 - 改了 MMCM 寄存器编码（`MmcmDrpController` / `ps/include/dpm_regs.h`）或片内源联调通路时，

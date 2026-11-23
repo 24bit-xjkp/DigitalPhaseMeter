@@ -50,7 +50,7 @@ FULL_SCALE_MILLI_DEG = 360_000
 #: 文档第 5 节的字段单位表冻结为「整数 Hz」→ 除数 = 1。
 #: （`spec/golden/vectors.json` 与 `spec/sim_server.py` 目前用了 1000，是待修的口径差异。）
 FREQ_FIELD_DIVISOR = 1
-#: 闸门计数器的位宽（`Controller(gateCntWidth = 28)`）。
+#: 闸门计数器的位宽（`Config(gateCntWidth = 28)`）。
 GATE_CNT_WIDTH = 28
 #: `GATE_TARGET` 的最大值（低 28 位有效）。
 GATE_TARGET_MAX = (1 << GATE_CNT_WIDTH) - 1

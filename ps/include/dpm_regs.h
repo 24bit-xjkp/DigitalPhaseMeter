@@ -83,7 +83,7 @@
 #define DPM_CAPS_REGMAP (1u << 16)                    /**< 数据通道为寄存器（GPIO 式） */
 #define DPM_CAPS_SIG_SRC (1u << 17)                   /**< 带片内信号源与输入选择 */
 
-/** GATE_TARGET 只有低 28 位有效（gateCntWidth = 28，低速时钟 50MHz → 最长约 5.37s）。 */
+/** GATE_TARGET 只有低 28 位有效（Config.gateCntWidth = 28，低速时钟 50MHz → 最长约 5.37s）。 */
 #define DPM_GATE_TARGET_MAX 0x0FFFFFFFu
 
 /** 结果寄存器只有 32 位，软件侧用 64 位中间量做乘法，见 dpm_calc.h。 */

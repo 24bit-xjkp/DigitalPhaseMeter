@@ -19,11 +19,18 @@ class ResetSynchronizer(val n: Int = 4) extends RawModule:
     reset := withClockAndReset(clock, (!resetn.asBool).asAsyncReset) { MyShiftRegister(false.B, n, true.B) }
 
 object ResetSynchronizer:
-    def apply(clock: Clock, resetn: Reset, n: Int = 4): Bool =
-        val resetSynchronizer = Module(new ResetSynchronizer(n))
-        resetSynchronizer.clock := clock
-        resetSynchronizer.resetn := resetn.asAsyncReset
-        resetSynchronizer.reset
+    /** 例化复位同步器，并按 `cfg.asyncReset` 选择输出类型
+      *
+      * 同步链本身只产生与 `clock` 对齐的高有效 `Bool`；`cfg.asyncReset = true`（ASIC 分支）时 把它转成 `AsyncReset`，否则保持同步复位 `Bool`（FPGA 分支）。
+      *
+      * @return
+      *   `AsyncReset` 或 `Bool` 类型的高有效复位
+      */
+    def apply(clock: Clock, resetn: Reset, n: Int = 4)(using cfg: Config): Reset =
+        val synchronizer = Module(new ResetSynchronizer(n))
+        synchronizer.clock := clock
+        synchronizer.resetn := resetn.asAsyncReset
+        if cfg.asyncReset then synchronizer.reset.asAsyncReset else synchronizer.reset
 
 object EmitResetSynchronizer extends Main:
     protected def emit = emitSystemVerilog(new ResetSynchronizer)

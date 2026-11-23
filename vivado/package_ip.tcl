@@ -51,19 +51,33 @@ if {![file exists [file join $rtl_dir filelist.f]]} {
 # 读取 filelist.f（firtool 的拓扑顺序即编译顺序）。
 # `verification/` 下是 chisel3.ltl.AssertProperty 提取出的 SVA checker/bind 文件，只给仿真用；
 # IP 综合不定义任何仿真宏，读进去会被 Vivado 报 `Synth 8-2898`，因此打包时直接剔除。
+# 平台变体：chisel3.choice 为 FPGA/ASIC 各生成一套实现（共享模块没有后缀）：
+#   Config.suffix = asyncReset ? "A" : "S"  →  ASIC = *A.sv、FPGA = *S.sv
+# 本工程只打包 FPGA 分支，ASIC 变体不读进打包工程：否则 ipx::package_project 会按宏
+# 做可达性分析，把未选中的平台分支报 [IP_Flow 19-3833]「Unreferenced file」并排除。
 set sources {}
 set fp [open [file join $rtl_dir filelist.f] r]
 foreach line [split [read $fp] "\n"] {
     set line [string trim $line]
-    if {$line ne "" && [string first "verification/" $line] != 0} {
-        lappend sources [file join $rtl_dir $line]
-    }
+    if {$line eq ""} { continue }
+    if {[string first "verification/" $line] == 0} { continue }
+    if {[string match "*A.sv" [file tail $line]]} { continue }
+    lappend sources [file join $rtl_dir $line]
 }
 close $fp
 
 file delete -force $proj_dir
 create_project -force dpm_ip_pack $proj_dir -part $part
+# 生成顶层用 `ifdef targets$Platform$FPGA 选择 FPGA 实现分支（chisel3.choice）：
+#   - 打包工程的 fileset 必须注入该宏，ipx::package_project 才会把 FPGA 分支（含顶层
+#     DigitalPhaseMeterTop.sv 与 *S.sv）当成可达文件；不设时它会打包成 ASIC 分支。
+#   - 但 IP-XACT 不记录 fileset 的 verilog_define，这里的设置带不到 BD 工程；综合阶段
+#     还要由 dpm-vivado-flow 的 build worker 在 IP OOC run 的 fileset 上再注入一次
+#     （Vivado 生成 run 脚本时展开成 `synth_design -verilog_define`）。
+# 宏名含 `$`，只能放在花括号里，不能让 Tcl 做变量替换。
+set fpga_defines {targets$Platform$FPGA}
 read_verilog -sv $sources
+set_property verilog_define $fpga_defines [current_fileset]
 
 # ---- 打包流程的提示级告警过滤（在本仓库无法/不值得修，逐条给出理由）----
 #   [IP_Flow 19-5101] 用 SystemVerilog 顶层打包「不完全支持」的提示：本 IP 就是 SV 产物，

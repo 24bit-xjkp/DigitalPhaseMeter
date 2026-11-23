@@ -21,20 +21,23 @@
 ## 模块结构
 
 ```text
-DigitalPhaseMeterTop（顶层 RawModule：显式主时钟 / 异步复位 / 高速时钟）
-├── ResetSynchronizer        每个时钟域各一个：低有效 resetn 异步置位、与该域时钟同步释放
-│                            mainReset 给主时钟域（模块都在 withClockAndReset(clock, mainReset) 里例化），
-│                            DSP 域那一个在 Controller 内部（从 mainReset 再同步到 dspClock）
-├── Axi4LiteSlave            AXI4-Lite 从口 → 内部读写命令总线（控制/状态/结果寄存器）
-├── ControlRegs              控制/状态寄存器堆（含片内源使能与输入选择）+ 结果锁存 + 中断
-├── SignalInputMux           主时钟域输入选择：片内源使能门控 + 外部输入二选一（纯组合）
-├── Controller               低速域 FSM：闸门计数、与 PhaseMeter 握手、锁存结果
-│   ├── ResetSynchronizer    DSP 域复位：从主复位同步得到（异步置位、与 dspClock 同步释放）
-│   └── PhaseMeter           高速域测量核心
-│       ├── EdgeDetector ×4  3 级流水的边沿检测（RisingA/BothA；sig1、sig2 与两类握手脉冲）
-│       └── DspCounter ×2    DSP48E1 累加器计数器，分别累计 edgeCnt / phaseCnt
-└── （片内无存储：数据通道就是寄存器本身，见下文「PS↔PL 互联」）
+DigitalPhaseMeterTop（顶层 RawModule：ModuleChoice 按平台分支选择实现；显式主时钟 / 低有效异步复位 / 高速时钟）
+└── DigitalPhaseMeterTopImplS（FPGA 分支，同步复位；ASIC 分支 ImplA 为异步复位，模块名后缀 A）
+    ├── ResetSynchronizer    主时钟域复位：低有效 resetn 异步置位、与 clock 同步释放
+    ├── Axi4LiteSlave        AXI4-Lite 从口 → 内部读写命令总线（控制/状态/结果寄存器）
+    ├── ControlRegs          控制/状态寄存器堆（含片内源使能与输入选择）+ 结果锁存 + 中断
+    ├── SignalInputMux       主时钟域输入选择：片内源使能门控 + 外部输入二选一（纯组合）
+    └── Controller           低速域 FSM：闸门计数、与 PhaseMeter 握手、锁存结果
+        ├── ResetSynchronizer  DSP 域复位：从主复位同步得到（异步置位、与 dspClock 同步释放）
+        ├── EdgeDetector ×2    请求 / 停止应答的边沿检测（BothS）
+        └── PhaseMeter         高速域测量核心
+            ├── EdgeDetector ×2  sig1 / sig2 的边沿检测（RisingS；边沿检测输出再统一打一拍）
+            └── DspCounter ×2  DSP48E1 累加器计数器，分别累计 edgeCnt / phaseCnt（不声明复位端口，靠 clear 清零）
+
+（片内无存储：数据通道就是寄存器本身，见下文「PS↔PL 互联」）
 ```
+
+所有模块的计数器位宽与复位风格由 `Utils.scala` 的 `Config` 集中给出（默认闸门 28 位、边沿/相位 32 位；`asyncReset` 选同步/异步复位）。需要按分支区分的模块会把 `Config.suffix` 编进 `desiredName`（`S` / `A`），因此两个平台分支的生成文件可以放进同一个仿真库而不互相覆盖。
 
 片内信号源的 MMCM（`dpm_mmcm_src`，裸 `MMCME2_ADV` 薄封装）不在 IP 内，而是 BD 里的独立单元；PS 通过 AXI4-Lite 写 MMCM 的寄存器镜像，由单独的 `dpm_src_drp` IP 搬进 DRP 口（即「方案 A」）。
 
@@ -186,7 +189,9 @@ Verilator 测试目标在编译 SV 之前会自动调用下文「生成 SystemVe
 
 每个模块只生成**一份**产物：复位同步由纯 RTL 的 `ResetSynchronizer` 实现，Verilator、xsim 与综合共用同一份 RTL，没有 `--type=sim|syn` 的差别。各消费入口对生成的处理不同：Verilator 测试目标的构建规则会在编译前自动执行 `./mill emit <模块名>`（需要时加 `--force`），所以改完 RTL 直接跑 `xmake test` / `xmake run` 即可；`sim/run_handoff_tb.sh` 默认也自带生成入口；Vivado 流程不会替你生成，改完 RTL 仍需先跑 `./mill emit DigitalPhaseMeterTop MmcmDrpController`（见 [`vivado/README.md`](vivado/README.md)）。生成入口的调用形式与陷阱见 [`.agents/skills/dpm-chisel-rtl`](.agents/skills/dpm-chisel-rtl/SKILL.md)。
 
-模块名可以用 `override def desiredName` 与类名不同（例如 `EdgeDetector` 按边沿类型/同步方式生成 `EdgeDetectorRising` / `EdgeDetectorBoth`）：`build/chisel/<Name>/` 下的文件名与 `filelist.f` 中的模块名以生成结果为准，`xmake`、xsim 与 Vivado 都按 `filelist.f` 取文件，不按目录名推导。
+顶层产物包含 **FPGA / ASIC 两套平台分支**（`*S.sv` / `*A.sv` 与 `DigitalPhaseMeterTopImplS/A.sv`），生成顶层用 `` `ifdef targets$Platform$FPGA `` / `` `ifdef targets$Platform$ASIC `` 选择。消费方必须定义且只定义一个宏：Verilator 测试目标在 `test/xmake.lua` 里加 `-Dtargets$Platform$FPGA`，xsim 在 `sim/run_handoff_tb.sh` 里用 `xvlog -d 'targets$Platform$FPGA'`，Vivado 打包/综合由 fileset 的 `verilog_define` 注入（见 [`vivado/README.md`](vivado/README.md)）。两个宏都不定义时，生成顶层会命中 `$error`。
+
+模块名可以用 `override def desiredName` 与类名不同（例如 `EdgeDetector` 在 FPGA 分支生成 `EdgeDetectorRisingS` / `EdgeDetectorBothS`，ASIC 分支为 `...A`）：`build/chisel/<Name>/` 下的文件名与 `filelist.f` 中的模块名以生成结果为准，`xmake`、xsim 与 Vivado 都按 `filelist.f` 取文件，不按目录名推导。
 
 ### 代码检查
 
@@ -206,9 +211,9 @@ xmake test -v                             # 全部测试
 xmake run Controller                      # 单个测试目标（定位问题用）
 ```
 
-构建测试目标前会自动调用生成入口：每个 `<Name>Verilator` 目标先执行 `./mill emit <Name>`（只生成该目标对应的模块；`test/xmake.lua` 用 `mill.verilator.shared` 规则接入，规则定义在 `script/rule.lua`），再把 `build/chisel/<Name>/filelist.f` 列出的 SV 交给 Verilator。因此改完 RTL 不需要先手工跑 `./mill emit`；要强制重新生成时用 `./mill emit --force <Name>`。
+构建测试目标前会自动调用生成入口：每个 `<Name>Verilator` 目标先执行 `./mill emit <Name>`（只生成该目标对应的模块；`test/xmake.lua` 用 `mill.verilator.shared` 规则接入，规则定义在 `script/rule.lua`），再把 `build/chisel/<Name>/filelist.f` 列出的 SV 交给 Verilator。因此改完 RTL 不需要先手工跑 `./mill emit`；要强制重新生成时用 `./mill emit --force <Name>`。顶层目标还额外用 `--top DigitalPhaseMeterTop` 指定顶层（产物目录里含平台分支的多个顶层模块），并定义 `targets$Platform$FPGA` 选 FPGA 分支。
 
-覆盖 `Controller`（复位、闸门/相位计数、窗口跟随、连续测量一致性、强制停止中止在途测量）、`PhaseMeter`（停止握手与强制停止）、`EdgeDetector`、`ResetSynchronizer`、`DspCounter`、`MmcmDrpController`，以及顶层 IP 的 `DigitalPhaseMeterTop`：用 AXI4-Lite BFM 按真实基地址 `0x43C0_0000 + 偏移` 驱动，覆盖复位/寄存器默认值（结果字 `RESULT_GATE/EDGE/PHASE` 不复位、`RESULT_SEQ` 复位为 0）、写数据先到与字节选通、测量启动与中断时序、W1C 与只读寄存器写忽略、结果锁存与 `LOST_COUNT`、`CTRL.clear`、`CTRL.forceStop`（含「无沿卡住 → 强制停止 → busy 清零 → 重新测量」）、目标闸门锁存，以及片内源/外部输入切换。**顶层 AXI 寄存器通路由它守门**：动 `Axi*.scala`、`ControlRegs.scala` 或 `DigitalPhaseMeterTop.scala` 必须跑 `xmake test -v`，并把新寄存器纳入 [`test/DigitalPhaseMeterTop.cpp`](test/DigitalPhaseMeterTop.cpp)。测试目标的注册方式、时间精度与常见陷阱见 [`.agents/skills/dpm-verilator-testing`](.agents/skills/dpm-verilator-testing/SKILL.md)。
+覆盖 `Controller`（复位、闸门/相位计数、窗口跟随、连续测量一致性、强制停止中止在途测量）、`PhaseMeter`（停止握手与强制停止）、`EdgeDetector`、`ResetSynchronizer`、`DspCounter`、`MmcmDrpController`，以及顶层 IP 的 `DigitalPhaseMeterTop`：用 AXI4-Lite BFM 按真实基地址 `0x43C0_0000 + 偏移` 驱动，覆盖复位/寄存器默认值（结果字 `RESULT_GATE/EDGE/PHASE` 不复位、`RESULT_SEQ` 复位为 0）、写数据先到与字节选通、测量启动与中断时序、W1C 与只读寄存器写忽略、结果锁存与 `LOST_COUNT`、`CTRL.clear`、`CTRL.forceStop`（含「无沿卡住 → 强制停止 → busy 清零 → 重新测量」）、目标闸门锁存，以及片内源/外部输入切换。**顶层 AXI 寄存器通路由它守门**：动 `Axi*.scala`、`ControlRegs.scala`、`DigitalPhaseMeterTop.scala` 或 `Utils.scala` 的 `Config`/`Platform` 必须跑 `xmake test -v`，并把新寄存器纳入 [`test/DigitalPhaseMeterTop.cpp`](test/DigitalPhaseMeterTop.cpp)。测试目标的注册方式、时间精度与常见陷阱见 [`.agents/skills/dpm-verilator-testing`](.agents/skills/dpm-verilator-testing/SKILL.md)。
 
 ### xsim 仿真（MMCM 联调）
 
