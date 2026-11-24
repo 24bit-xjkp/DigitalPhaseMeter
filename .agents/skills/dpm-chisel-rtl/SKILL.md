@@ -18,23 +18,28 @@ argument-hint: '要新增或修改的 RTL 模块（如 Controller、PhaseMeter�
 
 ```scala
 class Foo(using val cfg: Config) extends Module:
-    override def desiredName: String = s"Foo${cfg.suffix}"
     // ...
 
 object EmitFoo extends Main:
     protected def emit = emitSystemVerilog(Foo())
+
+// 仅当该模块在 ASIC 平台有不同实现时才需要；生成到 build/chisel/FooA/
+object EmitFooA extends Main(using Config.asic):
+    protected def emit = emitSystemVerilog(Foo())
 ```
 
 - `Main`（定义在 `Utils.scala`）提供显式 `main` 与 `emitSystemVerilog`：Scala 3 的 `App` 已废弃，JVM 入口 `main` 把命令行参数存进 `args` 后调用 `emit`，由 `emit` 调用 `emitSystemVerilog` 创建输出目录、调用 `ChiselStage.emitSystemVerilogFile`；`args` 原样转交给 `ChiselStage`（不再有 `--type` 之类被 `Main` 摘掉的选项，见下文）。
-- **`Config` 是位宽与复位风格的唯一来源**：`Utils.scala` 的 `case class Config(asyncReset, gateCntWidth, edgeCntWidth, phaseCntWidth)` 由 `Main` 提供默认 `given`（独立生成时用默认值），各模块通过 `(using cfg: Config)` 取得，不再把 `gateCntWidth` 等作为构造参数层层传递。`cfg.suffix`（同步复位 `S` / 异步复位 `A`）要编进 `desiredName`，否则两个平台分支的同名模块会互相覆盖。新增模块时沿用这一约定。
-- 输出目录为 `build/chisel/<Name>/`（**每个模块只有一份产物**），`<Name>` 由主类名剥离 `Emit` 前缀得到（`EmitFoo` → `Foo`）。需要与类名不同的目录名时显式传第二个参数。
+- **`Config` 是位宽、平台实现与复位风格的唯一来源**：`Utils.scala` 的 `case class Config(platform, asicDspCounterPipeline, gateCntWidth, edgeCntWidth, phaseCntWidth)` 由 `Main` 提供默认 `given`（独立生成时用 `Config.default`/`Config.fpga`），各模块通过 `(using cfg: Config)` 取得，不再把位宽等作为构造参数层层传递。`Config.platform` 选择实现：`Platform.FPGA`（默认）用 DSP48E1 单级累加器计数器、`ResetSynchronizer` 返回同步复位 `Bool`；`Platform.ASIC`（`Config.asic`）用 `asicDspCounterPipeline` 级分段流水线计数器、复位为 `AsyncReset`。平台差异由不同的生成主类（`EmitFoo` / `EmitFooA`）显式选择并落到不同目录；**模块名不带平台后缀**，同一目录里也没有平台分支文件。
+- 输出目录为 `build/chisel/<Name>/`（每个平台的每个模块只有一份产物），`<Name>` 由主类名剥离 `Emit` 前缀得到（`EmitFoo` → `Foo`，`EmitFooA` → `FooA`）。需要与类名不同的目录名时显式传第二个参数。
 - 传给 firtool 的固定选项是 `-disable-all-randomization`、
-  `--lowering-options=emittedLineLength=120`、`--preserve-aggregate=1d-vec`、
+  `--lowering-options=emittedLineLength=120,disallowPackedArrays`、`--preserve-aggregate=1d-vec`、
   `--verification-flavor=sva`、`--warn-on-implicit-truncation` 与 `--warn-on-unprocessed-annotations`；
   `--split-verilog` 与 `--target-dir` 由 `emitSystemVerilog` 自动追加。**不要**加
   `-default-layer-specialization=enable`：它会把 `AssertProperty` 的断言直接内联到主 SV，丢失
   layer 提取，Vivado 综合会对每条并发断言报 `[Synth 8-2898]`（见下文「硬件断言与形式化」）。
-  `emittedLineLength` 只改输出格式（单行代码上限放宽到 120 字符）；`--preserve-aggregate=1d-vec`
+  `emittedLineLength` 只改输出格式（单行代码上限放宽到 120 字符）；`disallowPackedArrays`
+  把 `switch(state)` 下降成 `casez`（RTLIL 是 `$mux`/`$pmux`），Yosys 与 Vivado 都能直接提取
+  FSM，但它是全局选项，各平台的生成 SV 都会一起变化，改后要同时验证 FPGA 与 ASIC 两条流程；`--preserve-aggregate=1d-vec`
   让一维 `Vec`（如 `MmcmDrpController` 的 `daddrTable`/`diTable`）保留为具名 packed array，不改变
   端口与逻辑（对未改动模块，生成的 SV 除位置注释外与关闭该选项时逐字节相同）。位置注释保持
   firtool 默认的 `// <源文件> <行列>` 形式（没有开 `locationInfoStyle=wrapInAtSquareBracket`），
@@ -48,6 +53,7 @@ object EmitFoo extends Main:
   例如 `DspCounter` 的位宽上限、`ResetSynchronizer` 的级数下限。
 - `build/chisel/` 是构建产物，**不入库**（`.gitignore` 已覆盖 `build`）。改 RTL 只能改 `.scala` 后重新生成，不要手工编辑生成的 `.sv`。
 - 跨模块共享的 FSM 枚举声明在模块外的顶层 `object`（如 `PhaseMeterStateEnum` 定义在 `PhaseMeter.scala`，被 `PhaseMeter` 与 `Controller` 共用）。改动枚举值/顺序会同时影响两个状态机，新增状态时确认两边的 `switch` 都覆盖到。
+- 两个 state 寄存器都用 `addAttribute(state, "fsm_encoding = \"auto\"")` 显式要求综合器按自动策略重编码 FSM，**不要**再按平台加条件：Yosys 的 `fsm` 与 Vivado 的 FSM 提取都识别该属性（Vivado 对 `auto` 可自行选择 sequential/one-hot；曾用临时 `one_hot` 综合验证过属性确实生效）。属性是通用综合提示，不是 Yosys 专有语法。
 
 ## 生成入口
 
@@ -96,8 +102,8 @@ Mill 专属的注意点：
 
 - **依赖判定取字节码闭包**：从入口主类的 `.class` 出发解析常量池里的类引用，沿项目 class 目录展开，对可达的
   `.class` 文件求 SHA-256，再叠加依赖 classpath 标识。判定看编译产物而不是源码文本：不改变字节码的编辑（例如在文件末尾追加注释）不会触发重跑。
-- **缓存按主类隔离**：改 `PhaseMeter` 只会让 `EmitPhaseMeter` / `EmitController` / `EmitDigitalPhaseMeterTop`
-  重跑，与 `EmitSignalInputMux` 等入口点无关。
+- **缓存按主类隔离**：改 `PhaseMeter` 只会让 `EmitPhaseMeter` / `EmitPhaseMeterA` / `EmitController` /
+  `EmitDigitalPhaseMeterTop` / `EmitDigitalPhaseMeterTopA` 重跑，与 `EmitSignalInputMux` 等入口点无关。
 - **持久且不在 clean 范围**：缓存落在 `build/chisel/.emit-cache/`，跨会话有效；`./mill clean` 删的是 Mill 的
   构建缓存/产物 `out/`，不会清掉 `build/chisel/`。
 - **带产物检查**：`Emit<Name>` 入口点还会检查约定产物 `build/chisel/<Name>/filelist.f`，缺失时重新生成
@@ -115,50 +121,55 @@ Mill 专属的注意点：
 （或带模块名只查本次改动涉及的入口点）：全部最新时退出码 0，需要重新生成时非零退出并给出原因；
 只想确认、不想改动 `build/chisel/` 时用它，确实需要刷新产物再跑 `./mill emit`。
 
-## 产物目录：每个模块一份
+## 产物目录：每个平台各生成一份
 
-`emitSystemVerilog` 对每个模块只生成**一份**产物，仿真与综合消费同一份 RTL：
+`emitSystemVerilog` 对每个平台的每个模块只生成**一份**产物，同一平台内仿真与综合消费同一份 RTL：
 复位同步由纯 RTL 的 `ResetSynchronizer`（`ResetSynchronizer.scala`）实现，产物里没有 XPM 原语，
-Verilator 与 xsim / Vivado 都能直接编译。顶层目录里另有 FPGA/ASIC 两套平台分支文件（见下一节），
-它们是同一份产物里的两个实现分支，不是 `sim`/`syn` 两套产物。
+Verilator 与 xsim / Vivado 都能直接编译。FPGA 与 ASIC 是两份独立产物，由生成主类显式选择
+（`Emit<Name>` / `Emit<Name>A`），不是同一份产物里的 `ifdef` 分支。
 
 | 消费方 | 读的目录 | 入口 |
 | --- | --- | --- |
-| Verilator 单元测试 | `build/chisel/<Name>/` | `script/rule.lua` 的 `mill.verilator.shared` 规则（构建前先跑 `./mill emit <Name>`，再逐行读 `filelist.f`） |
+| Verilator 单元测试（FPGA） | `build/chisel/<Name>/` | `script/rule.lua` 的 `mill.verilator.shared` 规则（构建前先跑 `./mill emit <Name>`，再逐行读 `filelist.f`） |
+| Verilator 单元测试（ASIC 变体） | `build/chisel/<Name>A/` | 同上；目标名带 `A`（`DspCounterA` / `PhaseMeterA`） |
 | xsim 联调（真实 MMCM） | `build/chisel/DigitalPhaseMeterTop/`、`build/chisel/MmcmDrpController/` | `sim/run_handoff_tb.sh` |
 | IP 打包 / 综合实现 | `build/chisel/<Name>/` | `vivado/package_ip.tcl`、`vivado/package_src_ip.tcl` |
+| ASIC 实现 | `build/chisel/DigitalPhaseMeterTopA/` | `uv run dpm-asic-flow synth`（先生成，再改写其 `filelist.f`） |
 
 **新增厂商原语前要先确认 Verilator 与 xsim 两侧都拿得到它的模型**，否则「一份产物」的前提就不成立
 （历史上曾按 `--type=sim|syn` 生成两套产物，共用目录时先综合再跑 Verilator 会读到综合产物并报
 `Cannot find file containing module: 'xpm_cdc_sync_rst'`；现在复位同步改成纯 RTL 后已删除双产物机制）。
 
-## 平台分支与综合宏
+## 平台选择：显式 emit target
 
-`DigitalPhaseMeterTop`（`src/DigitalPhaseMeterTop.scala`）是**最外层的平台选择层**，本身 extends
-`RawModule`，只做一件事：
+`Utils.scala` 用 `enum Platform { case FPGA, ASIC }` 表示平台，`Config(platform = Platform.FPGA)`
+是默认配置（`Config.fpga`/`Config.default`），`Config.asic = Config(platform = Platform.ASIC)`。
+区别集中在：DSP 计数器实现（FPGA 单级 DSP48E1 累加器 / ASIC 按 `asicDspCounterPipeline` 分段流水线）、
+`PhaseMeter` 的停止响应按流水线深度延后 `asicDspCounterPipeline - 1` 拍，以及 `ResetSynchronizer`
+返回的复位类型（FPGA 同步 `Bool` / ASIC `AsyncReset`）。**没有平台选择宏、
+没有包装层，也没有 `--top`。**
+
+平台通过生成主类显式选择：
 
 ```scala
-ModuleChoice(notImpl())(Seq(Platform.FPGA -> fpgaImpl, Platform.ASIC -> asicImpl))
+object EmitDspCounter extends Main:
+    protected def emit = emitSystemVerilog(new DspCounter(32))
+
+object EmitDspCounterA extends Main(using Config.asic):
+    protected def emit = emitSystemVerilog(new DspCounter(32))
 ```
 
-- `Platform` 是 `Utils.scala` 里用 `chisel3.choice.Group` 定义的平台组；`DigitalPhaseMeterTopImplS`
-  （`Config(asyncReset = false)`，同步复位）与 `DigitalPhaseMeterTopImplA`（`asyncReset = true`，
-  异步复位）是同一套逻辑的两个分支，端口统一由 `DigitalPhaseMeterTopIO` 描述。
-- firtool 在生成的 `DigitalPhaseMeterTop.sv` 里把两个实例包在 `` `ifdef targets$Platform$FPGA ``
-  / `` `ifdef targets$Platform$ASIC `` 里；两个宏都未定义时会命中 `$error`，两个同时定义也会
-  `$error`。**消费方必须定义且只定义一个宏**：
-  - Verilator 测试目标：`test/xmake.lua` 的 `verilator.flags` 加 `-Dtargets$Platform$FPGA`；
-  - xsim：`xvlog ... -d 'targets$Platform$FPGA'`（宏名含 `$`，必须用单引号原样传给 xvlog）；
-  - Vivado：`package_ip.tcl` 给打包工程 fileset 设 `verilog_define`，build worker 再把它写到
-    `dpm_top` 的 OOC run 同名 fileset（IP-XACT 不记录该属性，细节见 `dpm-vivado-ip`）。
-- `filelist.f` 会同时列出 `*S.sv` 与 `*A.sv`（firtool 两个分支都生成）；Verilator/xsim 编译时
-  两套文件都进编译，但宏只让选中的分支被实例化。`package_ip.tcl` 只读 FPGA 分支（`*A.sv` 不进
-  打包工程），避免 `ipx::package_project` 把未选中的分支报 `[IP_Flow 19-3833]`。
-- 因此顶层目录里有多个模块级顶层（`DigitalPhaseMeterTop`、`DigitalPhaseMeterTopImplS`、
-  `DigitalPhaseMeterTopImplA`）：Verilator 的顶层目标必须显式 `--top DigitalPhaseMeterTop`，
-  不能依赖自动选唯一顶层（见 `dpm-verilator-testing`）。
-- 新增平台相关逻辑时，同步改 `Platform` 分支、`Config` 的 `asyncReset` 映射与消费方的宏注入；
-  只改其中一处会出现「仿真跑 FPGA 分支、综合却按 ASIC 分支」的静默错配。
+- `Emit...`：默认 `Config.fpga`，产物目录 `build/chisel/<Name>/`，给 Verilator（FPGA 目标）、
+  xsim 与 Vivado 使用。
+- `Emit...A`：`Config.asic`，产物目录 `build/chisel/<Name>A/`，当前用于
+  `DigitalPhaseMeterTop`、`DspCounter`、`PhaseMeter`（测试目标 `DspCounterA` / `PhaseMeterA`）。
+- 两个变体生成**同名模块**（`DigitalPhaseMeterTop`、`DspCounter`、`PhaseMeter`），因此不能编进同一个
+  仿真库；Verilator 目标各自独立编译，xsim 与 Vivado 只消费 FPGA 目录，ASIC 流程只消费
+  `DigitalPhaseMeterTopA`。
+- 消费方不需要定义任何宏：目录里只有一份实现、一个顶层模块，Verilator 可自动识别顶层，xsim 与
+  Vivado 直接按 `filelist.f` 编译。
+- 新增平台相关逻辑时，在模块里按 `cfg.platform` 分支，并补 `Emit<Name>A` 与对应测试（见
+  `dpm-verilator-testing`）；不要引入平台宏或按文件名后缀筛选产物。
 
 ## 生成结果的消费方式
 
@@ -168,27 +179,23 @@ ModuleChoice(notImpl())(Seq(Platform.FPGA -> fpgaImpl, Platform.ASIC -> asicImpl
 - 新模块没有出现在 `filelist.f` 中，说明生成没有跑到，或产物目录不对（见上一节的生成入口）。
 - 文件顺序即 firtool 的拓扑顺序，`filelist.f` 就是权威列表。
 - **生成目录名、filelist 中的文件名与模块名不一定相同**：模块可用 `override def desiredName` 改名，
-  例如 `EdgeDetector` 在 FPGA 分支生成 `EdgeDetectorRisingS`/`EdgeDetectorBothS`（ASIC 分支为
-  `EdgeDetectorRisingA`/`EdgeDetectorBothA`）——`filelist.f` 里列的是后者，而目录仍叫
+  例如 `EdgeDetector` 生成 `EdgeDetectorRising`/`EdgeDetectorBoth`——`filelist.f` 里列的是后者，而目录仍叫
   `build/chisel/EdgeDetector/`。消费方一律按 `filelist.f` 取文件与模块，不要按目录名
   推导；新增消费方时同样只认 `filelist.f`。**参数不同会改变端口宽度的共享子模块必须把参数编进
-  `desiredName`**：`Axi4LiteSlave` 按 `Axi4LiteSlaveA<addrUsedWidth>D<dataUsedWidth><suffix>` 命名
-  （如顶层 FPGA 分支 `Axi4LiteSlaveA6D32S`、DRP 控制器 `Axi4LiteSlaveA12D16S`，注意文件名里没有
-  下划线）。否则两个 IP 的生成文件被编进同一个仿真库时（`sim/run_handoff_tb.sh` 会把两个
+  `desiredName`**：`Axi4LiteSlave` 按 `Axi4LiteSlaveA<addrUsedWidth>D<dataUsedWidth>` 命名
+  （如顶层 `Axi4LiteSlaveA6D32`、DRP 控制器 `Axi4LiteSlaveA12D16`；前缀里的 `A` 是 addr，不是 ASIC，
+  文件名里没有下划线）。否则两个 IP 的生成文件被编进同一个仿真库时（`sim/run_handoff_tb.sh` 会把两个
   `filelist.f` 一起交给 xvlog）同名模块互相覆盖，xelab 报
   `[VRFC 10-3091] actual bit length ... differs from formal ...`、仿真行为全错。
 - **模块层次与命名**：`MmcmDrpController` 直接 `extends TopModule`（`Utils.scala` 里的公共顶层：
   显式 `clock`/`resetn`，内部 `ResetSynchronizer(clock, resetn)` 同时作为 `ImplicitClock`/
   `ImplicitReset`），端口是 `clock`/`resetn`/`s_axi_lite_*`/`drp_*`/`mmcm_reset`，内部名没有
   `impl_` 前缀（如 `state`、`clkFbOut`、`loadPending`；子模块连线 `_axiLiteSlave_io_*`，复位同步器
-  实例 `reset_synchronizer`）。`DigitalPhaseMeterTop` 不再继承 `TopModule`：它是最外层 `RawModule`，
-  只做 `ModuleChoice` 平台选择，生成 SV 里的实例名是 `impl_FPGA`/`impl_ASIC`。真正的实现是
-  `DigitalPhaseMeterTopImplS`（FPGA）与 `DigitalPhaseMeterTopImplA`（ASIC），两者都
-  `extends FixedIORawModule(DigitalPhaseMeterTopIO())` + `ImplicitClock`/`ImplicitReset`，端口在
-  `DigitalPhaseMeterTopIO` 里统一声明；`ImplS.sv` 内部主复位实例 `reset_synchronizer`，子模块实例
-  `controller`/`controlRegs`/`axiLiteSlave`，`ControllerS` 内部的 DSP 域复位实例是
-  `dspReset_synchronizer`。写断言或看波形时按这些名字找。Chisel 快照的 `Counter` 内部寄存器在生成
-  SV 里叫 `c_value` / `c_value_1`（Scala 2.13 版按 `val` 名生成 `gateCnt` / `idx` /
+  实例 `reset_synchronizer`）。`DigitalPhaseMeterTop` 同样直接 `extends TopModule`，没有包装层：
+  生成 SV 的模块名就是 `DigitalPhaseMeterTop`，内部主复位实例
+  `reset_synchronizer`，子模块实例 `controller`/`controlRegs`/`axiLiteSlave`，`Controller` 内部的
+  DSP 域复位实例是 `dspReset_synchronizer`。写断言或看波形时按这些名字找。Chisel 快照的 `Counter`
+  内部寄存器在生成 SV 里叫 `c_value` / `c_value_1`（Scala 2.13 版按 `val` 名生成 `gateCnt` / `idx` /
   `holdCntTrigger_c_value`）；端口与逻辑不变，看波形时按 `c_value` 找。
 - 目录里可能残留上一次生成、这次已被删除（或改名）的模块 `.sv`：消费方都按 `filelist.f` 取文件，
   残留文件不参与编译，但排查"读到了旧模块"时先清掉整个 `build/chisel/` 再重新生成最省事。
@@ -212,10 +219,9 @@ ModuleChoice(notImpl())(Seq(Platform.FPGA -> fpgaImpl, Platform.ASIC -> asicImpl
 顶层 IP 的端口名还要满足 Vivado 的 AXI 接口推断约定：`val s_axi_lite = IO(new Axi4LiteSlavePorts(...))` 会生成
 `s_axi_lite_awaddr` / `s_axi_lite_rvalid` 这类名字，`ipx::infer_bus_interfaces` 据此自动建立 `s_axi_lite`
 从口（详见 `dpm-vivado-ip`）。当前顶层只有这一个 AXI 从口：控制/状态与测量结果都在它的寄存器里
-（`ControlRegs`），没有片内存储。`DigitalPhaseMeterTop` 的端口在 `DigitalPhaseMeterTopIO` 里统一
-声明：分支实现用 `FixedIORawModule(DigitalPhaseMeterTopIO())`，最外层 wrapper 用
-`FlatIO(DigitalPhaseMeterTopIO())` 展开，因此生成顶层的端口仍是 `clock`/`resetn`/`dspClock`/被测
-信号/`s_axi_lite`/`interrupt`。`MmcmDrpController` 仍继承 `Utils.scala` 的 `TopModule`（`RawModule` +
+（`ControlRegs`），没有片内存储。`DigitalPhaseMeterTop` 直接 `extends TopModule`，自己声明
+`clock`/`resetn`/`dspClock`/被测信号/`s_axi_lite`/`interrupt` 端口，没有 `DigitalPhaseMeterTopIO`
+包装层或 `FlatIO` 展开。`MmcmDrpController` 同样继承 `Utils.scala` 的 `TopModule`（`RawModule` +
 `ImplicitClock`/`ImplicitReset`，提供 `clock` / `resetn` 与内部复位同步器）；子模块依赖父模块给的
 隐式时钟复位，不要各自再派生一套。
 
@@ -253,16 +259,11 @@ ModuleChoice(notImpl())(Seq(Platform.FPGA -> fpgaImpl, Platform.ASIC -> asicImpl
   隐式 `reset` 生成本域复位时必须取反：`ResetSynchronizer(dspClock, !reset.asBool)`。写成
   `reset.asBool` 极性正好反了——RTL 能生成、能综合、时序也正常，但该域的寄存器会在**系统复位撤销后**
   被永久按在复位里。实测表现：Verilator 的 `Controller` 用例全部超时（测量永远不返回），波形里
-  `dspReset` 在主复位拉低的那一刻被异步置位后一直为 1。这类错误只能靠行为测试抓到。`cfg.asyncReset`
-  只决定 `ResetSynchronizer` 返回 `Bool` 还是 `AsyncReset`，极性规则不变。
+  `dspReset` 在主复位拉低的那一刻被异步置位后一直为 1。这类错误只能靠行为测试抓到。`cfg.platform`
+  只决定 `ResetSynchronizer` 返回 `Bool`（FPGA）还是 `AsyncReset`（ASIC），极性规则不变。
 - **`ExtModule` 的端口不走 `io`**（本仓库暂无厂商 `ExtModule` 实例，将来引入原语时会用到）：
   把端口直接声明成类的成员，例化后写 `ram.douta` 而不是 `ram.io.douta`。
-  未连接的厂商原语输入端口没有 Verilog 默认值，必须显式驱动。平台分支的占位类型
-  `FixedIOExtModule(DigitalPhaseMeterTopIO())` 也遵循这一规则。
-- **顶层用 `FixedIO` / `FlatIO` 避免手写端口连接**：`DigitalPhaseMeterTopIO` 定义一次端口，分支实现用
-  `FixedIORawModule(...)` 声明，最外层 wrapper 用 `FlatIO(...)` 展开，再 `io :<>= impl` 对齐连接；
-  `ModuleChoice` 的分支用 `FixedIOExtModule(...)` 当占位类型。不要为同一组端口写两份声明，也不要
-  手写逐字段连接。
+  未连接的厂商原语输入端口没有 Verilog 默认值，必须显式驱动。
 - **firtool 会删掉子模块里未被使用的端口**（例如 `Axi4LiteSlave.io.rd.valid` 因为寄存器堆
   只用地址而被优化掉），但**顶层模块的端口都会保留**，因此顶层可以放心暴露 IP-XACT 需要的
   全部端口（`awprot`、`awregion`、`awqos` 等即使当前不使用也在）。
@@ -293,9 +294,9 @@ ModuleChoice(notImpl())(Seq(Platform.FPGA -> fpgaImpl, Platform.ASIC -> asicImpl
 - `Fill(n, value)` 是两个参数；`MuxCase(default, Seq(cond -> value))` 里的条件必须是 `Bool`
   （写 `(mode === 1.U) -> addr` 而不是 `mode -> addr`）。
 - **高速域（当前 450MHz）只放「边沿检测 + 计数器/比较器 + 二级 FSM」**：频率/相位全部交给 MMCM，
-  高速域不要放配置运算或分频逻辑。450MHz 下测量域自身最差 setup 路径余量在 **+0.5~0.6ns 量级**
-  （2026-10-26 当前 RTL 实测 **+0.553ns**：`dspReset` 释放链 → 边沿检测链复位脚；纯数据/控制脚
-  路径余量 ≥ +0.65ns，同类路径随布局布线浮动，具体以最新签核报告为准）；**整体 WNS 受 clk_wiz
+  高速域不要放配置运算或分频逻辑。450MHz 下测量域自身最差 setup 路径余量在 **+0.3~0.6ns 量级**
+  （2026-11-23 当前 RTL 实测 **+0.341ns**：`forceStop` 边沿检测链 → PhaseMeter FSM 状态寄存器 D；
+  同类路径随布局布线与 FSM 编码浮动，具体以最新签核报告为准）；**整体 WNS 受 clk_wiz
   Safe Clock Startup 内部路径限制（+0.271ns）**，不要拿整体 WNS 判断测量逻辑还剩多少优化空间。
 - **450MHz 的 32 位计数器用 DSP48E1，不要用 fabric 进位链**：fabric 32 位计数器（8 个 CARRY4 串联）
   与「16 位低段 + 16 位高段」的分段计数器在该器件上都收敛不到正余量，固定开销在
@@ -308,10 +309,17 @@ ModuleChoice(notImpl())(Seq(Platform.FPGA -> fpgaImpl, Platform.ASIC -> asicImpl
   `when(io.clear) { cnt := 0.U }.elsewhen(io.enable) { cnt := cnt + 1.U }` 才会映射成 DSP 的
   RSTP（同步复位）+ CEP（时钟使能），使能/清零由**寄存器直接**驱动控制脚。用
   `addAttribute(cnt, """use_dsp = "yes"""")` 显式要求 DSP，避免综合器换成 fabric 实现。
+- **ASIC 分段计数器的输出对齐延迟链不要加 clear 复位**：这条链只是把各段旧值对齐到同一时刻，
+  不是独立数据寄存器；给每级 `ShiftRegister` 加 clear 会为每个 bit 引入一级清零 mux（sky130
+  实测多出约 220 个 `nor2b`，面积增加约 8.8%）。当前用无复位的 `RegNext` 链，代价是
+  `clear` 后 `depth - 1` 拍内输出可能是旧值与已清零高段的混合，**这段窗口不能读**；
+  `PhaseMeter` 的停止响应延后 `depth - 1` 拍、且 clear 只在 idle 生效，所以正常测量不受影响。
+  若将来加入短于该窗口的测量或直接观测 DspCounter，必须另行处理，不要简单把延迟链复位加回来。
 - **边沿检测器的组合触发要打一拍再进 FSM/使能译码**：3 级同步链最后一级 → 组合触发脉冲 → FSM 两级
   LUT 是一条 0.188~0.212ns 余量的路径。给**四条**边沿检测输出（sig1 / sig2 / request / responseReady）
-  统一加一级 `RegNext` 后：检测器输出只驱动本地触发器，FSM 输入来自寄存器，本设计里相关路径
-  余量 > +0.7ns。因为四路整体晚 1 个高速周期，`pulseSig1Valid` / `pulseSig2Valid` / `phaseCntEnable`
+  统一加一级 `RegNext` 后：检测器输出只驱动本地触发器，FSM 输入来自寄存器。2026-11-23 当前
+  RTL 该类路径的最差余量是 **+0.341ns**（`forceStop` 边沿检测链 → PhaseMeter FSM 状态寄存器 D），
+  仍优于不寄存时 0.2ns 量级的组合路径。因为四路整体晚 1 个高速周期，`pulseSig1Valid` / `pulseSig2Valid` / `phaseCntEnable`
   之间的相对时序与相位计数窗口长度不变，握手只是多 1 拍；计数器停止后冻结、慢域握手完成后才锁存，
   读数不变（顶层用例与加流水前逐条 diff 为空、Verilator Controller 用例全过）。
 - **派生运算放到低速域，高速域只留「取寄存器 → 比较/计数」**：只要一个值在配置期算得出来，
@@ -325,8 +333,8 @@ ModuleChoice(notImpl())(Seq(Platform.FPGA -> fpgaImpl, Platform.ASIC -> asicImpl
   防御手段有两个：生成后 `grep` 一下顶层 SV 里目标模块还有没有那组端口；以及**寄存器堆到下游的
   通路必须由顶层 Verilator 用例覆盖**（`test/DigitalPhaseMeterTop.cpp`，见 `dpm-verilator-testing`）。
 - **Verilator 单测当前按默认告警集编译**：`test/xmake.lua` 只传
-  `--trace-fst --x-assign unique --x-initial unique -Wno-SYMRSVDWORD -Dtargets$Platform$FPGA
-  -DENABLE_INITIAL_REG_`（`-Dtargets$Platform$FPGA` 选 FPGA 平台分支，`-DENABLE_INITIAL_REG_` 让
+  `--trace-fst --x-assign unique --x-initial unique -Wno-SYMRSVDWORD
+  -DENABLE_INITIAL_REG_`（不再注入平台宏；`-DENABLE_INITIAL_REG_` 让
   生成 SV 里的初始值块在仿真 0 时刻生效），没有 `-Wall`，
   也没有逐目标豁免表。下面两类告警因此不挡构建，但设计上仍要知道它们（临时加 `-Wall` 排查时会碰到）：
   - `UNUSEDSIGNAL`：主要是**接口固有未使用位**（`MmcmDrpController` 的 AXI4-Lite `awprot` /
@@ -343,20 +351,20 @@ ModuleChoice(notImpl())(Seq(Platform.FPGA -> fpgaImpl, Platform.ASIC -> asicImpl
 `Controller` 同时使用两个时钟：低速 `clock` 域（FSM、闸门计数）与高速 `dspClock` 域（测量核心）。新增逻辑时先确定它属于哪个域：
 
 - 高速域模块用 `withClockAndReset(dspClock, dspReset) { ... }` 例化；`dspReset` 由 `Controller` 内部的 `ResetSynchronizer` 从主复位同步得到，不要在高速域直接使用低速域的 `reset`。
-- **每个时钟域一个复位同步器，复位释放必须与消费它的时钟同域**：`DigitalPhaseMeterTopImpl` 例化主时钟域那个（`ResetSynchronizer(io.clock, io.resetn)`，与 `clock` 同步，接 PS 的低有效 `resetn`，并作为本模块的 `ImplicitReset` 交给主时钟域子模块）；`MmcmDrpController` 里对应的是 `TopModule.reset`。**DSP 域那个在 `Controller` 内部**（与 `dspClock` 同步，从高有效主复位取反接入，见上面的极性陷阱），其输出给 `PhaseMeter`。原因是两个时钟都源自 MMCM、相位关系不固定，而
+- **每个时钟域一个复位同步器，复位释放必须与消费它的时钟同域**：`DigitalPhaseMeterTop` 例化主时钟域那个（`ResetSynchronizer(clock, resetn)`，与 `clock` 同步，接 PS 的低有效 `resetn`，并作为本模块的 `ImplicitReset` 交给主时钟域子模块）；`MmcmDrpController` 里对应的是 `TopModule.reset`。**DSP 域那个在 `Controller` 内部**（与 `dspClock` 同步，从高有效主复位取反接入，见上面的极性陷阱），其输出给 `PhaseMeter`。原因是两个时钟都源自 MMCM、相位关系不固定，而
   `withClockAndReset(clk, reset)` 生成的复位在消费端与传入的复位类型一致（`Bool` 是同步复位，
   `AsyncReset` 是异步复位）：拿主时钟域的复位去释放高速域寄存器，会让释放沿落在 `dspClock` 的
   建立/保持窗口里。**曾经踩过**——把 `dspReset` 也接到 `clock` 域的同步器上（照抄上一行），生成
   RTL 表面完全正常，实际是跨域释放。DSP 域复位**由谁产生**还会影响 `dspClock` 域复位分配网络的
-  布局与余量；当前 450MHz 设计把链的异步端接在主复位上。2026-10-26 当前 RTL 实测测量域最差 setup
-  路径是 `dspReset` 释放链 → 边沿检测链复位脚（+0.553ns；同类路径随布局布线在 0.5~0.6ns 量级浮动），
+  布局与余量；当前 450MHz 设计把链的异步端接在主复位上。2026-11-23 当前 RTL 实测测量域最差 setup
+  路径是 `forceStop` 边沿检测链 → PhaseMeter FSM 状态寄存器 D（+0.341ns；同类路径随布局布线浮动），
   整体 WNS 由 clk_wiz Safe Clock Startup 内部路径决定（+0.271ns）。
 - `ResetSynchronizer` 是 `RawModule`，自己显式声明 `clock` / `resetn` / `reset`；复位链直接复用
   `MyShiftRegister(false.B, n, true.B)`（`ShiftRegister.scala`），并且例化在
   `withClockAndReset(clock, (!resetn).asAsyncReset)` 里，因此链上寄存器是**异步复位**的：置位立即生效，
   释放与传入的时钟对齐（n 级）。类本身的 `reset` 输出始终是高有效 `Bool`；`ResetSynchronizer.apply`
-  再按 `cfg.asyncReset` 决定返回类型：false 时就是同步复位 `Bool`（FPGA 分支），true 时转成
-  `AsyncReset`（ASIC 分支）。消费端按 `cfg` 统一即可，不要在模块里自行把 `Bool` 强转成 `AsyncReset`
+  再按 `cfg.platform` 决定返回类型：`Platform.FPGA` 时就是同步复位 `Bool`，`Platform.ASIC` 时转成
+  `AsyncReset`。消费端按 `cfg` 统一即可，不要在模块里自行把 `Bool` 强转成 `AsyncReset`
   或反过来。
 - **同步链的寄存器要带 `ASYNC_REG`**：`MyShiftRegisters`/`MyShiftRegister`（`ShiftRegister.scala`）
   现在**不生成子模块**：它返回一个打包的 `UInt` 寄存器（`RegInit(Fill(n, init))`），按

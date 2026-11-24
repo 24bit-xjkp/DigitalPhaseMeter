@@ -1,6 +1,6 @@
 ---
 name: dpm-verilator-testing
-description: 'Use when: 为 DigitalPhaseMeter 的 Chisel 模块或顶层 IP 编写、修改、运行或调试 Verilator C++ 测试（test/<Name>.cpp），或需要解读测试目标的注册方式、构建前的自动生成、运行目录与覆盖率/波形产物。覆盖测试目标的自动注册与自动生成、运行入口、顶层 IP（AXI4-Lite 寄存器通路）测试、时间精度陷阱、未初始化寄存器、set_base_name 与多 bit 端口等本项目实测的坑。'
+description: 'Use when: 为 DigitalPhaseMeter 的 Chisel 模块或顶层 IP 编写、修改、运行或调试 Verilator C++ 测试（test/<Name>.cpp），或需要解读测试目标的注册方式、构建前的自动生成、ASIC 变体与公共 .cppm 约定、运行目录与覆盖率/波形产物。覆盖测试目标的自动注册与自动生成、运行入口、顶层 IP（AXI4-Lite 寄存器通路）测试、时间精度陷阱、未初始化寄存器、set_base_name 与多 bit 端口等本项目实测的坑。'
 argument-hint: '要测试的模块或用例（如 Controller 的相位测量精度、DigitalPhaseMeterTop 的寄存器通路）'
 ---
 
@@ -25,34 +25,59 @@ argument-hint: '要测试的模块或用例（如 Controller 的相位测量精�
 
 要点：
 
-- **新增测试通常只需新增 `test/<Name>.cpp`**，不要为每个测试手工加目标；`<Name>` 必须与 `build/chisel/<Name>/` 的目录名一致（即 Chisel 模块名）。
+- **新增测试通常只需新增 `test/<Name>.cpp`**，不要为每个测试手工加目标；`<Name>` 必须与 `build/chisel/<Name>/` 的目录名一致（即 Chisel 模块名或 `Emit<Name>A` 对应的目录名，如 `DspCounterA`）。
+- 当前共 9 个测试目标：`Controller`、`DigitalPhaseMeterTop`、`DspCounter`、`DspCounterA`、`EdgeDetector`、`MmcmDrpController`、`PhaseMeter`、`PhaseMeterA`、`ResetSynchronizer`。其中 `DspCounterA` / `PhaseMeterA` 是 ASIC 变体，构建时会自动执行 `./mill emit DspCounterA` / `./mill emit PhaseMeterA`，读 `build/chisel/DspCounterA/`、`build/chisel/PhaseMeterA/`。
 - 测试用例通过 `add_tests("rtl", { runargs = { "+verilator+rand+reset+2", "-fc" } })` 声明；`-fc` 让 doctest 强制彩色输出。
 - **SV 编译选项**是 `--trace-fst --x-assign unique --x-initial unique -Wno-SYMRSVDWORD
-  -Dtargets$Platform$FPGA -DENABLE_INITIAL_REG_`，另外按目标追加
+  -DENABLE_INITIAL_REG_`，另外按目标追加
   `-I build/chisel/<Name>/verification` 与 `-I build/chisel/<Name>/verification/assert`
   （`chisel3.ltl.AssertProperty` 的 checker/bind 文件在这个目录下；没有断言的模块该目录不存在，
   Verilator 会忽略）（没有开 `-Wall`，生效的是 Verilator 默认告警集；`SYMRSVDWORD` 是默认开启的
   告警，顶层端口 `interrupt` 命中 C++ 常用词，所以全局关掉这一条）：波形为 FST，
-  **寄存器在复位前的取值是随机的**（见下文"未初始化寄存器"）。`-Dtargets$Platform$FPGA` 是
-  平台分支的必需宏：生成顶层用 `` `ifdef `` 在 FPGA/ASIC 实现之间选择，不定义会命中 `$error`；
-  `-DENABLE_INITIAL_REG_` 让生成 SV 里的初始值块在仿真 0 时刻生效（测试用它获得确定的初始状态，
-  不参与 Vivado 综合）。
+  **寄存器在复位前的取值是随机的**（见下文"未初始化寄存器"）。**没有平台宏**：FPGA 与 ASIC 是两份
+  不同目录的产物，由目标名选择，不需要 `-D` 选分支；`-DENABLE_INITIAL_REG_` 让生成 SV 里的初始值块
+  在仿真 0 时刻生效（测试用它获得确定的初始状态，不参与 Vivado 综合）。
 - **源文件由构建规则自动生成**：`<Name>Verilator` 目标构建时先执行 `./mill emit <Name>`（只生成该目标对应的模块；目标被重建（如 `xmake -r`）、或 `build.mill` 比 `filelist.f` 新时带 `--force`），再把 `filelist.f` 里的 `.sv` 加进编译。`emit` 自身按内容缓存，未变化时直接跳过。改完 RTL 直接跑 `xmake test` / `xmake run` 即可，不要手工先跑生成入口；生成入口本身的用法见 `dpm-chisel-rtl`。
 - **没有逐目标告警豁免表**：接口固有未使用位（`awprot` / `wstrb` 高位等）与复位同步器结构（同一根复位既做本域同步复位、又做同步链的异步复位端）在默认告警集下不会报出，因此不需要按目标关闭检查项。若临时加 `-Wall` 排查，先按 `dpm-chisel-rtl` 的说明处理这两类告警，不要用 `-Wno-fatal` 之类的整体开关。
-- **目录名、目标名与生成模块名可能不同**：模块可用 `desiredName` 改名（`EdgeDetector` 在 FPGA
-  分支生成 `EdgeDetectorRisingS`/`EdgeDetectorBothS`，ASIC 分支是 `...A`），
-  `build/chisel/EdgeDetector/filelist.f` 里是后者，但 target 仍按 `.cpp` 文件名 `EdgeDetector`
+- **目录名、目标名与生成模块名可能不同**：模块可用 `desiredName` 改名（`EdgeDetector` 生成
+  `EdgeDetectorRising`/`EdgeDetectorBoth`，`Axi4LiteSlave` 生成 `Axi4LiteSlaveA6D32` 这类带位宽的名字），
+  `build/chisel/EdgeDetector/filelist.f` 里是前者，但 target 仍按 `.cpp` 文件名 `EdgeDetector`
   注册。`verilator.shared` 规则（由 `mill.verilator.shared` 接入）用 `--prefix <Name>Verilator`，
   默认不传 `--top-module`，由 Verilator 自动选目录里唯一的顶层模块（例如 `DspCounter` 目录里只有
-  `DspCounterS`），所以 `test/EdgeDetector.cpp` 里的 `<EdgeDetectorVerilator.h>` 与
-  `EdgeDetectorVerilator` 类型仍然成立。**一个目录含多个顶层模块时必须显式指定**：
-  `test/xmake.lua` 的 `top_module_map` 给 `DigitalPhaseMeterTop` 配了
-  `--top DigitalPhaseMeterTop`，否则 Verilator 会选错顶层。
-- **顶层 IP 的 `DigitalPhaseMeterTop` 目标**：目录里同时有平台选择层 `DigitalPhaseMeterTop` 与
-  `DigitalPhaseMeterTopImplS/A` 两个实现分支，`--top DigitalPhaseMeterTop` 与
-  `-Dtargets$Platform$FPGA` 缺一不可——前者选对顶层模块，后者让 FPGA 分支被实例化而不是命中
-  `$error`。编译顶层生成产物后，用 AXI4-Lite BFM 按真实基地址驱动，覆盖寄存器堆到测量通路的
+  `DspCounter`，`DigitalPhaseMeterTop` 目录里只有 `DigitalPhaseMeterTop`），所以
+  `test/EdgeDetector.cpp` 里的 `<EdgeDetectorVerilator.h>` 与 `EdgeDetectorVerilator` 类型仍然成立。
+  **顶层 IP 不需要 `--top` 或平台宏**：`build/chisel/DigitalPhaseMeterTop/` 只有一份 FPGA 实现，
+  `DigitalPhaseMeterTop` 是唯一顶层。用 AXI4-Lite BFM 按真实基地址驱动，覆盖寄存器堆到测量通路的
   整条通路（见下文「顶层 IP 测试」）。
+
+### ASIC 变体与公共 `.cppm`
+
+- ASIC 变体与 FPGA 版生成**同名模块**（`DspCounter` / `PhaseMeter` / `DigitalPhaseMeterTop`），只是目录带
+  `A` 后缀；因此各自放在独立目标里编译，不要尝试把两个目录的 SV 编进同一个仿真库。
+- 两个实现的端口相同、测试逻辑也基本相同时，把公共逻辑写进 `test/<Name>.cppm`（如
+  `test/DspCounter.cppm` → `export module DspCounterCommon`，`test/PhaseMeter.cppm` →
+  `export module PhaseMeterCommon`）。`test/xmake.lua` 扫描 `test/*.cppm`，为每个文件自动创建
+  `<Name>Common` object 目标；所有名字以 `<Name>` 开头的 `.cpp` 目标会自动依赖该公共模块
+  （`DspCounter.cpp` / `DspCounterA.cpp` 前缀匹配 `DspCounter`，共用 `DspCounterCommon`）。
+- 公共 `.cppm` **不包含 Verilator 生成头**，并且只有确实依赖 DUT 类型的部分才写成模板——公共模块
+  编译一次、被两个测试目标链接，模板体则会在每个消费方按各自的 `dut_t` 重新实例化：
+  - `struct port_t` 是**普通结构体**（字段与 DUT 类型无关），只有构造函数是
+    `template <typename dut_t> explicit port_t(dut_t&)`；使用处写 `port_t port{ctx.dut()}`；
+  - 激励与断言是**普通函数/协程**（`task<void> xxx(port_t&, 参数…)`），只操作 `port_t`，不依赖 DUT 类型；
+  - `run_<用例>` 是唯一需要 DUT 类型的模板入口（`dut_context` 是模板），只负责构造上下文、`set_base_name`、
+    注册时钟与激励任务、`loop_until_finish` 并打印统计，主体逻辑不放在这里。
+- 模块内部用一条非导出的 `using namespace verilator_utils;`（放在 `export module` 之后、`export namespace`
+  之前），之后不再写 `verilator_utils::` 前缀；不要为了这两条规则把整个测试体套进多层 `namespace detail`。
+- 需要 doctest 断言的公共模块在内部 `#include <doctest_macros.hpp>`，消费方仍要 `import verilator_utils.full`。
+  具体 `.cpp` 负责 `#include <XxxVerilator.h>`、`import XxxCommon`，只提供 `dut_t` 与实现差异常量
+  （如 ASIC 的输出延迟 `asicDspCounterPipeline - 1`）。
+- ASIC 与 FPGA 的行为差异（例如流水线计数器输出晚 `asicDspCounterPipeline - 1` 拍、响应相应延后）
+  通过 `run_<用例>` 的参数或 `.cpp` 里的独立常量表达；不要为迁就实现差异放宽断言或改 RTL 掩盖。
+- ASIC 分段计数器的输出对齐链不随 `clear` 复位，`clear` 在输出上要等
+  `asicDspCounterPipeline - 1` 拍才完全排空；测试不能在 clear 当拍/次拍断言输出为 0，
+  应让 clear 保持（或随后等待）足够的 `clear_latency` 拍，再检查归零。`DspCounterA` 的公共
+  用例把 `clear_latency` 作为参数传入，FPGA 传 0；`PhaseMeterA` 的 forceStop 用例同样要
+  延长清零观测窗口。
 
 ## 运行入口
 

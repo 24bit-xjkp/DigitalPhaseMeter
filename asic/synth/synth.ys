@@ -1,0 +1,73 @@
+# DigitalPhaseMeterTop 的 Yosys ASIC 综合脚本（sky130 HD）
+#
+# 入口：由 `dpm-asic-flow synth` 在仓库根目录调用
+#     yosys -l build/asic/synth/yosys.log -s asic/synth/synth.ys
+#
+# 关键约定：
+#   * 前端固定用 read_slang；ASIC 入口（./mill emit DigitalPhaseMeterTopA）只生成
+#     一份异步复位的 DigitalPhaseMeterTop，没有平台分支文件，因此不需要任何平台宏；
+#   * 顶层固定为 DigitalPhaseMeterTop；
+#   * clockgate 用 -liberty 自动从 sky130 库里选 ICG（当前为
+#     sky130_fd_sc_hd__dlclkp_1），把同 clock / 同 enable 的 FF 组换成
+#     门控时钟 + 无 CE 的 FF；
+#   * 常量在最后映射成 conb_1，避免 OpenROAD 里出现不可布线的 one_/zero_ 常量网。
+
+# read_slang 的 -f 读的是 `dpm-asic-flow synth` 从 build/chisel/DigitalPhaseMeterTopA/filelist.f
+# 过滤出来的文件表（去掉 verification/ 下的断言）。
+read_slang --std 1800-2023 --single-unit -f build/asic/synth/filelist.f
+
+# 通用综合：只做到 word-level 网表，组合逻辑留给 ABC 按 liberty 映射。
+#
+# RTL 里的 state 寄存器带 fsm_encoding="auto"，firtool 又用
+# disallowPackedArrays 把状态表下降成 `casez`（$mux/$pmux，而不是 $bmux），
+# 因此直接使用标准 `synth` 即可：它的 coarse 阶段在 `opt -nodffe -nosdff`
+# 之后运行 `fsm`，会按属性提取并重编码两个状态机（当前为 one-hot）。
+# 不需要再自定义 coarse 序列或插入 bmuxmap。
+synth -top DigitalPhaseMeterTop -flatten -noabc
+
+# 先把 mux 反馈提取成带 CE 的 FF，clockgate 才能按 enable 分组合并
+opt_dff
+
+# 自动时钟门控（ASIC 低功耗）：ICG 类型从 liberty 的
+# clock_gating_integrated_cell 属性中选择，不需要手写 -pos/端口名。
+# 工艺角固定用 ss_100C_1v60（慢 corner，最紧时序），由 `dpm-asic-flow synth` 调
+# `dpm-prepare-pdk --corner ss_100C_1v60` 生成对应的 _synth.lib。
+clockgate -liberty build/asic/sky130_fd_sc_hd__ss_100C_1v60_synth.lib -min_net_size 1
+
+# 时序单元映射（异步复位/置位 + 扫描型 DFF）
+dfflibmap -liberty build/asic/sky130_fd_sc_hd__ss_100C_1v60_synth.lib
+
+# 组合逻辑按时钟域分组映射。Yosys 的 abc 只有一个全局 -D：如果整片设计都用
+# dspClock 的 3333ps，50MHz 的 clock 域也会被要求跑 3.333ns。这里先导出网表，
+# 由 partition.py 按“扇出能到达哪个时钟域的寄存器”给组合逻辑分组，再用
+# submod 把每组移进子模块，分别跑 abc：
+#   * clock    : 20000ps（50MHz）
+#   * dspClock : 3333ps （300MHz）
+# 这两个周期必须与 asic/synth/dpm_asic.sdc 保持一致。
+write_json build/asic/synth/pre_abc.json
+
+# submod 需要知道库单元的端口方向；把 liberty 作为黑盒模块读入。黑盒模块不会
+# 出现在最终 write_verilog 网表里，也不影响 OpenROAD。
+read_liberty -lib build/asic/sky130_fd_sc_hd__ss_100C_1v60_synth.lib
+
+# partition.py 生成 build/asic/synth/partition.ys（select 列表 + 每个域的 abc）。
+exec -expect-return 0 -- python3 asic/synth/partition.py --json build/asic/synth/pre_abc.json --out build/asic/synth/partition.ys --liberty build/asic/sky130_fd_sc_hd__ss_100C_1v60_synth.lib --constr asic/synth/abc.constr --clock clock=20000 --clock dspClock=3333
+
+script build/asic/synth/partition.ys
+
+opt -fast
+setundef -zero
+opt_clean
+
+# 常量接到 conb_1（HI/LO 两个输出），供 OpenROAD repair_tie_fanout 拆分扇出
+hilomap -singleton -hicell sky130_fd_sc_hd__conb_1 HI -locell sky130_fd_sc_hd__conb_1 LO
+opt_clean
+
+# 自检：确认时钟门控确实发生、且没有残留的内部 FF/组合单元
+select -assert-any t:sky130_fd_sc_hd__dlclkp_1
+select -assert-none t:$dff t:$dffe t:$adff t:$adffe t:$aldff t:$sdff
+select -assert-none t:$_*
+
+write_verilog -noattr -nohex -nodec build/asic/synth/dpm_asic_synth.v
+
+stat

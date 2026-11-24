@@ -1,11 +1,7 @@
 local verilator_options = {
-    "--trace-fst", { "--x-assign", "unique" }, { "--x-initial", "unique" }, "-Wno-SYMRSVDWORD",
-    "-Dtargets$Platform$FPGA",  "-DENABLE_INITIAL_REG_"
+    "--trace-fst", { "--x-assign", "unique" }, { "--x-initial", "unique" }, "-Wno-SYMRSVDWORD", "-DENABLE_INITIAL_REG_"
 }
 local test_args = { "+verilator+rand+reset+2", "-fc" }
--- 顶层产物目录同时含平台选择层与 ImplS/ImplA 两个实现分支，Verilator 无法自动选顶层；
--- 需要显式 --top 的目录在这里登记（其它模块目录只有一个顶层模块）。
-local top_module_map = { DigitalPhaseMeterTop = "DigitalPhaseMeterTop" }
 
 target("mill.compile", function ()
     set_kind("phony")
@@ -17,6 +13,25 @@ target("mill.compile", function ()
         os.vrunv(mill, { "compile" })
     end)
 end)
+
+local common_file_list = {}
+for _, file in ipairs(os.files("*.cppm")) do
+    local name = path.basename(file)
+    table.append(common_file_list, name)
+    target(name .. "Common", function ()
+        set_kind("object")
+        set_policy("build.c++.modules", true)
+        add_packages("verilator_utils", { components = "main" })
+        add_packages("doctest_module", { components = "core" })
+        add_files(file, { public = true })
+        -- cppm 会 import verilator_utils.full，而它的模块接口包含 <verilated.h>；
+        -- verilator 的 include 目录由 verilator.shared 规则以 public 方式挂到 <Name>Verilator
+        -- 目标上，因此公共模块目标要依赖同名 Verilator 目标才能拿到这些头文件。
+        if os.isfile(path.join(os.scriptdir(), name .. ".cpp")) then
+            add_deps(name .. "Verilator")
+        end
+    end)
+end
 
 for _, file in ipairs(os.files("*.cpp")) do
     local name = path.basename(file)
@@ -37,10 +52,6 @@ for _, file in ipairs(os.files("*.cpp")) do
         local verification_dir = path.join(get_config("builddir"), "chisel", name, "verification")
         table.insert(target_options, "-I" .. verification_dir)
         table.insert(target_options, "-I" .. path.join(verification_dir, "assert"))
-        local top_module = top_module_map[name]
-        if top_module then
-            table.join2(target_options, { "--top", top_module })
-        end
         add_values("verilator.flags", target_options)
 
         on_load(function (target)
@@ -53,7 +64,12 @@ for _, file in ipairs(os.files("*.cpp")) do
         add_packages("verilator_utils", { components = "main" })
         add_packages("doctest_module", { components = "core" })
         add_deps(name .. "Verilator")
-        add_files(name .. ".cpp")
+        add_files(file)
+        for _, common_file_name in ipairs(common_file_list) do
+            if name:startswith(common_file_name) then
+                add_deps(common_file_name .. "Common")
+            end
+        end
 
         on_load(function (target)
             target:set("targetdir", path.join(target:targetdir(), name))

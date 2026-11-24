@@ -28,10 +28,10 @@ object PhaseMeterStateEnum extends ChiselEnum:
 /** 相位计，工作在高速时钟域
   *
   * @param cfg
-  *   全局配置：边沿/相位计数器位宽与复位风格；模块名带 `cfg.suffix`
+  *   全局配置：边沿/相位计数器位宽与平台实现（FPGA 为单级累加器、ASIC 为分段流水线， 后者的停止响应按流水线深度延后 `asicDspCounterPipeline - 1` 拍）。 ASIC 计数器的输出对齐链不随
+  *   `clear` 复位，`clear` 也要同样拍数才排空；本模块只在 `sIdle` 拉高 `clearCnt`，并把停止响应延后同样拍数，因此响应读数时延迟链已经排空。
   */
 class PhaseMeter(using val cfg: Config) extends Module:
-    override def desiredName: String = s"PhaseMeter${cfg.suffix}"
     val io = IO(new Bundle:
         // 输入信号
         val sig = Input(PhaseMeterSignalPayload())
@@ -61,8 +61,7 @@ class PhaseMeter(using val cfg: Config) extends Module:
 
     import PhaseMeterStateEnum.*
     private val state = RegInit(sIdle)
-    // 复位值取 true：空闲拍本来就会重新置位；给出确定初值，避免 xsim 复位后第一拍为 X
-    private val needSendResponse = RegInit(true.B)
+    addAttribute(state, """fsm_encoding = "auto"""")
     switch(state):
         is(sIdle) { when(request) { state := sWaitStart } }
         is(sWaitStart) { when(pulseSig1) { state := sMeasuring } }
@@ -76,10 +75,15 @@ class PhaseMeter(using val cfg: Config) extends Module:
         !(request && !state.isOneOf(sIdle, sMeasuring)),
         "request in a state that cannot accept it"
     )
+    // 复位值取 true：空闲拍本来就会重新置位；给出确定初值，避免 xsim 复位后第一拍为 X
+    private val needSendResponse = RegInit(true.B)
     when(isIdle) { needSendResponse := true.B }
     when(state === sWaitStart && pulseSig1) { responseValid.send() }
-    private val sendResponse = state === sWaitStop && pulseSig2 && needSendResponse
-    when(sendResponse):
+    private val delay = cfg.platform match
+        case Platform.FPGA => 0
+        case Platform.ASIC => cfg.asicDspCounterPipeline - 1
+    private val isWaitStop = ShiftRegister(state === sWaitStop, delay)
+    when(isWaitStop && pulseSig2 && needSendResponse):
         responseValid.send()
         needSendResponse := false.B
 
@@ -100,8 +104,11 @@ class PhaseMeter(using val cfg: Config) extends Module:
         .elsewhen(pulseSig1Valid) { phaseCntEnable := true.B }
     AssertProperty(!(isIdle && phaseCntEnable), "phaseCntEnable must be low while idle")
 
-    io.response.bits.edgeCnt := DspCounter(cfg.edgeCntWidth, clearCnt, pulseSig1Valid, false)
-    io.response.bits.phaseCnt := DspCounter(cfg.phaseCntWidth, clearCnt, phaseCntEnable, false)
+    io.response.bits.edgeCnt := DspCounter(cfg.edgeCntWidth, clearCnt, pulseSig1Valid)
+    io.response.bits.phaseCnt := DspCounter(cfg.phaseCntWidth, clearCnt, phaseCntEnable)
 
 object EmitPhaseMeter extends Main:
+    protected def emit = emitSystemVerilog(PhaseMeter())
+
+object EmitPhaseMeterA extends Main(using Config.asic):
     protected def emit = emitSystemVerilog(PhaseMeter())

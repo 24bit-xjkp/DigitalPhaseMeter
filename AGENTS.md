@@ -4,7 +4,7 @@
 
 ## 项目概览
 
-基于 Chisel 的数字相位计：测量两路同频信号的相位差。测量通路在高速时钟域（DSP 域，当前 450MHz，由 PL 内 MMCM 从 50MHz 倍频得到），控制、闸门计数与 AXI4-Lite 接口在低速时钟域（50MHz）。PS↔PL 的数据交换走 AXI4-Lite 寄存器（GPIO 式，一次测量只有 4 个字，不用 BRAM），并用测量完成中断通知 PS。测量输入有两条通路：外部引脚（`extSig_sig1`/`extSig_sig2`，默认约束到 W18/W19）与片内信号源（裸 MMCM 时基，频率与相位差由 PS 写 MMCM 寄存器镜像设定），由 PL 内的寄存器在两者之间切换。RTL 的计数器位宽与复位风格由 `src/Utils.scala` 的 `Config` 集中控制；顶层用 `chisel3.choice` 同时生成 FPGA（同步复位，后缀 `S`）与 ASIC（异步复位，后缀 `A`）两个分支，本仓库打包、综合与仿真只选 FPGA 分支。
+基于 Chisel 的数字相位计：测量两路同频信号的相位差。测量通路在高速时钟域（DSP 域，当前 450MHz，由 PL 内 MMCM 从 50MHz 倍频得到），控制、闸门计数与 AXI4-Lite 接口在低速时钟域（50MHz）。PS↔PL 的数据交换走 AXI4-Lite 寄存器（GPIO 式，一次测量只有 4 个字，不用 BRAM），并用测量完成中断通知 PS。测量输入有两条通路：外部引脚（`extSig_sig1`/`extSig_sig2`，默认约束到 W18/W19）与片内信号源（裸 MMCM 时基，频率与相位差由 PS 写 MMCM 寄存器镜像设定），由 PL 内的寄存器在两者之间切换。RTL 的计数器位宽、平台实现与复位风格由 `src/Utils.scala` 的 `Config` 集中控制。平台由生成主类显式选择：`Emit<Name>` 默认 `Platform.FPGA`（同步复位，DSP 计数器用 DSP48E1 累加器），`Emit<Name>A` 用 `Config.asic`（异步复位，DSP 计数器为分段流水线），分别生成到 `build/chisel/<Name>/` 与 `build/chisel/<Name>A/`；没有平台宏或多顶层分支。Vivado、Verilator 与 xsim 消费 FPGA 产物，`asic/` 下的 Yosys + OpenROAD 流程消费 `DigitalPhaseMeterTopA`。
 
 **工程已完成并通过实测验收（2026-10-19）**：PL 侧测量与控制 RTL、PS↔PL 互联、Vivado IP 与 block design、PS 侧裸机软件、PC 侧上位机均已实现，Verilator / xsim / 综合实现 / 上板验收均已跑通。当前工作以维护（缺陷修复、补充测试、文档更新）为主。
 
@@ -13,8 +13,8 @@
 ## 目录结构与任务优先级
 
 ```text
-├── src/                                # Chisel RTL：每个模块一个 .scala，附 Emit<Name> 生成主类
-├── test/                               # Verilator C++ 测试：每个 <Name>.cpp 自动注册一个测试目标（构建时自动生成对应 Chisel 产物）
+├── src/                                # Chisel RTL：每个模块一个 .scala，附 Emit<Name>（FPGA）与需要时的 Emit<Name>A（ASIC）生成主类
+├── test/                               # Verilator C++ 测试：每个 <Name>.cpp 自动注册一个测试目标（构建时自动生成对应 Chisel 产物）；FPGA/ASIC 共用逻辑放 <Name>.cppm
 ├── sim/                                # xsim 的 SystemVerilog 激励与运行脚本（只做真实 MMCM 联调）
 ├── vivado/                             # IP 打包、block design、综合实现脚本与顶层约束
 ├── ps/                                 # PS 侧裸机 C 服务端（串口协议、AXI/DRP 驱动、startup/linker）
@@ -25,9 +25,10 @@
 ├── build.mill                          # Mill 构建定义（Scala 编译、生成入口、静态检查；Mill 版本在文件头固定，JDK 用系统 JDK）
 ├── mill                                # Mill 启动脚本（仓库根执行 `./mill`）
 ├── out/                                # Mill 的构建缓存与任务产物（构建产物，不入库）
-├── build/chisel/<Name>/                # 由 Chisel 生成的 SystemVerilog 与 filelist.f（构建产物，不入库）
+├── build/chisel/<Name>/                # 由 Chisel 生成的 SystemVerilog 与 filelist.f（FPGA 产物；ASIC 变体在 <Name>A/；构建产物，不入库）
 ├── build/vivado/                       # 打包出的 IP、BD 工程与综合实现产物（构建产物，不入库）
 ├── .agents/skills/                     # 项目级 skill（见下文"skill 优先"）
+├── asic/                               # Yosys + OpenROAD 的 sky130 HD ASIC 流程（uv workspace 成员 asic/flow，入口 dpm-asic-flow / dpm-prepare-pdk；read_slang、clockgate、FSM 重编码、ABC 分域时序映射、floorplan、CTS、布线、GDS）
 └── xmake.lua                           # 顶层构建脚本
 ```
 
@@ -39,13 +40,14 @@
 
 | 入口                     | 职责                                                                                          |
 | ------------------------ | --------------------------------------------------------------------------------------------- |
-| `./mill`                 | 编译 Scala、运行 Chisel 生成 SystemVerilog 到 `build/chisel/<Name>/`，并执行 Scalafix 检查（也是 Verilator 测试目标构建时的自动生成入口） |
-| `xmake`                  | 构建 Verilator 测试目标、运行测试（测量通路与顶层 IP）；构建目标时自动调用 `./mill emit <模块名>` 生成/更新 SV |
+| `./mill`                 | 编译 Scala、运行 Chisel 生成 SystemVerilog（`Emit<Name>` → `build/chisel/<Name>/`，ASIC 变体 `Emit<Name>A` → `build/chisel/<Name>A/`），并执行 Scalafix 检查（也是 Verilator 测试目标构建时的自动生成入口） |
+| `xmake`                  | 构建 Verilator 测试目标（当前 9 个，含 `DspCounterA` / `PhaseMeterA`）、运行测试（测量通路与顶层 IP）；构建目标时自动调用 `./mill emit <模块名>` 生成/更新 SV |
 | Verilator                | 由 xmake 的目标规则调用，编译生成的 SystemVerilog                                             |
 | `sim/run_handoff_tb.sh`  | 用 Vivado xsim 跑依赖 MMCM 原语的联调激励（真实 `MMCME2_ADV` 行为模型）                       |
 | `uv run dpm-vivado-flow` | 增量打包 IP、创建/刷新 block design、综合实现与导出 XSA（`vivado/flow/`；Tcl 脚本是其执行层） |
 | `bash ps/build.sh`       | 交叉编译 PS 侧裸机程序，并构建宿主机验证台                                                    |
 | `uv run pytest`          | PC 侧 Python 测试（`host/tests`，pytest 原生写法）与 GUI 冒烟测试入口                         |
+| `uv run dpm-asic-flow`   | Yosys + OpenROAD 的 sky130 HD ASIC 实现（综合、floorplan、CTS、布线、可选 GDS；PDK 派生文件由 `uv run dpm-prepare-pdk` 准备；见 `asic/README.md`） |
 
 - 本项目使用 clang 工具链。gcc 在编译带 C++20 模块的测试代码时会产生编译器内部错误（ICE）——该结论沿用 `verilator_utils` 系列项目的记录：不要用 gcc 配置、构建或做"可移植性验证"。
 - 各入口的具体命令、选项与已知陷阱写在对应 skill 中（见下表），本文件不重复。

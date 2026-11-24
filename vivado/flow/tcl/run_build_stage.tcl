@@ -60,7 +60,7 @@ if {[catch {source $dpm_plan_file} _plan_src_err]} {
 foreach _key {
     stage project part xdc suppress_early
     hook_filter hook_waivers hook_vendor_ip
-    strategy_targets synth_defines hook_assignments reset_runs materialize
+    strategy_targets hook_assignments reset_runs materialize
     incremental_synth incremental_impl launch_synth launch_impl
     report_only strategy_only xsa build_dir result_file
 } {
@@ -115,43 +115,6 @@ proc dpm_run_names {pattern} {
 
 proc dpm_is_synth_run {name} {
     return [expr {$name eq "synth_1" || [string match "*_synth_1" $name]}]
-}
-
-proc dpm_ip_fileset_for_run {run} {
-    # BD 管理的 IP OOC 综合 run（<bd>_<inst>_0_0_synth_1）在工程里对应同名 fileset
-    # （去掉 _synth_1 后缀）。Vivado 生成 run 脚本时会把该 fileset 的 verilog_define
-    # 写成 `synth_design -verilog_define {...}`，因此综合宏必须挂在 fileset 上；
-    # run 步骤属性里没有对应的 VERILOG_DEFINE 参数（只有 MORE OPTIONS）。
-    if {$run eq "synth_1" || ![string match "*_synth_1" $run]} {
-        error "synth_defines 只能指向 IP OOC 综合 run（收到 '$run'）"
-    }
-    set fs_name [regsub {_synth_1$} $run ""]
-    if {[llength [get_filesets -quiet $fs_name]] == 0} {
-        error "找不到 IP OOC run '$run' 对应的 fileset '$fs_name'（materialize 未完成？）"
-    }
-    return $fs_name
-}
-
-proc dpm_collect_synth_defines {plan_defines} {
-    # 把 `{run define}` 行按 run 聚合成 `{run {define ...}}`（保持出现顺序）。
-    set order {}
-    array set collected {}
-    foreach item $plan_defines {
-        if {[llength $item] != 2} {
-            error "synth_defines 条目格式应为 {run define}：{$item}"
-        }
-        lassign $item run def
-        if {![info exists collected($run)]} {
-            lappend order $run
-            set collected($run) {}
-        }
-        if {[lsearch -exact $collected($run) $def] < 0} {
-            lappend collected($run) $def
-        }
-    }
-    set rows {}
-    foreach run $order { lappend rows [list $run $collected($run)] }
-    return $rows
 }
 
 proc dpm_flag {value} {
@@ -377,7 +340,6 @@ if {$report_only && $strategy_only} {
 # 主流程状态（结果文件用）
 set reset_order {}
 set strategy_changed {}
-set defines_applied {}
 set runs_seen {}
 set synth_ran 0
 set impl_ran 0
@@ -456,7 +418,7 @@ if {$report_only} {
         set need_materialize 0
         if {[llength [dpm_run_names "*dpm_top_0_0*"]] == 0} { set need_materialize 1 }
         if {!$need_materialize} {
-            foreach item [concat $dpm_plan(strategy_targets) $dpm_plan(synth_defines) $dpm_plan(hook_assignments)] {
+            foreach item [concat $dpm_plan(strategy_targets) $dpm_plan(hook_assignments)] {
                 lassign $item r
                 if {$r eq "synth_1"} { continue }
                 if {[string match "*_synth_1" $r] && ![dpm_run_exists $r]} {
@@ -505,21 +467,6 @@ if {$report_only} {
             puts "STRATEGY_SET: $run $prop: '$before' -> '[dpm_run_prop $run $prop]'"
             dpm_add_unique strategy_changed $run
         }
-        # 综合宏（chisel3.choice 的 Platform 分支）：同样只写有差异的，避免无谓地把
-        # 已完成 run 标成过期；fileset 属性 reset_run 不会清，但脚本要等 launch 才重生成。
-        foreach row [dpm_collect_synth_defines $dpm_plan(synth_defines)] {
-            lassign $row run defs
-            if {![dpm_run_exists $run]} {
-                error "synth_defines 里的 run '$run' 在工程里不存在"
-            }
-            set fs_name [dpm_ip_fileset_for_run $run]
-            set before [dpm_get_prop [get_filesets $fs_name] verilog_define]
-            if {[lsort $before] eq [lsort $defs]} { continue }
-            set_property verilog_define $defs [get_filesets $fs_name]
-            puts "SYNTH_DEFINES_SET: $run $fs_name verilog_define: '$before' -> '[dpm_get_prop [get_filesets $fs_name] verilog_define]'"
-            dpm_add_unique strategy_changed $run
-            dpm_add_unique defines_applied $run
-        }
         dpm_report_strategy_summary $custom_ip_synth_runs
         puts "STRATEGY_ONLY: 策略已就位（未启动任何 run；工程 $proj_file）"
     } else {
@@ -557,24 +504,6 @@ if {$report_only} {
             if {$before ne $value} {
                 puts "STRATEGY_DIFF: $run $prop: '$before' -> '$value'"
                 dpm_add_unique strategy_changed $run
-                dpm_add_unique pending_reset $run
-            }
-        }
-
-        # ---- 综合宏目标：fileset verilog_define 与目标不同 → 该 IP OOC run 必须重跑 ----
-        # 不写这一步的话，宏缺失时综合会命中生成顶层的 `$error`（chisel3.choice），
-        # 而指纹只覆盖综合策略时又会静默复用旧网表。
-        set define_targets {}
-        foreach row [dpm_collect_synth_defines $dpm_plan(synth_defines)] {
-            lassign $row run defs
-            if {![dpm_run_exists $run]} {
-                error "synth_defines 里的 run '$run' 在工程里不存在（物化后仍找不到）"
-            }
-            set fs_name [dpm_ip_fileset_for_run $run]
-            lappend define_targets [list $run $fs_name $defs]
-            set before [dpm_get_prop [get_filesets $fs_name] verilog_define]
-            if {[lsort $before] ne [lsort $defs]} {
-                puts "SYNTH_DEFINES_DIFF: $run $fs_name verilog_define: '$before' -> '$defs'"
                 dpm_add_unique pending_reset $run
             }
         }
@@ -747,16 +676,6 @@ if {$report_only} {
         }
         dpm_report_strategy_summary $custom_ip_synth_runs
 
-        # ---- 综合宏：写在 reset 之后；launch 重新生成 IP OOC run 脚本时会带上
-        #      fileset 的 verilog_define（`synth_design -verilog_define {...}`）----
-        foreach item $define_targets {
-            lassign $item run fs_name defs
-            if {[lsearch -exact $reset_order $run] < 0} { continue }
-            set_property verilog_define $defs [get_filesets $fs_name]
-            puts "SYNTH_DEFINES_SET: $run $fs_name verilog_define = '[dpm_get_prop [get_filesets $fs_name] verilog_define]'"
-            dpm_add_unique defines_applied $run
-        }
-
         # ---- 增量属性（必须在 reset 之后写；reset 会把步骤属性清回默认值）----
         foreach item $incremental_synth_targets {
             lassign $item run ref_dcp
@@ -909,7 +828,6 @@ dpm_write_result $dpm_plan(result_file) [list \
     "STAGE=$dpm_plan(stage)" \
     "RESET_RUNS=[join $reset_order { }]" \
     "STRATEGY_CHANGED=[join $strategy_changed { }]" \
-    "SYNTH_DEFINES_APPLIED=[join $defines_applied { }]" \
     "RUNS_SEEN=[join $runs_seen { }]" \
     "SYNTH_RAN=$synth_ran" \
     "SYNTH_PROGRESS=[dpm_run_prop synth_1 PROGRESS]" \

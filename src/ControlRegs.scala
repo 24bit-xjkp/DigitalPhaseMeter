@@ -58,11 +58,10 @@ import chisel3.util.*
   * @param dataWidth
   *   命令总线数据宽度，当前只支持 32
   * @param cfg
-  *   全局配置：闸门/边沿/相位计数器位宽与复位风格；`GATE_TARGET` 只保留 `cfg.gateCntWidth` 位，模块名带 `cfg.suffix`
+  *   全局配置：闸门/边沿/相位计数器位宽与平台实现；`GATE_TARGET` 只保留 `cfg.gateCntWidth` 位
   */
 class ControlRegs(val addrWidth: Int = 32, val dataWidth: Int = 32)(using val cfg: Config) extends Module:
     require(dataWidth == 32, "寄存器堆当前只支持 32 位数据宽度")
-    override def desiredName: String = s"ControlRegs${cfg.suffix}"
     // 每条测量结果占用的字数
     val recordWords = 4
     // 结果寄存器只能保留最新一条

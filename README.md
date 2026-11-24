@@ -21,23 +21,22 @@
 ## 模块结构
 
 ```text
-DigitalPhaseMeterTop（顶层 RawModule：ModuleChoice 按平台分支选择实现；显式主时钟 / 低有效异步复位 / 高速时钟）
-└── DigitalPhaseMeterTopImplS（FPGA 分支，同步复位；ASIC 分支 ImplA 为异步复位，模块名后缀 A）
+DigitalPhaseMeterTop（顶层 TopModule：显式主时钟 / 低有效异步复位 / 高速时钟；FPGA 与 ASIC 各生成一份）
     ├── ResetSynchronizer    主时钟域复位：低有效 resetn 异步置位、与 clock 同步释放
     ├── Axi4LiteSlave        AXI4-Lite 从口 → 内部读写命令总线（控制/状态/结果寄存器）
     ├── ControlRegs          控制/状态寄存器堆（含片内源使能与输入选择）+ 结果锁存 + 中断
     ├── SignalInputMux       主时钟域输入选择：片内源使能门控 + 外部输入二选一（纯组合）
     └── Controller           低速域 FSM：闸门计数、与 PhaseMeter 握手、锁存结果
         ├── ResetSynchronizer  DSP 域复位：从主复位同步得到（异步置位、与 dspClock 同步释放）
-        ├── EdgeDetector ×2    请求 / 停止应答的边沿检测（BothS）
+        ├── EdgeDetector ×2    请求 / 停止应答的边沿检测（Both）
         └── PhaseMeter         高速域测量核心
-            ├── EdgeDetector ×2  sig1 / sig2 的边沿检测（RisingS；边沿检测输出再统一打一拍）
-            └── DspCounter ×2  DSP48E1 累加器计数器，分别累计 edgeCnt / phaseCnt（不声明复位端口，靠 clear 清零）
+            ├── EdgeDetector ×2  sig1 / sig2 的边沿检测（Rising；边沿检测输出再统一打一拍）
+            └── DspCounter ×2  DSP 域计数器（FPGA 为 DSP48E1 累加器、ASIC 为分段流水线），分别累计 edgeCnt / phaseCnt（计数器主体由 clear 清零；ASIC 输出对齐链无复位，clear 在输出上晚 7 拍，PhaseMeter 的停止响应已按同样深度对齐）
 
 （片内无存储：数据通道就是寄存器本身，见下文「PS↔PL 互联」）
 ```
 
-所有模块的计数器位宽与复位风格由 `Utils.scala` 的 `Config` 集中给出（默认闸门 28 位、边沿/相位 32 位；`asyncReset` 选同步/异步复位）。需要按分支区分的模块会把 `Config.suffix` 编进 `desiredName`（`S` / `A`），因此两个平台分支的生成文件可以放进同一个仿真库而不互相覆盖。
+所有模块的计数器位宽与平台实现由 `Utils.scala` 的 `Config` 集中给出（默认闸门 28 位、边沿/相位 32 位）。`Config.platform` 选择平台：默认 `Platform.FPGA`（DSP 计数器用 DSP48E1 累加器、同步复位），`Config.asic` 为 `Platform.ASIC`（DSP 计数器改成 8 段分段流水线、异步复位）。平台由生成主类显式选择：`Emit<Name>` 生成到 `build/chisel/<Name>/`，需要 ASIC 变体的模块再加 `Emit<Name>A` 生成到 `build/chisel/<Name>A/`；同一目录里没有平台分支文件，模块名也不带 `S`/`A` 后缀。
 
 片内信号源的 MMCM（`dpm_mmcm_src`，裸 `MMCME2_ADV` 薄封装）不在 IP 内，而是 BD 里的独立单元；PS 通过 AXI4-Lite 写 MMCM 的寄存器镜像，由单独的 `dpm_src_drp` IP 搬进 DRP 口（即「方案 A」）。
 
@@ -101,7 +100,7 @@ DigitalPhaseMeterTop（顶层 RawModule：ModuleChoice 按平台分支选择实�
                     interrupt
 ```
 
-**DSP 域时钟 450MHz**：Zynq-7000 的 PS `FCLK` 上限 250MHz（在 BD 里请求更高会被静默降到 250MHz），因此测量核心的高速时钟由 **PL 内的 `clk_wiz`** 从 `FCLK_CLK0`(50MHz) 倍频得到（VCO 1012.5MHz）。「MMCM 锁定前不来时钟」由 **clk_wiz 自带的 Safe Clock Startup** 保证。当前签核结果（xc7z010clg400-1，Vivado 2025.2，2026-10-26 用 HEAD 的 RTL 增量重跑）：**WNS = +0.271ns、WHS = +0.060ns、WPWS = +0.067ns，TNS = THS = 0、0 个失败端点**；methodology 0 新问题（13 条已 waive）、DRC 0、综合实现日志 0 warning。整体 WNS 的限制者仍是 clk_wiz 内部 Safe Clock Startup 路径；测量域自身最差 setup 路径余量在 +0.5ns 量级（2026-10-26 实测 +0.553ns）。`impl_stability.tcl` 的 6/6 稳定性结论对应 2026-10-19 网表，RTL 改动后需重跑后再引用。详细策略、告警清理与签核方式见 [`vivado/README.md`](vivado/README.md) 与 [`.agents/skills/dpm-vivado-ip`](.agents/skills/dpm-vivado-ip/SKILL.md)。
+**DSP 域时钟 450MHz**：Zynq-7000 的 PS `FCLK` 上限 250MHz（在 BD 里请求更高会被静默降到 250MHz），因此测量核心的高速时钟由 **PL 内的 `clk_wiz`** 从 `FCLK_CLK0`(50MHz) 倍频得到（VCO 1012.5MHz）。「MMCM 锁定前不来时钟」由 **clk_wiz 自带的 Safe Clock Startup** 保证。当前签核结果（xc7z010clg400-1，Vivado 2025.2，2026-11-23 用 HEAD 的 RTL 重跑 `uv run dpm-vivado-flow`）：**WNS = +0.271ns、WHS = +0.019ns、WPWS = +0.067ns，TNS = THS = 0、0 个失败端点**；methodology 0 新问题（13 条已 waive）、DRC 0、综合实现日志 0 warning。整体 WNS 的限制者仍是 clk_wiz 内部 Safe Clock Startup 路径；测量域自身最差 setup 路径余量 +0.341ns（`forceStop` 边沿检测链 → FSM 状态寄存器 D）。`impl_stability.tcl` 的 6/6 稳定性结论对应 2026-10-19 网表，RTL 改动后需重跑后再引用。详细策略、告警清理与签核方式见 [`vivado/README.md`](vivado/README.md) 与 [`.agents/skills/dpm-vivado-ip`](.agents/skills/dpm-vivado-ip/SKILL.md)。
 
 - **所有数据都走 AXI4-Lite 寄存器（GPIO 式）**：一次测量的结果只有 4 个字，PL 侧直接把最新结果锁存在只读寄存器里，PS 收到中断后连续读 4 个寄存器即可拿到一条完整结果。IP 内部没有任何片内存储，对外也只有一个 AXI 从口。
 - **中断**：结果锁存完成（或上一次结果被覆盖而丢失）后拉起 `interrupt`（高电平），经 `IRQ_F2P[0]` 通知 PS；软件写 `IRQ_STATUS` 清中断。
@@ -143,11 +142,12 @@ DigitalPhaseMeterTop（顶层 RawModule：ModuleChoice 按平台分支选择实�
 ## 目录结构
 
 ```text
-src/                                Chisel 源码，每个模块一个文件，附 Emit<Name> 生成主类
-test/                               Verilator C++ 测试（测量通路与顶层 IP），每个 <Name>.cpp 自动注册一个测试目标（构建时自动生成对应 Chisel 产物）
+src/                                Chisel 源码，每个模块一个文件，附 Emit<Name>（FPGA）与需要时的 Emit<Name>A（ASIC）生成主类
+test/                               Verilator C++ 测试（测量通路与顶层 IP）：每个 <Name>.cpp 自动注册一个测试目标（构建时自动生成对应 Chisel 产物），FPGA/ASIC 共用的测试逻辑放在 <Name>.cppm（如 DspCounterCommon）
 sim/                                Vivado xsim 的 SystemVerilog 激励与运行脚本（只做真实 MMCM 联调）
 vivado/                             Vivado IP 打包、block design、综合实现脚本与顶层约束
-build/chisel/<Name>/                Chisel 生成的 SystemVerilog 与 filelist.f（构建产物，不入库）
+asic/                               Yosys + OpenROAD 的 sky130 HD ASIC 流程（read_slang、clockgate、floorplan、CTS、布线、GDS）
+build/chisel/<Name>/                Chisel 生成的 SystemVerilog 与 filelist.f（FPGA 产物；ASIC 变体在 <Name>A/；构建产物，不入库）
 ps/                                 PS 侧裸机 C 服务端（串口协议、AXI/DRP 驱动、startup/linker）
 host/                               PC 侧 Python 上位机（协议、CLI、PySide6 GUI、仿真后端）
 docs/                               串口协议与上板指南
@@ -164,6 +164,7 @@ spec/                               金标准向量、独立仿真服务端、�
 | Verilator ≥ 5.050                        | 编译生成的 SystemVerilog（测量通路与顶层测试）  |
 | clang（支持 C++20 模块，本项目用 C++26） | 编译测试代码，**不支持 gcc**                    |
 | Vivado（本项目在 2025.2 上验证）         | 打包 IP、创建 block design、xsim 仿真、综合实现 |
+| Yosys 0.71（含 `read_slang` / `clockgate`）+ OpenROAD 26Q4 | sky130 HD ASIC 实现；KLayout 可选用于导出 GDS |
 | uv + Python ≥ 3.12                       | PC 侧上位机与 spec/ 验证脚本                    |
 
 Verilator 测试目标在编译 SV 之前会自动调用下文「生成 SystemVerilog」里的生成入口（`script/rule.lua` 的 `mill.verilator.shared` 规则，逐目标执行 `./mill emit <模块名>`），所以跑 `xmake test` / `xmake run` 前不需要手工生成；JDK 与 Mill 因此也是跑这些测试的前提。
@@ -187,11 +188,11 @@ Verilator 测试目标在编译 SV 之前会自动调用下文「生成 SystemVe
 
 `emit --check` 只查询、不生成：模块名写法与 `emit` 相同（省略时检查全部 `Emit<Name>` 入口点，多个模块名写在一条命令里），判定依据与 `emit` 的缓存完全一致——同一个缓存键（入口主类及其传递依赖的字节码闭包叠加依赖 classpath 标识等）加上产物 `build/chisel/<Name>/filelist.f` 的存在性检查。它逐模块输出是否需要重新生成及原因（产物缺失、无缓存记录、入口点或其传递依赖的字节码变化），但**不执行生成、不写 `build/chisel/.emit-cache/` 缓存、不改动 `build/chisel/` 下的产物**。全部模块已是最新时退出码为 0；只要有模块需要重新生成，就逐条输出原因并打印汇总，以非零退出码失败（检查语义，与 `./mill fix --check` 相同），适合在 CI 或提交前确认生成产物是否最新。`--check` 与 `--force` 互斥，同时使用会报错；两者都必须写在模块名之前。
 
-每个模块只生成**一份**产物：复位同步由纯 RTL 的 `ResetSynchronizer` 实现，Verilator、xsim 与综合共用同一份 RTL，没有 `--type=sim|syn` 的差别。各消费入口对生成的处理不同：Verilator 测试目标的构建规则会在编译前自动执行 `./mill emit <模块名>`（需要时加 `--force`），所以改完 RTL 直接跑 `xmake test` / `xmake run` 即可；`sim/run_handoff_tb.sh` 默认也自带生成入口；Vivado 流程不会替你生成，改完 RTL 仍需先跑 `./mill emit DigitalPhaseMeterTop MmcmDrpController`（见 [`vivado/README.md`](vivado/README.md)）。生成入口的调用形式与陷阱见 [`.agents/skills/dpm-chisel-rtl`](.agents/skills/dpm-chisel-rtl/SKILL.md)。
+每个平台的每个模块只生成**一份**产物：复位同步由纯 RTL 的 `ResetSynchronizer` 实现，同一平台内 Verilator、xsim 与综合共用同一份 RTL，没有 `--type=sim|syn` 的差别。FPGA 与 ASIC 是两份独立产物（不同目录、显式 emit），不是同一份产物里的 `ifdef` 分支。各消费入口对生成的处理不同：Verilator 测试目标的构建规则会在编译前自动执行 `./mill emit <模块名>`（需要时加 `--force`），所以改完 RTL 直接跑 `xmake test` / `xmake run` 即可；`sim/run_handoff_tb.sh` 默认也自带生成入口；Vivado 流程不会替你生成，改完 RTL 仍需先跑 `./mill emit DigitalPhaseMeterTop MmcmDrpController`（见 [`vivado/README.md`](vivado/README.md)）。生成入口的调用形式与陷阱见 [`.agents/skills/dpm-chisel-rtl`](.agents/skills/dpm-chisel-rtl/SKILL.md)。
 
-顶层产物包含 **FPGA / ASIC 两套平台分支**（`*S.sv` / `*A.sv` 与 `DigitalPhaseMeterTopImplS/A.sv`），生成顶层用 `` `ifdef targets$Platform$FPGA `` / `` `ifdef targets$Platform$ASIC `` 选择。消费方必须定义且只定义一个宏：Verilator 测试目标在 `test/xmake.lua` 里加 `-Dtargets$Platform$FPGA`，xsim 在 `sim/run_handoff_tb.sh` 里用 `xvlog -d 'targets$Platform$FPGA'`，Vivado 打包/综合由 fileset 的 `verilog_define` 注入（见 [`vivado/README.md`](vivado/README.md)）。两个宏都不定义时，生成顶层会命中 `$error`。
+平台由生成主类显式选择，不注入任何宏：`./mill emit <Name>` 用默认的 `Config.fpga`（同步复位）生成到 `build/chisel/<Name>/`；需要 ASIC 实现时用 `Emit<Name>A`（`Config.asic`，异步复位、DSP 计数器为分段流水线）生成到 `build/chisel/<Name>A/`。目前有 ASIC 变体的是 `DigitalPhaseMeterTop`、`DspCounter` 与 `PhaseMeter`。Verilator、xsim 与 Vivado 只消费 FPGA 目录，ASIC 流程只消费 `build/chisel/DigitalPhaseMeterTopA/`；产物里没有 `ifdef` 平台分支，消费方既不需要定义平台宏，也不需要 `--top`（产物目录里只有 `DigitalPhaseMeterTop` 一个顶层模块）。
 
-模块名可以用 `override def desiredName` 与类名不同（例如 `EdgeDetector` 在 FPGA 分支生成 `EdgeDetectorRisingS` / `EdgeDetectorBothS`，ASIC 分支为 `...A`）：`build/chisel/<Name>/` 下的文件名与 `filelist.f` 中的模块名以生成结果为准，`xmake`、xsim 与 Vivado 都按 `filelist.f` 取文件，不按目录名推导。
+模块名可以用 `override def desiredName` 与类名不同（例如 `EdgeDetector` 生成 `EdgeDetectorRising` / `EdgeDetectorBoth`，`Axi4LiteSlave` 把地址/数据位宽编进名字、生成 `Axi4LiteSlaveA6D32`，其中的 `A` 是 addr 而不是 ASIC）：`build/chisel/<Name>/` 下的文件名与 `filelist.f` 中的模块名以生成结果为准，`xmake`、xsim 与 Vivado 都按 `filelist.f` 取文件，不按目录名推导。
 
 ### 代码检查
 
@@ -211,9 +212,9 @@ xmake test -v                             # 全部测试
 xmake run Controller                      # 单个测试目标（定位问题用）
 ```
 
-构建测试目标前会自动调用生成入口：每个 `<Name>Verilator` 目标先执行 `./mill emit <Name>`（只生成该目标对应的模块；`test/xmake.lua` 用 `mill.verilator.shared` 规则接入，规则定义在 `script/rule.lua`），再把 `build/chisel/<Name>/filelist.f` 列出的 SV 交给 Verilator。因此改完 RTL 不需要先手工跑 `./mill emit`；要强制重新生成时用 `./mill emit --force <Name>`。顶层目标还额外用 `--top DigitalPhaseMeterTop` 指定顶层（产物目录里含平台分支的多个顶层模块），并定义 `targets$Platform$FPGA` 选 FPGA 分支。
+构建测试目标前会自动调用生成入口：每个 `<Name>Verilator` 目标先执行 `./mill emit <Name>`（只生成该目标对应的模块；`test/xmake.lua` 用 `mill.verilator.shared` 规则接入，规则定义在 `script/rule.lua`），再把 `build/chisel/<Name>/filelist.f` 列出的 SV 交给 Verilator。因此改完 RTL 不需要先手工跑 `./mill emit`；要强制重新生成时用 `./mill emit --force <Name>`。顶层目标与其它目标走同一条规则，不需要额外指定 `--top` 或注入平台宏（产物目录里只有一份 FPGA 实现，`DigitalPhaseMeterTop` 是唯一顶层）；`DspCounterA` / `PhaseMeterA` 目标分别生成并编译 `build/chisel/DspCounterA/` 与 `build/chisel/PhaseMeterA/` 的 ASIC 实现。
 
-覆盖 `Controller`（复位、闸门/相位计数、窗口跟随、连续测量一致性、强制停止中止在途测量）、`PhaseMeter`（停止握手与强制停止）、`EdgeDetector`、`ResetSynchronizer`、`DspCounter`、`MmcmDrpController`，以及顶层 IP 的 `DigitalPhaseMeterTop`：用 AXI4-Lite BFM 按真实基地址 `0x43C0_0000 + 偏移` 驱动，覆盖复位/寄存器默认值（结果字 `RESULT_GATE/EDGE/PHASE` 不复位、`RESULT_SEQ` 复位为 0）、写数据先到与字节选通、测量启动与中断时序、W1C 与只读寄存器写忽略、结果锁存与 `LOST_COUNT`、`CTRL.clear`、`CTRL.forceStop`（含「无沿卡住 → 强制停止 → busy 清零 → 重新测量」）、目标闸门锁存，以及片内源/外部输入切换。**顶层 AXI 寄存器通路由它守门**：动 `Axi*.scala`、`ControlRegs.scala`、`DigitalPhaseMeterTop.scala` 或 `Utils.scala` 的 `Config`/`Platform` 必须跑 `xmake test -v`，并把新寄存器纳入 [`test/DigitalPhaseMeterTop.cpp`](test/DigitalPhaseMeterTop.cpp)。测试目标的注册方式、时间精度与常见陷阱见 [`.agents/skills/dpm-verilator-testing`](.agents/skills/dpm-verilator-testing/SKILL.md)。
+测试目标共 9 个：`Controller`（复位、闸门/相位计数、窗口跟随、连续测量一致性、强制停止中止在途测量）、`DigitalPhaseMeterTop`、`DspCounter` / `DspCounterA`（FPGA 单级 DSP 累加器与 ASIC 分段流水线计数器，共用 [`test/DspCounter.cppm`](test/DspCounter.cppm)）、`EdgeDetector`、`MmcmDrpController`、`PhaseMeter` / `PhaseMeterA`（FPGA 与 ASIC 实现，共用 [`test/PhaseMeter.cppm`](test/PhaseMeter.cppm)）、`ResetSynchronizer`。顶层 IP 的 `DigitalPhaseMeterTop`：用 AXI4-Lite BFM 按真实基地址 `0x43C0_0000 + 偏移` 驱动，覆盖复位/寄存器默认值（结果字 `RESULT_GATE/EDGE/PHASE` 不复位、`RESULT_SEQ` 复位为 0）、写数据先到与字节选通、测量启动与中断时序、W1C 与只读寄存器写忽略、结果锁存与 `LOST_COUNT`、`CTRL.clear`、`CTRL.forceStop`（含「无沿卡住 → 强制停止 → busy 清零 → 重新测量」）、目标闸门锁存，以及片内源/外部输入切换。**顶层 AXI 寄存器通路由它守门**：动 `Axi*.scala`、`ControlRegs.scala`、`DigitalPhaseMeterTop.scala` 或 `Utils.scala` 的 `Config`/`Platform` 必须跑 `xmake test -v`，并把新寄存器纳入 [`test/DigitalPhaseMeterTop.cpp`](test/DigitalPhaseMeterTop.cpp)。测试目标的注册方式、ASIC 变体与公共 `.cppm` 约定、时间精度与常见陷阱见 [`.agents/skills/dpm-verilator-testing`](.agents/skills/dpm-verilator-testing/SKILL.md)。
 
 ### xsim 仿真（MMCM 联调）
 
@@ -239,6 +240,35 @@ vivado -mode batch -source vivado/impl_stability.tcl -tclargs 6  # 同策略 6 �
 并复用已完成的结果。流程细节、增量复用矩阵、地址映射与告警清理见
 [`vivado/README.md`](vivado/README.md) 与 [`.agents/skills/dpm-vivado-ip`](.agents/skills/dpm-vivado-ip/SKILL.md)。
 
+### ASIC 实现（Yosys + OpenROAD，sky130 HD）
+
+```bash
+uv run dpm-asic-flow --pdk /home/luo/skywater-pdk             # 综合 + floorplan + place + CTS + route + GDS
+uv run dpm-asic-flow --pdk /home/luo/skywater-pdk floorplan   # 也可以只跑到某个阶段
+uv run dpm-prepare-pdk                                         # 准备 ss/tt/ff 三个 corner 的 PDK 派生文件（默认全部）
+```
+
+`uv sync` 会把 `asic/flow`（`dpm-asic-flow`、`dpm-prepare-pdk`）与 `vivado/flow` 一起
+装进根 `.venv`。`dpm-asic-flow synth` 先用 `./mill emit DigitalPhaseMeterTopA` 生成异步复位实现到
+`build/chisel/DigitalPhaseMeterTopA/`，再把该目录的 `filelist.f` 改写成
+`build/asic/synth/filelist.f`。Yosys 前端用 `read_slang` 读这份文件（顶层
+`DigitalPhaseMeterTop`，不定义任何平台宏），综合固定使用 `ss_100C_1v60`：
+`clockgate` 从 ss liberty 自动选 ICG 做时钟门控，`dfflibmap`、`read_liberty` 与
+ABC 分域时序映射也都用 ss。ABC 按域分别映射（dspClock 域 3333ps/300MHz、
+clock 域 20000ps/50MHz）；状态寄存器带 `fsm_encoding="auto"`，firtool 的
+`disallowPackedArrays` 让状态表下降成 `casez`，标准 `synth` 即可提取并重编码两个
+FSM（Yosys 为 one-hot）。OpenROAD 在 `asic/openroad/config.tcl` 同时读入 ss/tt/ff
+三套 liberty 并定义 ss/tt/ff 三个 scene（MCMM），`dpm-asic-flow synth` 会先准备三个
+corner；floorplan 的 `-utilization 60` 即 0.6，161 个 IO 按端口顺序平均约束到芯片
+四周。产物在 `build/asic/`。查看最终 GDS：
+
+```bash
+klayout -l build/asic/openroad/dpm_asic.lyp build/asic/openroad/dpm_asic.gds
+```
+
+图层含义、GDS 层号表与查看方法见 [`asic/README.md`](asic/README.md#查看-gds-与图层含义)；
+约束、阶段划分、实测结果与限制也在该文件。
+
 ### PS 侧固件与上位机
 
 ```bash
@@ -261,10 +291,11 @@ uv run python -m dpm_host gui             # PySide6 GUI
 | MMCM 联调    | `sim/run_handoff_tb.sh`                                        | xsim：真实 MMCM 行为模型，80 点相位/频率比对                       |
 | 协议与换算   | `uv run pytest -q`、`uv run python spec/selftest_spec.py`      | 上位机单测、C/Python/金标准三方一致性自检                          |
 | 离线验收演练 | `bash ps/tools/onboard_accept_sim.sh`                          | C 验证台经 pty 跑完整验收流程（80 点扫描）                         |
-| 综合实现签核 | `uv run dpm-vivado-flow` + `build/vivado` 下的时序报告         | 450MHz：WNS +0.271ns / WHS +0.060ns / 0 失败端点（稳定性需按 RTL 版本复跑） |
+| 综合实现签核 | `uv run dpm-vivado-flow` + `build/vivado` 下的时序报告         | 450MHz：WNS +0.271ns / WHS +0.019ns / 0 失败端点（稳定性需按 RTL 版本复跑） |
 | 上板验收     | `uv run python ps/tools/onboard_accept.py --port /dev/ttyUSB0` | JTAG 冷启动 + 串口链路 + 协议 + 80 点扫描                          |
+| ASIC 实现    | `uv run dpm-asic-flow`                                         | Yosys + OpenROAD sky130 HD：300MHz dspClock、ss 综合、ss/tt/ff MCMM、利用率 60%、0 DRC/天线 |
 
-> 上表的**综合实现签核**已于 2026-10-26 用当前 HEAD 的 RTL 重跑（单次实现，数据见
+> 上表的**综合实现签核**已于 2026-11-23 用当前 HEAD 的 RTL 重跑（单次实现，数据见
 > [`vivado/README.md`](vivado/README.md)）；**上板验收**仍是 2026-10-19 的记录。
 > `impl_stability.tcl 6` 的 6/6 稳定性结论对应 2026-10-19 网表，RTL 改动后需重跑后再引用。
 

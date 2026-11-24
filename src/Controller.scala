@@ -40,15 +40,14 @@ open class ControllerOutPayload(using override val cfg: Config) extends PhaseMet
   *
   * 时钟与复位：闸门计数 FSM 与结果锁存工作在隐式 `clock` / `reset`（低速域），`PhaseMeter` 例化在 `withClockAndReset(dspClock, dspReset)` 里。高速域的
   * `dspReset` 由本模块内部的 `ResetSynchronizer` 从主复位同步得到（异步置位、与 `dspClock` 同步释放，同步链带 `ASYNC_REG`），因此复位释放与消费它的
-  * 时钟同域。注意该模块的复位输入是**低有效**的（顶层接 PS 的 `resetn`），主复位是高有效，接入前必须取反。 `cfg.asyncReset` 决定 `reset` / `dspReset` 的类型：FPGA 分支是同步
-  * `Bool`，ASIC 分支是 `AsyncReset`。
+  * 时钟同域。注意该模块的复位输入是**低有效**的（顶层接 PS 的 `resetn`），主复位是高有效，接入前必须取反。 `cfg.platform` 决定 `reset` / `dspReset`
+  * 的类型：`Platform.FPGA` 是同步 `Bool`，`Platform.ASIC` 是 `AsyncReset`。
   *
   * @param cfg
-  *   全局配置：闸门/边沿/相位计数器位宽与复位风格；模块名带 `cfg.suffix`
+  *   全局配置：闸门/边沿/相位计数器位宽与平台实现
   */
 class Controller(using val cfg: Config) extends Module:
     require(cfg.gateCntWidth <= 30)
-    override def desiredName: String = s"Controller${cfg.suffix}"
     val dspClock = IO(Input(Clock()))
     val io = IO(new Bundle:
         // 被测信号：由上级在本域完成外部输入/片内源的使能门控与二选一后送来（对外部与 MMCM 源都是异步信号）
@@ -80,6 +79,7 @@ class Controller(using val cfg: Config) extends Module:
 
     import PhaseMeterStateEnum.*
     private val state = RegInit(sIdle)
+    addAttribute(state, """fsm_encoding = "auto"""")
     switch(state):
         is(sIdle) { when(io.in.fire) { state := sWaitStart } }
         is(sWaitStart) { when(responseValid) { state := sMeasuring } }

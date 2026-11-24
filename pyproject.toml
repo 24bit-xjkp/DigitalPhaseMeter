@@ -12,24 +12,28 @@ license = { text = "MIT" }
 authors = [{ name = "24bit-xjkp", email = "2283572185@qq.com" }]
 # 运行时依赖：pyserial（串口）+ PySide6（GUI）。开发期依赖见下面的 dependency-groups。
 dependencies = [
+    "klayout>=0.30.14",
     "pyserial>=3.5",
     "pyside6>=6.12.0",
 ]
 
 [dependency-groups]
 dev = ["black>=26.5.1", "isort>=9.0.1", "pytest>=9.1.1", "pytest-xdist>=3.8.0"]
-# Vivado 增量流程作为 workspace 成员安装进同一个根 .venv（不新增第三方运行时依赖）。
+# ASIC / Vivado 流程作为 workspace 成员安装进同一个根 .venv（不新增第三方运行时依赖）。
+asic = ["dpm-asic-flow"]
 vivado = ["dpm-vivado-flow"]
 
 [tool.uv.workspace]
-members = ["vivado/flow"]
+members = ["asic/flow", "vivado/flow"]
 
 [tool.uv.sources]
+dpm-asic-flow = { workspace = true }
 dpm-vivado-flow = { workspace = true }
 
 [tool.uv]
-# 默认把 host 开发工具与 Vivado flow 都装进根 .venv；`uv sync` 后可直接调用 dpm-vivado-flow。
-default-groups = ["dev", "vivado"]
+# 默认把 host 开发工具与 ASIC/Vivado flow 都装进根 .venv；
+# `uv sync` 后可直接调用 dpm-asic-flow、dpm-prepare-pdk 与 dpm-vivado-flow。
+default-groups = ["dev", "asic", "vivado"]
 
 [project.scripts]
 dpm-host = "dpm_host.cli:main"

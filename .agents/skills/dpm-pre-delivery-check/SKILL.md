@@ -95,12 +95,14 @@ sim/run_handoff_tb.sh      # xsim：真实 MMCM 联调（SystemVerilog 激励，
   见 `script/rule.lua` 的 `mill.verilator.shared`）：改完 RTL 不需要手工先跑 `./mill emit`；为 xsim /
   Vivado 准备产物时仍按各自入口生成（`sim/run_handoff_tb.sh` 自带生成入口，Vivado 流程需要先手工跑
   `./mill emit DigitalPhaseMeterTop MmcmDrpController`）。
-- 改了 `Axi*.scala`、`ControlRegs.scala`、`DigitalPhaseMeterTop.scala`、`Utils.scala`（`Config` /
+- 当前共 9 个 Verilator 测试目标：`Controller`、`DigitalPhaseMeterTop`、`DspCounter`、`DspCounterA`、
+  `EdgeDetector`、`MmcmDrpController`、`PhaseMeter`、`PhaseMeterA`、`ResetSynchronizer`。改了
+  `Axi*.scala`、`ControlRegs.scala`、`DigitalPhaseMeterTop.scala`、`Utils.scala`（`Config` /
   `Platform`）或 `ResetSynchronizer.scala` 时，**必须**跑 `xmake test -v`（含 `DigitalPhaseMeterTop`
   顶层用例）：这些通路只有经过 AXI 从口与寄存器堆的顶层用例覆盖得到，并把新寄存器纳入该用例。
-  顶层用例同时验证平台宏（`test/xmake.lua` 注入 `-Dtargets$Platform$FPGA` 并显式指定
-  `--top DigitalPhaseMeterTop`）；xsim 侧由 `sim/run_handoff_tb.sh` 注入同名宏。改平台/复位风格后
-  两处都要跟着复核。
+  顶层用例验证 FPGA 单份实现（同步复位）；没有平台宏、没有 `--top`、没有平台包装层，
+  ASIC 对照由 `DspCounterA` / `PhaseMeterA` 两个目标的 `cfg.platform` 实现覆盖。改了平台相关逻辑
+  （`Config` / `ResetSynchronizer` / `DspCounter` / `PhaseMeter`）时，FPGA 与 ASIC 变体的目标都要跑。
 - 只改了测量通路（`Controller` / `PhaseMeter` / `EdgeDetector` / `DspCounter`）时，
   直接跑 `xmake test -v` 即可（构建测试目标时会自动生成产物）；但顶层的端口或行为变了也要把顶层用例跑齐。
 - 改了 MMCM 寄存器编码（`MmcmDrpController` / `ps/include/dpm_regs.h`）或片内源联调通路时，
@@ -113,12 +115,17 @@ sim/run_handoff_tb.sh      # xsim：真实 MMCM 联调（SystemVerilog 激励，
 - 改了 `vivado/flow/` 的 Python/Tcl 时，还要跑：
   `uv run pytest vivado/flow/tests -v`、`uv run black --check vivado/flow`、
   `uv run isort --check-only vivado/flow`，并至少做一次 warm 复用 + 一次 `--force` 全量验证。
+- 改了 `asic/flow/` 的 Python（阶段编排、PDK 派生逻辑）时，还要跑：
+  `uv run pytest asic/flow/tests -v`、`uv run black --check asic/flow`、
+  `uv run isort --check-only asic/flow`；入口改动至少用 `uv run dpm-asic-flow gds`（或其它代价小的
+  阶段）做一次真实调用，确认 console script、仓库根识别与 `DPM_PDK` 导出都正常。
 
-- **每个模块只有一份产物**：`build/chisel/<Name>/`（见 `dpm-chisel-rtl`）。Verilator、xsim 与
-  Vivado 消费的是同一份 RTL（复位同步是纯 RTL 的 `ResetSynchronizer`，没有 XPM 原语），因此各
-  流水线可以按任意顺序交替跑。**新增厂商原语前先确认 Verilator 与 xsim 两侧都有它的仿真模型**，
-  否则「一份产物」的前提就不成立。`xmake test` 会在构建测试目标时自动调用生成入口（只生成被构建的
-  Verilator 目标对应的模块），因此改了 RTL 直接跑测试即可；xsim / Vivado 侧仍按各自入口生成。
+- **每个平台的每个模块只有一份产物**：FPGA 在 `build/chisel/<Name>/`、ASIC 变体在
+  `build/chisel/<Name>A/`（见 `dpm-chisel-rtl`）。同一平台内 Verilator、xsim 与 Vivado 消费的是
+  同一份 RTL（复位同步是纯 RTL 的 `ResetSynchronizer`，没有 XPM 原语），因此各流水线可以按任意顺序
+  交替跑。**新增厂商原语前先确认 Verilator 与 xsim 两侧都有它的仿真模型**，否则「一份产物」的前提
+  就不成立。`xmake test` 会在构建测试目标时自动调用生成入口（只生成被构建的 Verilator 目标对应的
+  模块），因此改了 RTL 直接跑测试即可；xsim / Vivado 侧仍按各自入口生成。
 
 - 必须是**全量**：只跑单个目标或用例（`xmake run <Name> ...`）不能作为回归证据，它只用于定位问题。
 - 运行参数（本项目为 `+verilator+rand+reset+2` 与 `-fc`）同时登记在 `test/xmake.lua` 的 target 级 `set_runargs` 与用例级 `add_tests` 的 `runargs` 里，`xmake run` 与 `xmake test` 都会带上。回归证据仍要用 `xmake test`（它会先构建目标并跑全部目标与用例）；`xmake run` 只用于定位单个目标或用例。
@@ -134,13 +141,13 @@ sim/run_handoff_tb.sh      # xsim：真实 MMCM 联调（SystemVerilog 激励，
 
 ```bash
 uv run pytest -q                       # 全量（testpaths = host/tests，仓库根或 host/ 下都能跑）
-uv run black --check host/ spec/ ps/   # 全部 Python 脚本（行宽 140 来自 pyproject 的 [tool.black]）
-uv run isort --check-only host/ spec/ ps/  # 导入顺序（profile/行宽来自 pyproject 的 [tool.isort]）
+uv run black --check host/ spec/ ps/ asic/flow   # 全部 Python 脚本（行宽 140 来自 pyproject 的 [tool.black]）
+uv run isort --check-only host/ spec/ ps/ asic/flow  # 导入顺序（profile/行宽来自 pyproject 的 [tool.isort]）
 uv run python spec/selftest_spec.py    # 文档 ↔ 头文件 ↔ 金标准的一致性自检
 uv run python host/tools/gui_smoke.py  # 改了 GUI 时跑：连接/测量/扫描 + 截图（QT_QPA_PLATFORM=offscreen 可无头）
 ```
 
-- 格式化的范围是**整个 Python 脚本树**（`host/`、`spec/`、`ps/tests`、`ps/tools`），不是只格式化改动
+- 格式化的范围是**整个 Python 脚本树**（`host/`、`spec/`、`ps/tests`、`ps/tools`、`asic/flow/dpm_asic_flow`、`asic/flow/tests`），不是只格式化改动
   的文件：`pyproject.toml` 里已配好 `[tool.black] line-length = 140` 与 `[tool.isort] profile = "black"`，
   两条命令不必带额外参数。这棵树应始终保持干净；提交前尽量把纯格式化改动与功能改动分开。
 - **C 源码不做整体格式化**：`ps/**/*.c|h` 的风格与仓库根 `.clang-format` 并不完全一致，整体重排会

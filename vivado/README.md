@@ -18,9 +18,8 @@ block design（BD），完成综合、实现、bitstream 与 XSA 导出。工程
 ## 前提与环境
 
 1. 先用仓库根的 `./mill emit DigitalPhaseMeterTop MmcmDrpController` 生成两个 IP 需要的
-   SystemVerilog（每个模块只有一份产物，仿真与综合共用；一条命令生成两个模块）。顶层产物同时含
-   FPGA/ASIC 两套平台分支（`*S.sv` / `*A.sv`）；打包只读 FPGA 分支，综合宏由流程注入（见下文
-   「综合 / 实现策略与签核」）。
+   SystemVerilog（每个模块只有一份产物，仿真与综合共用；一条命令生成两个模块）。顶层产物只有
+   一份 FPGA 实现（不含平台宏与 `*S.sv`/`*A.sv` 分支），打包与综合直接消费整份 `filelist.f`。
 
 2. Vivado 在 PATH 中（本项目在 **Vivado 2025.2** 上验证）；**固定器件 `xc7z010clg400-1`**
    （ALINX AX7010 的芯片）。`create_bd.tcl` 建工程后与 Python 流程的 build 阶段打开工程后
@@ -189,16 +188,9 @@ dpm-vivado-flow（Python，根 .venv）
 
 要点：
 
-- **综合宏（`chisel3.choice` 的 `Platform` 分支）要在打包与综合两处注入**：生成的顶层用
-  `` `ifdef targets$Platform$FPGA `` 选择 FPGA 实现（`DigitalPhaseMeterTopImplS` + 复位同步），
-  两个分支都不定义时综合会命中 `$error`。`package_ip.tcl` 给打包工程的 fileset 设了
-  `verilog_define`，`ipx::package_project` 才会把 FPGA 分支（含顶层与 `*S.sv`）当成可达文件；
-  打包工程同时只读 FPGA 分支文件（ASIC 变体 `*A.sv` 不读，否则会报
-  `[IP_Flow 19-3833] Unreferenced file`）。但 **IP-XACT 不记录 fileset 的 `verilog_define`**，
-  该设置带不到 BD 工程；build worker 在 reset 之后还要把它写到 `dpm_top` 的 OOC run 同名
-  fileset（run 名去掉 `_synth_1`，即 `dpm_system_dpm_top_0_0`），Vivado 生成 run 脚本时才展开为
-  `synth_design -verilog_define {targets$Platform$FPGA}`。宏参与综合 run 指纹，结果里用
-  `SYNTH_DEFINES_APPLIED` 记录实际写入的 run；xsim 侧用 `xvlog -d 'targets$Platform$FPGA'`。
+- **不需要综合宏/平台分支**：生成入口只产出 FPGA 实现，`filelist.f` 里没有 `*S.sv`/`*A.sv`
+  平台分支，也没有按平台选择实现的 `ifdef` 宏。`package_ip.tcl` 只按 `verification/` 前缀剔除
+  断言文件，其余文件全部读入；综合 run 沿用工程默认，不需要额外的综合宏。
 - **BD 工程里 IP 的 OOC 综合 run 不继承 `synth_1` 的参数**。真正含 450MHz 逻辑的是 `dpm_top` 的
   out-of-context run，只改 `synth_1` 等于没改。worker 按 IP 实例名匹配 run 并两处同时写；新建 BD
   工程刚打开时 IP run 还不存在，先 `launch_runs synth_1 -scripts_only` 把它物化出来（BD 管理的
@@ -229,18 +221,24 @@ place/route 有 run-to-run 差异，**单次通过不算签核**；反过来，�
 收敛是确定性的。用 `set_clock_uncertainty` 过约束只能用来逼工具，签核要清掉后重新出报告（本设计
 不使用过约束）。
 
-2026-10-26 的签核结果（Design State: Routed，`xc7z010clg400-1`；用 HEAD 的 RTL 增量重跑，单次实现）：
+`Controller` / `PhaseMeter` 状态寄存器带 `(* fsm_encoding = "auto" *)`。Vivado 在
+`dpm_top` 的 OOC 综合日志里用 `[Synth 8-802]` 识别出两个 FSM、`[Synth 8-3354]` 报告
+`auto` 最终选了 `sequential` 编码（状态少，sequential 足够）；把属性临时改成 `one_hot` 做
+scratch 综合会得到 `one-hot`，说明该属性确实被 Vivado 读取，而不是被忽略。
+
+2026-11-23 的签核结果（Design State: Routed，`xc7z010clg400-1`；用 HEAD 的 RTL 重跑
+`uv run dpm-vivado-flow`，单次实现）：
 
 | 项                                                   | 结果                                                                                                                                                                                                               |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 全设计时序                                           | **WNS +0.271ns / WHS +0.060ns / WPWS +0.067ns**，TNS = THS = 0，**0 个失败端点**                                                                                                                                   |
-| DSP 域（`clk_out1_dpm_system_clk_wiz_0_0`，2.222ns） | WNS +0.271ns / WHS +0.149ns / WPWS +0.067ns，0 个失败端点                                                                                                                                                          |
-| 整体 WNS 的限制者                                    | 仍是 clk_wiz Safe Clock Startup 内部路径 `seq_reg1[7] → clkout1_buf/CE0`（+0.271）；**测量域自身最差 setup 路径余量 +0.553ns**（`dspReset` 释放链 → 边沿检测链复位脚；纯数据/控制脚路径 ≥ +0.65ns），DSP 域 hold 最差 +0.149ns |
+| 全设计时序                                           | **WNS +0.271ns / WHS +0.019ns / WPWS +0.067ns**，TNS = THS = 0，**0 个失败端点**                                                                                                                                   |
+| DSP 域（`clk_out1_dpm_system_clk_wiz_0_0`，2.222ns） | WNS +0.271ns / WHS +0.121ns / WPWS +0.067ns，0 个失败端点                                                                                                                                                          |
+| 整体 WNS 的限制者                                    | 仍是 clk_wiz Safe Clock Startup 内部路径 `seq_reg1[7] → clkout1_buf/CE0`（+0.271）；**测量域自身最差 setup 路径余量 +0.341ns**（`forceStop` 边沿检测链 → PhaseMeter FSM 状态寄存器 D），DSP 域 hold 最差 +0.121ns |
 | 稳定性                                               | 本次为**单次实现**（0 失败端点）；`impl_stability.tcl 6` 的 6/6 PASS 结论对应 2026-10-19 网表，RTL 改动后需按同样方式复跑                                                                                          |
-| 其它时钟组                                           | 慢域（`clk_fpga_0`）WNS +12.611ns / WHS +0.060ns；跨域（`set_max_delay 20ns`）dsp→slow +18.116ns、slow→dsp +15.750ns                                                                                               |
-| 资源                                                 | Slice LUT 878（4.99%）、Slice Register 1426（4.05%）、DSP 2（2.50%）、Block RAM 0、BUFGCTRL 6（18.75%）、MMCME2_ADV 2（100%）                                                                                      |
+| 其它时钟组                                           | 慢域（`clk_fpga_0`）WNS +12.053ns / WHS +0.019ns；跨域（`set_max_delay 20ns`）dsp→slow +18.149ns、slow→dsp +16.652ns                                                                                               |
+| 资源                                                 | Slice LUT 838（4.76%）、Slice Register 1382（3.93%）、DSP 2（2.50%）、Block RAM 0、BUFGCTRL 6（18.75%）、MMCME2_ADV 2（100%）                                                                                      |
 | 日志                                                 | IP 打包 / BD / 综合/实现主 run 与 8 个 IP OOC run **全部 0 Warnings / 0 Critical Warnings / 0 Errors**；实现 methodology 报告 `Checks found: 0 / Checks waived: 13`，**无 Critical Warning**                       |
-| 产物                                                 | `write_bitstream` 成功，`build/vivado/dpm_system.xsa`（含 bitstream，2026-10-26 刷新）                                                                                                                              |
+| 产物                                                 | `write_bitstream` 成功，`build/vivado/dpm_system.xsa`（含 bitstream，2026-11-23 刷新）                                                                                                                              |
 
 `xc7z010` 的 DSP48E1 全寄存器 FMAX 为 464.25MHz（DS187），450MHz 用掉约 97%；Vivado 时序分析
 覆盖 DSP 内部与 CEP/RSTP 控制脚，实现后这些路径的余量见上表。

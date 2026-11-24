@@ -29,7 +29,6 @@ Python 生成到 `build/vivado/.flow/plans/<stage>.tcl`，worker 通过全局变
 | `hook_waivers` | path | `hook_methodology_waivers.tcl` |
 | `hook_vendor_ip` | path | `hook_filter_vendor_ip.tcl` |
 | `strategy_targets` | list of `{run property value}` | 需要写入的策略目标 |
-| `synth_defines` | list of `{run define}` | 综合宏目标；worker 写到该 IP OOC run 同名 fileset 的 `verilog_define`（Vivado 生成 run 脚本时变成 `synth_design -verilog_define`，只有 `*_synth_1` 这类 IP run 支持） |
 | `hook_assignments` | list of `{run step hook}` | 需要挂的 `STEPS.<step>.TCL.PRE` |
 | `reset_runs` | list | Python 判定必须重跑的 run |
 | `materialize` | 0/1 | 是否先 `launch_runs synth_1 -scripts_only` 物化 IP OOC run |
@@ -68,7 +67,6 @@ worker 只在成功路径写结果；失败时 `error`，包装脚本负责 `exi
 STAGE=build
 RESET_RUNS=synth_1 dpm_system_dpm_top_0_0_synth_1
 STRATEGY_CHANGED=synth_1
-SYNTH_DEFINES_APPLIED=dpm_system_dpm_top_0_0_synth_1
 RUNS_SEEN=synth_1 dpm_system_dpm_top_0_0_synth_1 impl_1
 SYNTH_RAN=1
 SYNTH_PROGRESS=100%
@@ -110,13 +108,11 @@ ADDR_DRP=0x43C10000
 为保证「Python 判定复用、但工程属性被手工改过」时不会静默复用旧结果，worker 可以：
 
 1. 读每个 `strategy_targets` 的当前值；与目标不同则写入，并把对应 run 加入实际 reset 列表。
-2. 读每个 `synth_defines` 对应 fileset 的 `verilog_define`；与目标不同则把该 run 加入实际 reset
-   列表，并在 reset 之后写入（`reset_run` 不清 fileset 属性，但 run 脚本要等 launch 才重新生成）。
-3. 读每个 `hook_assignments` 的 `TCL.PRE`；与目标不同则把对应 run 加入实际 reset 列表。
-4. 实际 reset 列表 = `reset_runs` ∪ 上述新增。
-5. **先 reset，再写策略/hook**（`reset_run` 会清步骤属性）；对未被 reset 的 run 不写任何属性，
-   避免把已完成的 run 标成过期。综合宏只写在本次实际 reset 的 run 上。
-6. 所有实际 reset 的 run 在结果中写入 `RESET_RUNS`。
+2. 读每个 `hook_assignments` 的 `TCL.PRE`；与目标不同则把对应 run 加入实际 reset 列表。
+3. 实际 reset 列表 = `reset_runs` ∪ 上述新增。
+4. **先 reset，再写策略/hook**（`reset_run` 会清步骤属性）；对未被 reset 的 run 不写任何属性，
+   避免把已完成的 run 标成过期。
+5. 所有实际 reset 的 run 在结果中写入 `RESET_RUNS`。
 
 ## 5. 包装脚本
 

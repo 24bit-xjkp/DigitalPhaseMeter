@@ -44,7 +44,7 @@ import chisel3.util.*
   * 重配置期间 MMCM 会失锁、输出停止，因此软件必须在测量空闲（`STATUS.busy = 0`）时改。
   *
   * @param cfg
-  *   全局配置：复位风格（`cfg.asyncReset`）；模块名带 `cfg.suffix`
+  *   全局配置：平台实现与复位风格（`cfg.platform`）
   */
 class MmcmDrpController(using val cfg: Config) extends TopModule:
     // AXI4-Lite 从口（固定 32 位地址 / 32 位数据）

@@ -1,0 +1,18 @@
+[project]
+name = "dpm-asic-flow"
+version = "0.1.0"
+description = "DigitalPhaseMeter 的 Yosys + OpenROAD sky130 HD ASIC 流程入口"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+dpm-asic-flow = "dpm_asic_flow.cli:main"
+dpm-prepare-pdk = "dpm_asic_flow.prepare_pdk:main"
+
+[build-system]
+requires = ["uv_build>=0.11.7,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = "."
+module-name = "dpm_asic_flow"

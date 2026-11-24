@@ -96,6 +96,8 @@ echo "== 运行目录：${RUN_DIR} =="
 
 gen_files=()
 for d in "${TOP_RTL_DIR}" "${DRP_RTL_DIR}"; do
+    # filelist.f 里已是单一 FPGA 实现（没有平台宏、没有 *S.sv/*A.sv 分支），
+    # 逐行补成相对生成目录的绝对路径即可，不需要按文件名过滤。
     while IFS= read -r line; do
         [[ -z "${line}" ]] && continue
         gen_files+=("${d}/${line}")
@@ -103,16 +105,15 @@ for d in "${TOP_RTL_DIR}" "${DRP_RTL_DIR}"; do
 done
 
 echo "== 编译 RTL（dpm_top ${TOP_RTL_DIR##*/} + DRP 控制器 + 裸 MMCM + glbl，共 ${#gen_files[@]} 个生成文件）=="
-# 生成顶层用 `ifdef targets$Platform$FPGA 选择 FPGA 实现分支（chisel3.choice），
-# 不定义该宏时细化会命中 $error；宏名含 $，必须用单引号让 shell 原样传给 xvlog。
-# chisel3.ltl.AssertProperty 的绑定文件在 verification/assert 下，include 路径要一并传
+# 生成的 RTL 只有一份 FPGA 实现，不需要平台宏；chisel3.ltl.AssertProperty 的绑定文件在
+# verification/assert 下，include 路径要一并传给 xvlog。
 xvlog_includes=()
 for d in "${TOP_RTL_DIR}" "${DRP_RTL_DIR}"; do
     if [[ -d "${d}/verification" ]]; then
         xvlog_includes+=(-i "${d}/verification" -i "${d}/verification/assert")
     fi
 done
-"${XVLOG}" --sv --work work -d 'targets$Platform$FPGA' "${xvlog_includes[@]}" "${gen_files[@]}" "${MMCM_RTL}" "${GLBL}"
+"${XVLOG}" --sv --work work "${xvlog_includes[@]}" "${gen_files[@]}" "${MMCM_RTL}" "${GLBL}"
 
 echo "== 编译测试激励 =="
 "${XVLOG}" --sv --work work "${ROOT_DIR}/sim/${TB_NAME}.sv"

@@ -53,9 +53,9 @@ XILINX_VIVADO=/path/to/Vivado sim/run_handoff_tb.sh   # 指定 Vivado 安装路�
 - **timescale 必须显式给**：生成的 RTL 没有 `` `timescale`` 而激励有，`xelab` 要加
   `--timescale 1ns/1ps`（脚本已带）。
 - **`filelist.f` 路径**：里面的文件名相对生成目录，脚本按 `build/chisel/<Name>/` 补成绝对路径后
-  再交给 `xvlog`。顶层目录同时含 `*S.sv`/`*A.sv` 两套平台分支，两套都会编译，由宏选择实例化哪套。
-- **必须给平台宏**：生成的顶层用 `` `ifdef targets$Platform$FPGA `` 选 FPGA 实现；脚本已给 `xvlog`
-  加 `-d 'targets$Platform$FPGA'`（宏名含 `$`，只能用单引号原样传）。不定义时细化会命中 `$error`。
+  再交给 `xvlog`。顶层目录只有一份 FPGA 实现（不含 `*S.sv`/`*A.sv` 平台分支），`filelist.f` 里的
+  文件全部参与编译。
+- **不需要平台宏**：生成入口只产出 FPGA 实现，没有 `ifdef` 平台分支，`xvlog` 不加 `-d` 宏。
 - **`glbl`/厂商库必须给**：联调仿真真实 MMCM，必须编译 `Vivado/data/verilog/src/glbl.v` 并在
   `xelab` 时 `-L unisims_ver`、把 `glbl` 一起作顶层；**不能**加 `-L unisim`（VHDL 版 unisim 与
   Verilog 版 unisims_ver 冲突）。

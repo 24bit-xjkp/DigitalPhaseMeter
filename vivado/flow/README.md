@@ -69,9 +69,8 @@ ref/<run>.dcp              增量编译参考 DCP
 - **package**：`package_ip.tcl` / `package_src_ip.tcl`，按 `filelist.f` 与文件内容哈希决定是否重打包。
 - **BD**：结构/参数不变且仅 IP 内容变化时，`refresh_bd.tcl` 在原工程内 `upgrade_ip` +
   `generate_target` + `validate_bd_design` + 地址检查；失败自动删除工程并全量重建。
-- **build**：`run_build_stage.tcl` 按计划 reset 指定 run、写策略/综合宏/hook/增量属性、launch/wait，
+- **build**：`run_build_stage.tcl` 按计划 reset 指定 run、写策略/hook/增量属性、launch/wait，
   再出报告、methodology 门禁与 XSA。复用判据是「指纹匹配 + 输出 DCP 存在」，不依赖 run `STATUS`。
-  综合宏（`synth_defines`）写到 IP OOC run 同名 fileset 的 `verilog_define`，见 `CONTRACT.md`。
 
 完整复用矩阵与实测数据见 [`../README.md`](../README.md) 的「增量流程」。
 
@@ -89,7 +88,7 @@ Vivado 集成按 `../README.md` 的场景矩阵手工执行。
 ## 增加新 run/阶段时
 
 1. 在 Python 侧为 run 计算输入指纹（`fingerprint.py` / `stages/build.py`）；
-2. 若需要新的 reset/策略/综合宏/hook/增量输入，先在 [`CONTRACT.md`](CONTRACT.md) 定义 plan/result key，
+2. 若需要新的 reset/策略/hook/增量输入，先在 [`CONTRACT.md`](CONTRACT.md) 定义 plan/result key，
    再同步修改 Python 与 Tcl worker；
 3. 更新 `../README.md` 的复用矩阵与 skill 的实测坑；
 4. 跑 `uv run pytest vivado/flow/tests` 与一次 `--force` 全量 + 一次 warm 复用验证。

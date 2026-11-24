@@ -3,8 +3,7 @@ package DigitalPhaseMeter
 import chisel3.*
 
 /** 边沿类型 */
-enum EdgeType:
-    case Rising, Falling, Both
+enum EdgeType { case Rising, Falling, Both }
 
 /** 边沿检测器
   *
@@ -13,7 +12,7 @@ enum EdgeType:
   * @param edgeType
   *   边沿类型
   * @param cfg
-  *   全局配置；这里只用 `cfg.suffix` 区分同步/异步复位分支的模块名
+  *   全局配置；本模块不区分平台，模块名不带平台后缀
   */
 class EdgeDetector(val n: Int = 3, val edgeType: EdgeType = EdgeType.Rising)(using val cfg: Config) extends Module:
     require(n >= 2)
@@ -25,7 +24,7 @@ class EdgeDetector(val n: Int = 3, val edgeType: EdgeType = EdgeType.Rising)(usi
         case EdgeType.Rising  => !pipeline.last && pipeline.init.last
         case EdgeType.Falling => pipeline.last && !pipeline.init.last
         case EdgeType.Both    => pipeline.last =/= pipeline.init.last)
-    override def desiredName: String = s"EdgeDetector$edgeType${cfg.suffix}"
+    override def desiredName: String = s"EdgeDetector$edgeType"
 
 object EdgeDetector:
     def apply(sig: Bool, edgeType: EdgeType = EdgeType.Rising, n: Int = 3)(using cfg: Config): Bool =
