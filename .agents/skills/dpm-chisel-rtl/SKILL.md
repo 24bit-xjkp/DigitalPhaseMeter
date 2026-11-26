@@ -295,9 +295,9 @@ object EmitDspCounterA extends Main(using Config.asic):
   （写 `(mode === 1.U) -> addr` 而不是 `mode -> addr`）。
 - **高速域（当前 450MHz）只放「边沿检测 + 计数器/比较器 + 二级 FSM」**：频率/相位全部交给 MMCM，
   高速域不要放配置运算或分频逻辑。450MHz 下测量域自身最差 setup 路径余量在 **+0.3~0.6ns 量级**
-  （2026-11-23 当前 RTL 实测 **+0.341ns**：`forceStop` 边沿检测链 → PhaseMeter FSM 状态寄存器 D；
-  同类路径随布局布线与 FSM 编码浮动，具体以最新签核报告为准）；**整体 WNS 受 clk_wiz
-  Safe Clock Startup 内部路径限制（+0.271ns）**，不要拿整体 WNS 判断测量逻辑还剩多少优化空间。
+  （2026-11-23 实测 +0.341ns 是 forceStop 未打拍时的路径；现在 forceStop 已加 `RegNext`，该路径应更短，
+  FPGA 侧需重新签核）；**整体 WNS 受 clk_wiz Safe Clock Startup 内部路径限制（+0.271ns）**，
+  不要拿整体 WNS 判断测量逻辑还剩多少优化空间。
 - **450MHz 的 32 位计数器用 DSP48E1，不要用 fabric 进位链**：fabric 32 位计数器（8 个 CARRY4 串联）
   与「16 位低段 + 16 位高段」的分段计数器在该器件上都收敛不到正余量，固定开销在
   「FF → LUT → CARRY4 的 S 输入」与计数器 Q 的远端布线。DSP48E1 在 -1 速度等级的 FMAX 是
@@ -309,17 +309,29 @@ object EmitDspCounterA extends Main(using Config.asic):
   `when(io.clear) { cnt := 0.U }.elsewhen(io.enable) { cnt := cnt + 1.U }` 才会映射成 DSP 的
   RSTP（同步复位）+ CEP（时钟使能），使能/清零由**寄存器直接**驱动控制脚。用
   `addAttribute(cnt, """use_dsp = "yes"""")` 显式要求 DSP，避免综合器换成 fabric 实现。
-- **ASIC 分段计数器的输出对齐延迟链不要加 clear 复位**：这条链只是把各段旧值对齐到同一时刻，
-  不是独立数据寄存器；给每级 `ShiftRegister` 加 clear 会为每个 bit 引入一级清零 mux（sky130
-  实测多出约 220 个 `nor2b`，面积增加约 8.8%）。当前用无复位的 `RegNext` 链，代价是
-  `clear` 后 `depth - 1` 拍内输出可能是旧值与已清零高段的混合，**这段窗口不能读**；
-  `PhaseMeter` 的停止响应延后 `depth - 1` 拍、且 clear 只在 idle 生效，所以正常测量不受影响。
-  若将来加入短于该窗口的测量或直接观测 DspCounter，必须另行处理，不要简单把延迟链复位加回来。
+- **ASIC 分段计数器的 clear 走寄存器异步复位端，不要用同步清零 mux**：`DspCounter` 在
+  `Platform.ASIC` 下把 `implicitReset` 设为 `io.clear.asAsyncReset`（FPGA 仍用 `io.clear`
+  的同步复位，DSP48E1 只有 RSTP）。sky130 HD 没有同步复位触发器，同步清零会被
+  `DFFLEGALIZE` 拆成「D 端清零 mux + `dfxtp`」，把 `clear` 的扇出压进每条计数器 D 路径
+  （450MHz、0.3ns uncertainty 下实测最差路径就是 `clearCnt → edgeCnt[18]`）；改成异步复位后
+  计数寄存器直接映射成 `dfrtp` 的复位端，D 路径只剩段内加法器，`clear` 变成复位脚上的
+  recovery/removal 检查。`clearCnt` 是同一 dspClock 域的寄存器，置位与撤销都同步，不需要
+  额外复位同步器。注意 `implicitReset` 作用于模块内所有 `RegInit`，只应覆盖计数寄存器：
+  进位寄存器用无复位的 `RegNext`，不清零；clear 在 idle 保持期间它们随段寄存器归零自然清零。
+- **ASIC 分段计数器的 `io.value` 直接取段寄存器，没有输出对齐延迟链**：段间进位是寄存的，
+  计数刚跨过段边界（每段 `ceil(cntWidth / depth)` 位）时高段晚一拍才收到进位，所以输出最多要
+  `depth - 1` 拍才稳定到最终计数值。调用方必须在撤销使能后等 `depth - 1` 拍再读；连续计数、
+  没有跨段进位时输出逐拍就是当前计数值。`PhaseMeter` 的停止响应延后 `depth - 1` 拍，且实际
+  读数发生在慢时钟域的响应握手里（比进位传播晚得多），因此不需要延迟链。不要在 `io.value` 上
+  再挂对齐用 `ShiftRegister`（旧实现），也不要在计数过程中直接断言完整输出等于已计拍数——
+  跨段进位拍附近它会短暂偏低（只有最低段逐拍准确）。段宽决定段内加法器深度：级数 8（4 位段）
+  时 450MHz 还差 0.04~0.10ns，16（2 位段）时 0.3ns uncertainty 下已收敛（+0.06ns 量级）；
+  再加级数会让进位寄存器（FF）变多，收益递减，且 `bitsPerBlock` 至少 2 位是 RTL 里的约束。
 - **边沿检测器的组合触发要打一拍再进 FSM/使能译码**：3 级同步链最后一级 → 组合触发脉冲 → FSM 两级
-  LUT 是一条 0.188~0.212ns 余量的路径。给**四条**边沿检测输出（sig1 / sig2 / request / responseReady）
-  统一加一级 `RegNext` 后：检测器输出只驱动本地触发器，FSM 输入来自寄存器。2026-11-23 当前
-  RTL 该类路径的最差余量是 **+0.341ns**（`forceStop` 边沿检测链 → PhaseMeter FSM 状态寄存器 D），
-  仍优于不寄存时 0.2ns 量级的组合路径。因为四路整体晚 1 个高速周期，`pulseSig1Valid` / `pulseSig2Valid` / `phaseCntEnable`
+  LUT 是一条 0.188~0.212ns 余量的路径。给**五条**边沿检测输出（sig1 / sig2 / request / responseReady /
+  forceStop）统一加一级 `RegNext` 后：检测器输出只驱动本地触发器，FSM 输入来自寄存器。`forceStop`
+  曾漏掉这一拍，结果成为 450MHz、0.3ns uncertainty 下 WNS -0.124ns 的路径（ASIC 实测，加寄存器后
+  该路径消失）。因为五路整体晚 1 个高速周期，`pulseSig1Valid` / `pulseSig2Valid` / `phaseCntEnable`
   之间的相对时序与相位计数窗口长度不变，握手只是多 1 拍；计数器停止后冻结、慢域握手完成后才锁存，
   读数不变（顶层用例与加流水前逐条 diff 为空、Verilator Controller 用例全过）。
 - **派生运算放到低速域，高速域只留「取寄存器 → 比较/计数」**：只要一个值在配置期算得出来，

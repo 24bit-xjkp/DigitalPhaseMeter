@@ -124,13 +124,20 @@ def write_lyp(path: Path, present_layers: set[tuple[int, int]]) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--def", dest="def_file", required=True)
-    parser.add_argument("--output", required=True)
-    parser.add_argument("--lyp", help="输出的 KLayout 图层配置（默认与 GDS 同名的 .lyp）")
-    parser.add_argument("--tech-lef", required=True)
-    parser.add_argument("--cells-lef", required=True)
-    parser.add_argument("--cells-dir", required=True)
+    parser = argparse.ArgumentParser(
+        description="用 KLayout 把 DEF 与 sky130 单元 GDS 合并成最终版图",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--def", dest="def_file", required=True, help="OpenROAD 输出的 DEF")
+    parser.add_argument("--output", required=True, help="输出的 GDS")
+    parser.add_argument(
+        "--lyp",
+        default=argparse.SUPPRESS,
+        help="输出的 KLayout 图层配置；省略时与 GDS 同名",
+    )
+    parser.add_argument("--tech-lef", required=True, help="PDK 技术 LEF")
+    parser.add_argument("--cells-lef", required=True, help="合并后的单元 LEF")
+    parser.add_argument("--cells-dir", required=True, help="PDK 单元 GDS 目录")
     args = parser.parse_args()
 
     for path in (args.def_file, args.tech_lef, args.cells_lef, args.cells_dir):
@@ -184,7 +191,8 @@ def main() -> int:
     written = kdb.Layout()
     written.read(args.output)
     present_layers = {(written.get_info(li).layer, written.get_info(li).datatype) for li in written.layer_indexes()}
-    lyp_path = Path(args.lyp) if args.lyp else Path(args.output).with_suffix(".lyp")
+    lyp = getattr(args, "lyp", None)
+    lyp_path = Path(lyp) if lyp else Path(args.output).with_suffix(".lyp")
     write_lyp(lyp_path, present_layers)
 
     bbox = top.bbox()

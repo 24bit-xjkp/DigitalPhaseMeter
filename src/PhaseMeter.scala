@@ -3,6 +3,7 @@ package DigitalPhaseMeter
 import chisel3.*
 import chisel3.ltl.AssertProperty
 import chisel3.util.*
+import scala.math.max
 
 /** 相位计输入信号，sig1为参考信号，sig2为被测信号
   */
@@ -28,8 +29,8 @@ object PhaseMeterStateEnum extends ChiselEnum:
 /** 相位计，工作在高速时钟域
   *
   * @param cfg
-  *   全局配置：边沿/相位计数器位宽与平台实现（FPGA 为单级累加器、ASIC 为分段流水线， 后者的停止响应按流水线深度延后 `asicDspCounterPipeline - 1` 拍）。 ASIC 计数器的输出对齐链不随
-  *   `clear` 复位，`clear` 也要同样拍数才排空；本模块只在 `sIdle` 拉高 `clearCnt`，并把停止响应延后同样拍数，因此响应读数时延迟链已经排空。
+  *   全局配置：边沿/相位计数器位宽与平台实现（FPGA 为单级累加器、ASIC 为分段流水线）。ASIC 计数器的段间进位要传播 `asicDspCounterPipeline - 1`
+  *   拍，本模块把停止响应延后同样拍数；实际读数发生在慢时钟域的响应握手里（远晚于进位传播完）， 因此计数器不需要输出对齐延迟链。`clear` 只在 `sIdle` 拉高，清零同拍生效。
   */
 class PhaseMeter(using val cfg: Config) extends Module:
     val io = IO(new Bundle:
@@ -57,7 +58,7 @@ class PhaseMeter(using val cfg: Config) extends Module:
     private val request = RegNext(CdcToggleHandShake.receive(io.request))
     private val responseReady = RegNext(CdcToggleHandShake.receive(io.response.ready))
     private val responseValid = CdcToggleHandShake.send(io.response.valid)
-    private val forceStop = CdcToggleHandShake.receive(io.forceStop)
+    private val forceStop = RegNext(CdcToggleHandShake.receive(io.forceStop))
 
     import PhaseMeterStateEnum.*
     private val state = RegInit(sIdle)
@@ -75,20 +76,25 @@ class PhaseMeter(using val cfg: Config) extends Module:
         !(request && !state.isOneOf(sIdle, sMeasuring)),
         "request in a state that cannot accept it"
     )
+    private val isFPGA = cfg.platform == Platform.FPGA
     // 复位值取 true：空闲拍本来就会重新置位；给出确定初值，避免 xsim 复位后第一拍为 X
-    private val needSendResponse = RegInit(true.B)
+    private val needSendResponse = if isFPGA then RegInit(true.B) else Reg(Bool())
     when(isIdle) { needSendResponse := true.B }
     when(state === sWaitStart && pulseSig1) { responseValid.send() }
-    private val delay = cfg.platform match
-        case Platform.FPGA => 0
-        case Platform.ASIC => cfg.asicDspCounterPipeline - 1
+    // ASIC：停止响应再延后 depth - 3 拍，给计数器的段间进位传播留时间
+    // state === sWaitStop会提 1 拍延迟，doResponseValidSend会提供 1 拍延迟
+    private val delay = if isFPGA then 0 else max(cfg.asicDspCounterPipeline - 3, 0)
     private val isWaitStop = ShiftRegister(state === sWaitStop, delay)
-    when(isWaitStop && pulseSig2 && needSendResponse):
+    private val responseValidSendDelay = if isFPGA then 0 else 1
+    private val doResponseValidSend = ShiftRegister(isWaitStop && pulseSig2 && needSendResponse, responseValidSendDelay)
+    when(doResponseValidSend):
         responseValid.send()
         needSendResponse := false.B
 
     // 计数器控制脚全部寄存器化（450MHz 的关键路径）：clearCnt / pulseSig1Valid /
-    // pulseSig2Valid / phaseCntEnable 都是寄存器，直接驱动 DSP48E1 的 RSTP/CEP 控制脚。
+    // pulseSig2Valid / phaseCntEnable 都是寄存器，直接驱动计数器的控制脚——FPGA 下是
+    // DSP48E1 的 RSTP/CEP，ASIC 下 clearCnt 驱动分段计数器的异步复位端（RESET_B），
+    // 另两个是段内加数/使能。
     //
     // 置位与清零必须**用同一级延迟**（pulseSig1Valid / pulseSig2Valid）：相位计数的是
     // 「sig1 检测沿 → sig2 检测沿」之间的高速时钟周期数，两个边沿脉冲经同样的边沿检测
@@ -97,7 +103,7 @@ class PhaseMeter(using val cfg: Config) extends Module:
     private val pulseSig1Valid = RegNext(state.isOneOf(sWaitStart, sMeasuring) && pulseSig1)
     private val pulseSig2Valid = RegNext(pulseSig2)
     // 无复位值在 xsim 里是 X，在第一次测量时经 `cnt + enable` 污染计数器
-    private val phaseCntEnable = RegInit(false.B)
+    private val phaseCntEnable = if isFPGA then RegInit(false.B) else Reg(Bool())
     // forceStop 必须与 idle 同拍撤销使能：否则「sig1 之后、sig2 之前」被中止时使能会残留，
     // 下一次测量在下一个 sig2 沿之前启动，相位计数器就会从退出 idle 起提前开窗，phaseCnt 偏大。
     when(forceStop || isIdle || pulseSig2Valid) { phaseCntEnable := false.B }

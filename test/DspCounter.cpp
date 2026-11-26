@@ -14,15 +14,20 @@ import DspCounterCommon;
 namespace
 {
     using dut_t = DspCounterVerilator;
+    /// 单级累加器没有分段，整数值逐拍就是当前计数，掩码取满 32 位。
+    constexpr std::uint64_t block_mask{0xFFFF'FFFFzu};
 }  // namespace
 
 TEST_SUITE("DspCounter")
 {
     TEST_CASE("enable counts, clear dominates enable")
     {
-        // FPGA 版的计数输出是寄存器直接输出，没有额外延迟；clear 也立即生效
-        dsp_counter_test::run_enable_clear<dut_t>(0, 0);
+        // FPGA 版的计数输出是寄存器直接输出，没有额外延迟；clear 是同步清零，
+        // 在下一个上升沿生效
+        dsp_counter_test::run_enable_clear<dut_t>(0, 1, block_mask);
     }
 
-    TEST_CASE("counts past the 16-bit boundary") { dsp_counter_test::run_cross_boundary<dut_t>(0, 0); }
+    TEST_CASE("counts past the 16-bit boundary") { dsp_counter_test::run_cross_boundary<dut_t>(0, 1); }
+
+    TEST_CASE("carry keeps propagating after enable drops") { dsp_counter_test::run_carry_after_disable<dut_t>(0); }
 }

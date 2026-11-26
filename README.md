@@ -31,12 +31,12 @@ DigitalPhaseMeterTop（顶层 TopModule：显式主时钟 / 低有效异步复�
         ├── EdgeDetector ×2    请求 / 停止应答的边沿检测（Both）
         └── PhaseMeter         高速域测量核心
             ├── EdgeDetector ×2  sig1 / sig2 的边沿检测（Rising；边沿检测输出再统一打一拍）
-            └── DspCounter ×2  DSP 域计数器（FPGA 为 DSP48E1 累加器、ASIC 为分段流水线），分别累计 edgeCnt / phaseCnt（计数器主体由 clear 清零；ASIC 输出对齐链无复位，clear 在输出上晚 7 拍，PhaseMeter 的停止响应已按同样深度对齐）
+            └── DspCounter ×2  DSP 域计数器（FPGA 为 DSP48E1 累加器、ASIC 为分段流水线），分别累计 edgeCnt / phaseCnt（计数器主体由 clear 清零——FPGA 是同步清零、ASIC 接寄存器异步复位端；ASIC 的 `io.value` 直接取各段寄存器、没有输出对齐链，停止使能后等段间进位传播 `asicDspCounterPipeline - 1`（当前 15）拍再读，PhaseMeter 的停止响应按同样深度延后）
 
 （片内无存储：数据通道就是寄存器本身，见下文「PS↔PL 互联」）
 ```
 
-所有模块的计数器位宽与平台实现由 `Utils.scala` 的 `Config` 集中给出（默认闸门 28 位、边沿/相位 32 位）。`Config.platform` 选择平台：默认 `Platform.FPGA`（DSP 计数器用 DSP48E1 累加器、同步复位），`Config.asic` 为 `Platform.ASIC`（DSP 计数器改成 8 段分段流水线、异步复位）。平台由生成主类显式选择：`Emit<Name>` 生成到 `build/chisel/<Name>/`，需要 ASIC 变体的模块再加 `Emit<Name>A` 生成到 `build/chisel/<Name>A/`；同一目录里没有平台分支文件，模块名也不带 `S`/`A` 后缀。
+所有模块的计数器位宽与平台实现由 `Utils.scala` 的 `Config` 集中给出（默认闸门 28 位、边沿/相位 32 位）。`Config.platform` 选择平台：默认 `Platform.FPGA`（DSP 计数器用 DSP48E1 累加器、同步复位），`Config.asic` 为 `Platform.ASIC`（DSP 计数器改成 16 段、每段 2 位的分段流水线，异步复位）。平台由生成主类显式选择：`Emit<Name>` 生成到 `build/chisel/<Name>/`，需要 ASIC 变体的模块再加 `Emit<Name>A` 生成到 `build/chisel/<Name>A/`；同一目录里没有平台分支文件，模块名也不带 `S`/`A` 后缀。
 
 片内信号源的 MMCM（`dpm_mmcm_src`，裸 `MMCME2_ADV` 薄封装）不在 IP 内，而是 BD 里的独立单元；PS 通过 AXI4-Lite 写 MMCM 的寄存器镜像，由单独的 `dpm_src_drp` IP 搬进 DRP 口（即「方案 A」）。
 
@@ -245,6 +245,7 @@ vivado -mode batch -source vivado/impl_stability.tcl -tclargs 6  # 同策略 6 �
 ```bash
 uv run dpm-asic-flow --pdk /home/luo/skywater-pdk             # 综合 + floorplan + place + CTS + route + GDS
 uv run dpm-asic-flow --pdk /home/luo/skywater-pdk floorplan   # 也可以只跑到某个阶段
+DPM_DSP_FREQ_MHZ=300 uv run dpm-asic-flow all                 # 换目标频率（默认 450MHz）
 uv run dpm-prepare-pdk                                         # 准备 ss/tt/ff 三个 corner 的 PDK 派生文件（默认全部）
 ```
 
@@ -254,20 +255,26 @@ uv run dpm-prepare-pdk                                         # 准备 ss/tt/ff
 `build/asic/synth/filelist.f`。Yosys 前端用 `read_slang` 读这份文件（顶层
 `DigitalPhaseMeterTop`，不定义任何平台宏），综合固定使用 `ss_100C_1v60`：
 `clockgate` 从 ss liberty 自动选 ICG 做时钟门控，`dfflibmap`、`read_liberty` 与
-ABC 分域时序映射也都用 ss。ABC 按域分别映射（dspClock 域 3333ps/300MHz、
+ABC 分域时序映射也都用 ss。ABC 按域分别映射（dspClock 域 2222ps/450MHz、
 clock 域 20000ps/50MHz）；状态寄存器带 `fsm_encoding="auto"`，firtool 的
 `disallowPackedArrays` 让状态表下降成 `casez`，标准 `synth` 即可提取并重编码两个
 FSM（Yosys 为 one-hot）。OpenROAD 在 `asic/openroad/config.tcl` 同时读入 ss/tt/ff
 三套 liberty 并定义 ss/tt/ff 三个 scene（MCMM），`dpm-asic-flow synth` 会先准备三个
 corner；floorplan 的 `-utilization 60` 即 0.6，161 个 IO 按端口顺序平均约束到芯片
-四周。产物在 `build/asic/`。查看最终 GDS：
+左右两边。产物在 `build/asic/`。查看最终 GDS：
 
 ```bash
 klayout -l build/asic/openroad/dpm_asic.lyp build/asic/openroad/dpm_asic.gds
 ```
 
 图层含义、GDS 层号表与查看方法见 [`asic/README.md`](asic/README.md#查看-gds-与图层含义)；
-约束、阶段划分、实测结果与限制也在该文件。
+约束、阶段划分、实测结果与限制也在该文件。综合用 `read_slang` 层次 + 按模块边界
+分域 ABC（顶层 50MHz / PhaseMeter 450MHz），dspClock 频率由 `DPM_DSP_FREQ_MHZ`
+控制（默认 450MHz，Yosys 与 OpenROAD 同源）。默认流程就是 450MHz + PnR 调优
+（virtual CTS、GRT critical nets 20%、setup margin 1.0、gate cloning、2 次布局迭代
+resynth），实测 ss setup **+0.231ns**、hold +0.277ns、面积 **20276um^2**，DRC 与
+天线 0。450MHz 能收敛的关键是 ASIC 计数器用 16×2 位分段流水线（每段 2 位、段间进位
+寄存），0.3ns uncertainty 下不依赖 retime。详见 [`asic/README.md`](asic/README.md)。
 
 ### PS 侧固件与上位机
 
@@ -293,7 +300,7 @@ uv run python -m dpm_host gui             # PySide6 GUI
 | 离线验收演练 | `bash ps/tools/onboard_accept_sim.sh`                          | C 验证台经 pty 跑完整验收流程（80 点扫描）                         |
 | 综合实现签核 | `uv run dpm-vivado-flow` + `build/vivado` 下的时序报告         | 450MHz：WNS +0.271ns / WHS +0.019ns / 0 失败端点（稳定性需按 RTL 版本复跑） |
 | 上板验收     | `uv run python ps/tools/onboard_accept.py --port /dev/ttyUSB0` | JTAG 冷启动 + 串口链路 + 协议 + 80 点扫描                          |
-| ASIC 实现    | `uv run dpm-asic-flow`                                         | Yosys + OpenROAD sky130 HD：300MHz dspClock、ss 综合、ss/tt/ff MCMM、利用率 60%、0 DRC/天线 |
+| ASIC 实现    | `uv run dpm-asic-flow`                                         | Yosys + OpenROAD sky130 HD：450MHz dspClock（ss setup +0.231ns、hold +0.277ns）、ss 综合、ss/tt/ff MCMM、利用率 60%、0 DRC/天线 |
 
 > 上表的**综合实现签核**已于 2026-11-23 用当前 HEAD 的 RTL 重跑（单次实现，数据见
 > [`vivado/README.md`](vivado/README.md)）；**上板验收**仍是 2026-10-19 的记录。

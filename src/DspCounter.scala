@@ -15,9 +15,15 @@ import chisel3.util.*
   * DSP48E1 在 xc7z010clg400-1（-1 速度等级）上的全寄存器累加器 FMAX 是 464.25MHz （DS187 Table 66），450MHz 用掉约 97%；是否满足以 Vivado
   * 的时序分析为准——实现后 DSP 内部路径与 CEP/RSTP 控制路径都在 2.222ns 约束下检查过，余量见 vivado/README.md。
   *
-  * 实现由 `cfg.platform` 选择：FPGA 用单个 DSP48E1 累加器；ASIC 用 `cfg.asicDspCounterPipeline` 级分段流水线（段间进位寄存，输出比实际计数晚 `depth - 1`
-  * 拍）。ASIC 的输出对齐延迟链不随 `clear` 复位，因此 `clear` 在输出上也要等 `depth - 1` 拍才完全排空；排空期间各段旧值 与已清零的高段可能混合，输出不应被读取。`PhaseMeter`
-  * 的空闲清零与停止响应已按这个延迟安排，不会在排空窗口内读数。
+  * 实现由 `cfg.platform` 选择：FPGA 用单个 DSP48E1 累加器；ASIC 用 `cfg.asicDspCounterPipeline` 级分段流水线（段间进位寄存）。 ASIC 的 `io.value`
+  * 直接取各段寄存器，**没有输出对齐延迟链**：段间进位是寄存的，计数刚跨过段边界时高段要晚一拍才收到进位（每段 `bitsPerBlock = ceil(cntWidth / depth)` 位），因此输出最多要
+  * `depth - 1` 拍才稳定到最终计数值。调用方必须在撤销使能后等 `depth - 1` 拍再读（`PhaseMeter` 的停止响应按这个
+  * 延迟安排，且实际读数发生在慢时钟域的握手里，远晚于进位传播完）；连续计数、没有跨段进位时输出逐拍就是当前计数值。 ASIC 的 `clear` 走计数寄存器的异步复位端（见
+  * `implicitReset`），清零同拍生效；进位寄存器不清零，在 clear 保持期间（idle）随 段寄存器归零而自然清零。
+  *
+  * ASIC 分段流水线的段间进位是**无条件传播**的：只有 block0 的加数受 `enable` 门控，更高段直接加前一段的进位寄存器。 这样 enable
+  * 在某个进位拍之后撤销时，已经在流水线里的进位仍会继续传到高段，`depth - 1` 拍后 `io.value` 上就是冻结后的完整计数值。不要把每段都写成 `carryIn & enable`：那会在 enable
+  * 撤销时丢掉最后一拍产生的进位 （0x0F + 1 后立即停使能，输出会停在 0 而不是 16）。
   *
   * @param cntWidth
   *   计数器宽度，上限 48
@@ -30,40 +36,54 @@ class DspCounter(val cntWidth: Int = 48)(using val cfg: Config) extends Module:
         val clear = Input(Bool())
         val enable = Input(Bool())
         val value = Output(UInt(cntWidth.W)))
-    override protected def implicitReset: Reset = io.clear
+    // clear 的实现方式随平台不同：
+    //   * FPGA：DSP48E1 只有同步复位（RSTP），`io.clear` 保持同步 Bool；
+    //   * ASIC：把 clear 接到计数寄存器的**异步复位端**（sky130 `dfrtp` 的 RESET_B），
+    //     清零从「D 输入路径上的 mux」移到复位脚。450MHz 的 ss 关键路径原本是
+    //     `clearCnt → 每级计数器的清零 mux → 计数器 D`；改成异步复位后 D 路径只剩
+    //     段内加法器，清零变成复位脚上的 recovery/removal 检查。
+    // 异步复位的撤销必须与 dspClock 同步：`clearCnt` 是 `PhaseMeter` 里由同一时钟
+    // 驱动的寄存器，因此是「异步置位、同步撤销」，不需要再串一级复位同步器；STA 把清零
+    // 检查从 setup 变成复位脚上的 recovery/removal（450MHz 实测各配置均为正）。
+    override protected def implicitReset: Reset =
+        if cfg.platform == Platform.ASIC then io.clear.asAsyncReset else io.clear
 
     private val cnt = RegInit(0.U(cntWidth.W))
     private def genCounter(useDsp: Boolean) =
         if useDsp then addAttribute(cnt, """use_dsp = "yes"""")
         when(io.enable) { cnt := cnt + 1.U }
-        io.value := cnt
     private val depth = cfg.asicDspCounterPipeline
-    // 除最高块外每块的位数
+    // 每段的位数（向上取整）：32 位计数器在 depth = 8 / 16 下分别是 4 位 / 2 位一段。
+    // 段宽越小，段内加法器与进位逻辑越浅，代价是进位寄存器（FF）变多。
     private val bitsPerBlock = (cntWidth + depth - 1) / depth
     private def genPipelineCounter =
+        // retime 实验：分段流水线（段寄存器 + 进位寄存器）都标 abc_retime = "false"；
+        // synth_retime.ys 据此在 ABC 之前把这些 FF 先映射成库单元，避免 dretime 把流水线拆平。
+        // 自定义属性对不跑 retime 的交付基线没有副作用。
+        addAttribute(cnt, """abc_retime = "false"""")
         val cntBlocks = cnt.asTypeOf(Vec(depth, UInt(bitsPerBlock.W)))
-        val nextBlocks, valueBlocks = Wire(chiselTypeOf(cntBlocks))
+        val nextBlocks = Wire(chiselTypeOf(cntBlocks))
         cntBlocks
             .lazyZip(nextBlocks)
-            .lazyZip(valueBlocks)
             .lazyZip(cntBlocks.indices)
-            .foldLeft(1.U):
-                case (carryIn, (cntBlock, nextBlock, valueBlock, i)) =>
+            .foldLeft(io.enable.asUInt):
+                case (carryIn, (cntBlock, nextBlock, i)) =>
                     prefix(s"block$i"):
-                        val delay = ShiftRegister(cntBlock, depth - 1 - i)
-                        valueBlock := delay
-                        val next = cntBlock +& (carryIn & io.enable)
+                        val next = cntBlock +& carryIn
                         nextBlock := next.tail(1)
                         val carry = RegNext(next.head(1))
+                        addAttribute(carry, """abc_retime = "false"""")
                         carry
         cnt := nextBlocks.asUInt.take(cntWidth)
-        io.value := valueBlocks.asUInt.take(cntWidth)
 
     cfg.platform match
         case Platform.FPGA => genCounter(true)
         case Platform.ASIC =>
-            require(depth >= 1 && bitsPerBlock >= 2)
+            require(depth >= 1)
+            val blocks = (cntWidth + bitsPerBlock - 1) / bitsPerBlock
+            require(depth == blocks, s"流水线设定深度为$depth，实际为$blocks")
             if depth == 1 then genCounter(false) else genPipelineCounter
+    io.value := cnt
 
 object DspCounter:
     def apply(cntWidth: Int, clear: Bool, enable: Bool)(using cfg: Config): UInt =

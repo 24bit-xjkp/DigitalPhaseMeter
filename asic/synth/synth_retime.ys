@@ -1,0 +1,140 @@
+# DigitalPhaseMeterTop 的 Yosys ASIC 综合脚本（sky130 HD）
+#
+# 入口：由 `dpm-asic-flow synth` 在仓库根目录调用
+#     yosys -l build/asic/synth/yosys.log -s asic/synth/synth_retime.ys
+#
+# 关键约定：
+#   * 前端固定用 read_slang；ASIC 入口（./mill emit DigitalPhaseMeterTopA）只生成
+#     一份异步复位的 DigitalPhaseMeterTop，没有平台分支文件，因此不需要任何平台宏；
+#   * 顶层固定为 DigitalPhaseMeterTop；
+#   * 按模块边界分域：read_slang 用 --best-effort-hierarchy 保留层次，keep_hierarchy
+#     只保留 PhaseMeter 模块边界，其余层次 flatten 掉，得到顶层 + PhaseMeter 两个
+#     模块；两者分别对应 50MHz 的 clock 域和 dspClock 域，ABC 各用各的 -D；
+#   * dspClock 的目标周期由 asic/synth/abc_targets_retime.tcl 用 Yosys 内置 Tcl 从
+#     环境变量 DPM_DSP_FREQ_MHZ（默认 450MHz）读出并换算成 ps；
+#   * clockgate 用 -liberty 自动从 sky130 库里选 ICG（当前为
+#     sky130_fd_sc_hd__dlclkp_1），把同 clock / 同 enable 的 FF 组换成
+#     门控时钟 + 无 CE 的 FF；-min_net_size 2 让单 FF 的 enable 组（只有一个
+#     存储位的寄存器）走 D mux 而不是插一个只带 1 个 FF 的 ICG；
+#   * retime 分支：异步复位/置位 FF 与 DspCounter 流水线预映射，CE 交给 abc -dff；
+#   * 常量在最后映射成 conb_1，避免 OpenROAD 里出现不可布线的 one_/zero_ 常量网；
+#   * 网表可读性：展平时用 '_' 代替层次分隔符 '.'，再按被驱动的公共信号给单元
+#     命名；write_verilog 用 -attr2comment 保留 hdlname/src 注释。RTL 里本来
+#     没有名字的私有组合节点仍会得到 _NNNN_，这是 ABC/techmap 的中间节点。
+
+# read_slang 的 -F 读的是 `dpm-asic-flow synth` 从
+# build/chisel/DigitalPhaseMeterTopA/filelist.f 过滤出来的文件表（去掉
+# verification/ 下的断言）。-F 让表里的相对路径基于 filelist.f 所在目录解析。
+# 默认的 read_slang 会把层次展平成单个模块，这里保留层次，才能按模块边界分域。
+read_slang --std 1800-2023 --single-unit --best-effort-hierarchy -F build/asic/synth/filelist.f
+
+# 只保留 PhaseMeter 的模块边界：keep_hierarchy 给模块加属性，flatten 时该模块不
+# 展开，但它的子模块（DspCounter/EdgeDetector）照常压进 PhaseMeter；其余模块
+# （Controller/ControlRegs/AXI）全部压进顶层。这样设计只剩两个模块。
+select -assert-any PhaseMeter$*
+keep_hierarchy PhaseMeter$*
+flatten -noscopeinfo -separator _
+select -assert-mod-count 2 *
+select -assert-any PhaseMeter$*
+
+# 通用综合：只做到 word-level 网表，组合逻辑留给 ABC 按 liberty 映射。
+#
+# RTL 里的 state 寄存器带 fsm_encoding="auto"，firtool 又用
+# disallowPackedArrays 把状态表下降成 `casez`（$mux/$pmux，而不是 $bmux），
+# 因此直接使用标准 `synth` 即可：它的 coarse 阶段在 `opt -nodffe -nosdff`
+# 之后运行 `fsm`，会按属性提取并重编码两个状态机（当前为 one-hot）。
+# 不加 -flatten：PhaseMeter 的边界要留到 ABC 之后。
+synth -top DigitalPhaseMeterTop -noabc
+
+# synth 之后当前选择只剩顶层；恢复全选，下面的 pass 要作用到两个模块。
+select -clear
+
+# 先把 mux 反馈提取成带 CE 的 FF，clockgate 才能按 enable 分组合并
+opt_dff
+
+# 自动时钟门控（ASIC 低功耗）：ICG 类型从 liberty 的
+# clock_gating_integrated_cell 属性中选择，不需要手写 -pos/端口名。
+# -min_net_size 2：`controlRegs.irqEnable` 这种只有 1 个存储位的 enable 组
+# 不插 ICG（单 FF 的 ICG + DFrtp 面积大于 D mux + DFrtp，门控收益也可忽略），
+# 由后面的 dfflibmap/dfflegalize 把 CE 折进 D 路径。
+# 工艺角固定用 ss_100C_1v60（慢 corner，最紧时序），由 `dpm-asic-flow synth` 调
+# `dpm-prepare-pdk --corner ss_100C_1v60` 生成对应的 _synth.lib。
+clockgate -liberty build/asic/sky130_fd_sc_hd__ss_100C_1v60_synth.lib -min_net_size 2
+
+# ---- retime 分支：预映射异步复位/置位 FF，CE 交给 ABC ----
+#
+# 实测：把异步复位/置位 FF 交给 abc -dff 会破坏异步复位链。full-ABC 版本把
+# 4 级异步置位复位同步器整条优化掉，_reset_synchronizer_reset 被接成常量 0；
+# 等价性仿真在 resetn=0 时直接给出 base=1 / ret=0 的反例。因此异步复位/置位 FF
+# 必须先映射成库单元；
+# 其余 CE 由 abc -dff 处理（Yosys 0.71+128 重集成时保留 CE）；同步复位先用
+# dffunmap -srst-only 摊成输入 mux，因为 sky130 没有同步复位单元。
+select -clear
+# 先确认流水线标记还在：30 个段间进位 + 64 个段寄存器 = 94。
+select a:abc_retime=false %x:1 t:$_DFF_* t:$_DFFE_* %i
+select -assert-min 94 a:abc_retime=false %x:1 t:$_DFF_* t:$_DFFE_* %i
+select -clear
+# 1) 同步复位摊成输入 mux；CE 保留给 ABC。
+dffunmap -srst-only
+select -clear
+# 2) 异步复位/置位 FF（可能带 CE）先摊平 CE 再映射成库单元，ABC 不能碰它们。
+select t:$_DFF_*N0* t:$_DFF_*N1* t:$_DFF_*P0* t:$_DFF_*P1*
+dffunmap -ce-only
+dfflibmap -liberty build/asic/sky130_fd_sc_hd__ss_100C_1v60_synth.lib
+select -clear
+# 3) 剩下的 abc_retime=false 是无复位/无使能的段间进位寄存器（30 个）；段寄存器
+#    已经在上一步随异步复位 FF 一起映射。
+select a:abc_retime=false %x:1 t:$_DFF_* %i
+select -assert-min 30 a:abc_retime=false %x:1 t:$_DFF_* %i
+dfflibmap -liberty build/asic/sky130_fd_sc_hd__ss_100C_1v60_synth.lib
+select -clear
+
+# abc 需要知道库单元的端口方向；把 liberty 作为黑盒模块读入。黑盒模块不会
+# 出现在最终 write_verilog 网表里，也不影响 OpenROAD。
+read_liberty -lib build/asic/sky130_fd_sc_hd__ss_100C_1v60_synth.lib
+
+# 分模块跑 ABC。Yosys 的 abc 只有一个全局 -D：整片都按 dspClock 的周期映射会
+# 把 50MHz 的 clock 域也收紧；整片都按 clock 的周期映射又会放松测量通路。
+# 这里对顶层（clock）和 PhaseMeter（dspClock）分别指定 -D。目标周期由
+# abc_targets.tcl 通过 Yosys 内置 Tcl 直接读 DPM_DSP_FREQ_MHZ，与 OpenROAD SDC
+# 使用同一个 dspClock 周期。
+tcl asic/synth/abc_targets_retime.tcl
+
+# ABC 之后恢复全选，后面的 opt/flatten 要处理整片设计。
+select -clear
+
+# ABC 重集成后的 CE 单元和预映射的库单元在这里统一映射到 sky130，
+# 兜底处理 ABC 没有直接映射的内部 FF。
+dfflibmap -liberty build/asic/sky130_fd_sc_hd__ss_100C_1v60_synth.lib
+
+opt -fast
+setundef -zero
+opt_clean
+
+# 合并回单层网表，供 OpenROAD 读取。层次名用 '_' 拼接（而不是默认的 '.'），
+# 展平后的信号名就是普通 Verilog 标识符（如 controlRegs_sigEnable、
+# controller_phaseMeter_...），不需要反斜杠转义，也便于和 RTL 实例/信号名对照。
+setattr -mod -unset keep_hierarchy PhaseMeter$*
+flatten -noscopeinfo -separator _
+
+# 常量接到 conb_1（HI/LO 两个输出），供 OpenROAD repair_tie_fanout 拆分扇出
+hilomap -singleton -hicell sky130_fd_sc_hd__conb_1 HI -locell sky130_fd_sc_hd__conb_1 LO
+opt_clean
+
+# 网表可读性：驱动公共信号/端口的单元按被驱动信号命名（例如
+# axiLiteSlave_awHeld_sky130_fd_sc_hd__dfrtp_1），再把仍带转义字符的名字规范化。
+# 这两步只改名字，不改变逻辑；RTL 里本来没有名字的私有组合节点仍保留 _NNNN_。
+rename -wire
+rename -unescape
+
+# 自检：确认时钟门控确实发生、且没有残留的内部 FF/组合单元
+select -assert-any t:sky130_fd_sc_hd__dlclkp_1
+select -assert-none t:$dff t:$dffe t:$adff t:$adffe t:$aldff t:$sdff
+select -assert-none t:$_*
+
+# -attr2comment 把 hdlname/src 等属性写成注释：展平后的公共信号可据此直接定位回
+# build/chisel/DigitalPhaseMeterTopA/ 下对应的 SV 文件和行号。-renameprefix u 给
+# 仍未命名的单元加 u_ 前缀（u_1087_），和私有线网名 _1087_ 区分开。
+write_verilog -attr2comment -nohex -nodec -renameprefix u build/asic/synth/dpm_asic_synth.v
+
+stat

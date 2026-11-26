@@ -1,16 +1,27 @@
 # DigitalPhaseMeterTop ASIC（sky130 HD）时序约束
 #
 # 时钟说明：RTL 不规定频率。FPGA 版本里 dspClock 由 PL 内 MMCM 从 50MHz 倍频到
-# 450MHz；ASIC 基线把测量通路降到 300MHz（3.333ns），两个时钟分别为：
-#   * clock    : 50MHz（20ns），对应 PS 的 FCLK_CLK0；
-#   * dspClock : 300MHz（3.333ns），测量通路的 ASIC 基线频率。
-# 如果要评估更高频率，只改下面的 period，其余流程不用动（synth.ys 里
-# --clock dspClock=3333 需同步修改）。
+# 450MHz；ASIC 默认与 FPGA 同频（450MHz / 2.222ns），两个时钟分别为：
+#   * clock    : 50MHz（20ns），对应 PS 的 FCLK_CLK0，固定不变；
+#   * dspClock : 测量通路的 ASIC 频率，由环境变量 DPM_DSP_FREQ_MHZ 决定
+#                （默认 450MHz）。`dpm-asic-flow` 用同一个变量、同一套取整规则
+#                算出 Yosys ABC 的 -D（整数 ps），所以综合与 OpenROAD 始终一致。
+# 要评估其他频率只 export 这个变量即可，不需要改本文件。
 
 set_units -time ns -capacitance pF -resistance kOhm
 
+set DSP_FREQ_MHZ 450
+if {[info exists ::env(DPM_DSP_FREQ_MHZ)] && [string trim $::env(DPM_DSP_FREQ_MHZ)] ne ""} {
+    set DSP_FREQ_MHZ [string trim $::env(DPM_DSP_FREQ_MHZ)]
+}
+if {![string is double -strict $DSP_FREQ_MHZ] || $DSP_FREQ_MHZ <= 0.0} {
+    error "DPM_DSP_FREQ_MHZ 必须是正数（单位 MHz），收到 $DSP_FREQ_MHZ"
+}
+# 周期按整数 ps 取整，与 `dpm-asic-flow` 生成给 ABC 的 -D 数值一致
+set DSP_PERIOD_PS [expr {round(1000000.0 / $DSP_FREQ_MHZ)}]
+
 create_clock -name clock -period 20.0 [get_ports clock]
-create_clock -name dspClock -period 3.333 [get_ports dspClock]
+create_clock -name dspClock -period [expr {$DSP_PERIOD_PS / 1000.0}] [get_ports dspClock]
 
 set_clock_uncertainty -setup 0.3 [get_clocks {clock dspClock}]
 set_clock_uncertainty -hold 0.1 [get_clocks {clock dspClock}]

@@ -11,8 +11,8 @@ module;
 // 具体测试（test/PhaseMeter.cpp / test/PhaseMeterA.cpp）只提供 DUT 类型。
 //
 // 两个实现的差别只在 response 的发送时机：ASIC 的响应比 FPGA 版晚
-// `asicDspCounterPipeline - 1 = 7` 拍（与流水线计数器的输出延迟对齐），现有用例的观测窗口
-// （400 / 2000 个高速周期）远大于这 7 拍，因此同一套断言仍然成立。
+// `asicDspCounterPipeline - 1` 拍（给分段计数器的段间进位传播留时间），现有用例的观测窗口
+// （400 / 2000 个高速周期）远大于这段延迟，因此同一套断言仍然成立。
 //
 // doctest 断言宏在这里展开（模块内部使用），因此公共模块的消费者仍需 import
 // verilator_utils.full 以获得 doctest 实体。
@@ -35,7 +35,7 @@ export namespace phase_meter_test
     constexpr inline auto sig_phase{200_ns};
     /// 停止响应的观测窗口：2000 个高速周期（8us）。一次停止握手只有几个周期，
     /// 而一个 sig2 周期是 400ns；历史上的缺陷会在窗口内对每个 sig2 上升沿翻转一次
-    /// （窗口内约 20 次）。该窗口对 ASIC 的 7 拍额外延迟同样足够。
+    /// （窗口内约 20 次）。该窗口对 ASIC 的 `asicDspCounterPipeline - 1` 拍延迟同样足够。
     constexpr inline std::uint64_t observe_cycles{2000zu};
     /// 每轮完整握手的轮数：第二轮验证「每次启动都会重新武装发送逻辑」
     constexpr inline std::size_t rounds{2zu};
@@ -120,7 +120,7 @@ export namespace phase_meter_test
             port.io_request = 1;
 
             // 启动响应只应翻转一次（启动握手本身不是本次缺陷所在，这里顺带守住）。
-            // ASIC 版的响应晚 7 拍，但 400 个周期的窗口足够覆盖。
+            // ASIC 版的响应晚 `asicDspCounterPipeline - 1` 拍，但 400 个周期的窗口足够覆盖。
             result.start_toggles[round] = co_await count_response_toggles(port, 400zu);
             CHECK_EQ(result.start_toggles[round], 1zu);
 
@@ -149,8 +149,9 @@ export namespace phase_meter_test
 
     /// forceStop 中止测量：计数器被清零、不产生停止应答，并且可以从 idle 重新发起测量。
     ///
-    /// @param clear_latency clear 在计数器输出上完全排空所需的延迟拍数：FPGA 为 0，ASIC 为
-    ///                      `asicDspCounterPipeline - 1`（输出对齐链不随 clear 复位）。
+    /// @param clear_latency clear 在计数器输出上完全排空所需的延迟拍数：计数器没有输出对齐
+    ///                      延迟链，ASIC 又是异步清零，因此两个实现都传 0；参数保留是为了
+    ///                      给这类平台差异留出可调余量。
     [[nodiscard]] task<void> force_stop(port_t& port, std::uint64_t clear_latency)
     {
         port.io_request = 0;
@@ -166,15 +167,15 @@ export namespace phase_meter_test
         port.io_response_ready = 1;
 
         // 让计数器累计一段时间：相位差 200ns = 50 个高速周期，两个计数器都应非零。
-        // ASIC 版计数器输出有 7 拍延迟，200 拍后仍远大于非零门槛。
+        // ASIC 版的停止响应晚 `asicDspCounterPipeline - 1` 拍，200 拍后仍远大于非零门槛。
         co_await wait_cycles(port, 200zu);
         CHECK_GT(static_cast<std::uint64_t>(port.io_response_bits_edge_cnt), 0zu);
         CHECK_GT(static_cast<std::uint64_t>(port.io_response_bits_phase_cnt), 0zu);
 
         // 强制停止：接收端看到 forceStop 电平翻转后回到 idle，计数器被清零。
         // 与停止请求不同，这里不依赖被测信号的上升沿，也不产生停止应答。
-        // 清零经 1 拍 clearCnt + ASIC 输出流水线；再留出 forceStop 跨域同步与
-        // clear_latency 排空时间，避免把仍显示旧值的输出误判为清零失败。
+        // 清零经 1 拍 clearCnt（ASIC 是异步复位，清零同拍生效）；再留出 forceStop 跨域
+        // 同步与 clear_latency 排空时间，避免把仍显示旧值的输出误判为清零失败。
         port.io_force_stop = 1;
         co_await wait_cycles(port, clear_latency + 8zu);
         CHECK_EQ(static_cast<std::uint64_t>(port.io_response_bits_edge_cnt), 0zu);

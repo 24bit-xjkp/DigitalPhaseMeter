@@ -1,14 +1,19 @@
-# 阶段 4：布线前电气规则修复（在 CTS 数据库上做一次 GRT 寄生评估）
+# 阶段 4：全局布线、GRT 寄生下的修复与预布线天线修复
 #
-# 布局阶段的 repair_design 用的是 placement 寄生估计，长线在布线后可能才暴露
-# max transition/cap 违例。这里先做一次全局布线拿到 GRT 寄生，修完电气规则后
-# 保存 04_route_opt.odb；下一阶段从该数据库**重新**全局布线，避免在同一个
-# OpenROAD 进程里复用上一次的 route guide 导致新插入单元对应的 pin 没有布线。
+# 本阶段对应 ORFS 的 global_route.tcl：full global_route 后用 GRT 寄生做
+# repair_design / repair_timing，每次修复后用 -start_incremental /
+# -end_incremental 把改动 net 的 guide 补齐，再做预布线天线修复，写出带完整
+# guide 的数据库。05 阶段因此可以直接详细布线（ORFS 的 5_1_grt.odb ->
+# 5_2_route.odb 切分），不需要再次全局布线。
 #
-# 拆分这两个阶段是为了让 05_route.tcl 的 global_route 在干净状态下运行：
-# 同一进程里对已经 global_route 过的设计再次调用 global_route 时，OpenROAD 会
-# 走增量路径，repair_design/repair_timing 新建的 pin 可能拿不到 guide，
-# 后续 estimate_parasitics -global_routing 会报大量 EST-0026。
+# 不用“修完再全量 global_route”：同一进程里已经 global_route 过的设计再次
+# 布线会走增量路径，repair_design/repair_timing 新建的 pin 可能拿不到 guide，
+# 后续 estimate_parasitics -global_routing 会报大量 EST-0026。显式的
+# -start_incremental/-end_incremental 只重布 repair 改动过的 net，guide 完整。
+#
+# 预布线天线修复必须完成在本阶段：05 从数据库重新读入时 GRT 的运行时状态
+# （NDR 关闭、拥塞图）不会恢复，在 05 里直接 repair_antennas 会因残余拥塞报
+# GRT-0232。
 
 source [file join [file dirname [info script]] config.tcl]
 
@@ -19,17 +24,36 @@ set_propagated_clock [all_clocks]
 set_sky130_wire_rc
 set_sky130_routing_layers
 
-log_stage "全局布线（用于 GRT 寄生评估）"
+log_stage "全局布线（critical_nets $GRT_CRITICAL_NETS%）"
 pin_access
-global_route -guide_file $PREP_GUIDE -congestion_iterations 100
+prepare_timing_driven_grt
+global_route {*}[global_route_options $PREP_GUIDE]
 estimate_parasitics -global_routing
 
-log_stage "GRT 寄生下的电气规则 / 时序修复"
+log_stage "GRT 寄生下的电气规则修复"
 repair_design -slew_margin $SLEW_MARGIN -cap_margin $CAP_MARGIN
-repair_timing -skip_gate_cloning
+# repair_design 可能插入/改动单元，只重布这些 net，保证新 pin 有 guide
+global_route -start_incremental
 detailed_placement
+global_route -end_incremental
+estimate_parasitics -global_routing
 
-report_stage "route opt"
+log_stage "GRT 寄生下的时序修复"
+repair_timing {*}[repair_timing_options]
+global_route -start_incremental
+detailed_placement
+check_placement -verbose
+global_route -end_incremental
+estimate_parasitics -global_routing
+
+log_stage "布线前天线修复"
+repair_antennas $DIODE_CELL -iterations 5
+puts "布线前天线违规数：[check_antennas]"
+
+# 天线修复可能新增二极管/jumper，最后统一写出与数据库一致的 guide
+write_guides $PREP_GUIDE
+
+report_stage "global route"
 report_mcmm_timing
 report_check_types -max_slew -max_capacitance -max_fanout -violators -digits 3
 

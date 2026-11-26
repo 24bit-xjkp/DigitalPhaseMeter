@@ -17,7 +17,7 @@ enum Platform { case FPGA, ASIC }
   * @param platform
   *   平台类型
   * @param asicDspCounterPipeline
-  *   ASIC下DSP计数器流水线级数（32 位计数器按此级数拆段，段间进位寄存；输出比实际计数晚 级数-1 拍）
+  *   ASIC下DSP计数器流水线级数（32 位计数器按此级数拆段，每段 `ceil(32 / 级数)` 位，段间进位寄存；撤销使能后输出要等 级数-1 拍才稳定到最终计数值）
   * @param gateCntWidth
   *   闸门计数器宽度（`Controller`）
   * @param edgeCntWidth
@@ -27,7 +27,7 @@ enum Platform { case FPGA, ASIC }
   */
 case class Config(
     val platform: Platform = Platform.FPGA,
-    val asicDspCounterPipeline: Int = 8,
+    val asicDspCounterPipeline: Int = 16,
     val gateCntWidth: Int = 28,
     val edgeCntWidth: Int = 32,
     val phaseCntWidth: Int = 32

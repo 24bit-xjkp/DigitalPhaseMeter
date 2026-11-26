@@ -20,12 +20,11 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from .paths import CORNERS, DEFAULT_PDK, FlowError, RepoPaths, find_repo_root
+from .paths import CORNERS, DEFAULT_PDK, RepoPaths, find_repo_root
 
 # sky130 HD 里需要补天线属性的单元。
 DIODE = "sky130_fd_sc_hd__diode_2"
@@ -71,7 +70,7 @@ def macro_block(path: Path) -> tuple[str, str]:
         out.append(line)
         if line.strip() == f"END {name}":
             return name, "\n".join(out) + "\n"
-    raise FlowError(f"{path} 里没有完整的 MACRO 块")
+    assert False, f"{path} 里没有完整的 MACRO 块"
 
 
 def filter_synth_liberty(src: Path, dst: Path) -> int:
@@ -108,8 +107,7 @@ def _corner_files(pdk: Path, corner: str) -> tuple[Path, Path, Path]:
     timing_lib = lib_dir / "timing" / f"sky130_fd_sc_hd__{corner}.lib"
     cell_dir = lib_dir / "cells"
     for path in (tech_lef, timing_lib, cell_dir):
-        if not path.exists():
-            raise FlowError(f"PDK 文件不存在：{path}（用 --pdk 或 DPM_PDK 指定 skywater-pdk 根目录）")
+        assert path.exists(), f"PDK 文件不存在：{path}（用 --pdk 或 DPM_PDK 指定 skywater-pdk 根目录）"
     return tech_lef, timing_lib, cell_dir
 
 
@@ -135,8 +133,7 @@ def prepare(
     removed = filter_synth_liberty(timing_lib, synth_lib)
 
     cell_lefs = sorted(path for path in cell_dir.glob("*/*.lef") if not path.name.endswith(".magic.lef"))
-    if not cell_lefs:
-        raise FlowError(f"{cell_dir} 下没有单元 LEF")
+    assert cell_lefs, f"{cell_dir} 下没有单元 LEF"
 
     blocks: list[str] = []
     patched_diode = False
@@ -152,8 +149,7 @@ def prepare(
             patched_diode = "ANTENNADIFFAREA" in block
         blocks.append(block)
 
-    if not patched_diode:
-        raise FlowError(f"合并后的 LEF 里没有找到天线单元 {DIODE}")
+    assert patched_diode, f"合并后的 LEF 里没有找到天线单元 {DIODE}"
 
     merged = build_dir / "sky130_fd_sc_hd_cells.lef"
     with merged.open("w") as stream:
@@ -199,9 +195,11 @@ def default_corners() -> list[str]:
 
 def build_parser() -> argparse.ArgumentParser:
     corners = default_corners()
+    pdk = Path(os.environ.get("DPM_PDK", "").strip() or DEFAULT_PDK).expanduser()
     parser = argparse.ArgumentParser(
         prog="dpm-prepare-pdk",
         description="准备 sky130 HD ASIC 流程使用的 PDK 派生文件",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
         "--corner",
@@ -209,17 +207,13 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         metavar="CORNER",
         default=corners,
-        help="要准备的 timing liberty corner，可给多个；默认 " + " / ".join(corners) + "（DPM_CORNER 可覆盖，空格或逗号分隔）",
+        help="要准备的 timing liberty corner，可给多个（DPM_CORNER 可覆盖，空格或逗号分隔）",
     )
-    parser.add_argument("--pdk", type=Path, help="skywater-pdk 根目录（默认 DPM_PDK 或 ~/skywater-pdk）")
+    parser.add_argument("--pdk", type=Path, default=pdk, help="skywater-pdk 根目录")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    try:
-        prepare_many(args.corners, pdk=args.pdk)
-    except FlowError as error:
-        print(f"[prepare_pdk] 错误：{error}", file=sys.stderr)
-        return 1
+    prepare_many(args.corners, pdk=args.pdk)
     return 0

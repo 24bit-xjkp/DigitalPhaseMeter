@@ -15,10 +15,6 @@ CORNERS = ("ss_100C_1v60", "tt_025C_1v80", "ff_100C_1v95")
 STAGES = ("all", "synth", "floorplan", "place", "cts", "route-opt", "route", "gds")
 
 
-class FlowError(RuntimeError):
-    """流程可预期错误：打印后以非零码退出，不打印 traceback。"""
-
-
 def _is_repo_root(candidate: Path) -> bool:
     return (candidate / "xmake.lua").is_file() and (candidate / "asic" / "synth" / "synth.ys").is_file()
 
@@ -32,8 +28,7 @@ def find_repo_root(explicit: Path | None = None) -> Path:
 
     if explicit is not None:
         root = explicit.expanduser().resolve()
-        if not _is_repo_root(root):
-            raise FlowError(f"--repo-root 指向的目录不像本仓库：{root}")
+        assert _is_repo_root(root), f"--repo-root 指向的目录不像本仓库：{root}"
         return root
 
     cwd = Path.cwd().resolve()
@@ -45,7 +40,7 @@ def find_repo_root(explicit: Path | None = None) -> Path:
         if _is_repo_root(candidate):
             return candidate
 
-    raise FlowError("找不到仓库根目录：请在仓库内运行，或显式给出 --repo-root <仓库根>。")
+    assert False, "找不到仓库根目录：请在仓库内运行，或显式给出 --repo-root <仓库根>。"
 
 
 @dataclass(frozen=True)
@@ -81,6 +76,11 @@ class RepoPaths:
     @property
     def openroad_dir(self) -> Path:
         return self.build_dir / "openroad"
+
+    @property
+    def final_netlist(self) -> Path:
+        """布线后写出的门级网表（已去掉 filler/tapcell）。"""
+        return self.openroad_dir / "final.v"
 
     @property
     def rtl_dir(self) -> Path:

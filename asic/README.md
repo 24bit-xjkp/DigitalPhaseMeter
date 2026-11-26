@@ -2,9 +2,13 @@
 
 本目录把 Chisel 显式生成的 ASIC 变体 `DigitalPhaseMeterTopA` 从 SystemVerilog 做到
 sky130 HD 的 **routed DEF / ODB**，并可选用 KLayout 合并出 GDS。它是与 FPGA（Vivado）
-流程并列的一条独立实现路径，不改动 `src/` 的 RTL。当前交付基线为 **dspClock 300MHz、
-clock 50MHz**，综合固定使用 `ss_100C_1v60`（时序感知），OpenROAD 用 ss/tt/ff 三个
-corner 做 MCMM 时序检查。
+流程并列的一条独立实现路径，不改动 `src/` 的 RTL。
+
+当前交付基线为 **dspClock 450MHz、clock 50MHz**，与 FPGA 侧的测量域同频。综合固定
+使用 `ss_100C_1v60`（时序感知），OpenROAD 用 ss/tt/ff 三个 corner 做 MCMM 时序检查。
+默认开启 450MHz 收敛所用的 PnR 调优（虚拟 CTS、GRT critical nets、`repair_setup_margin
+1.0`、gate cloning、2 次布局迭代 resynth）。当前实现结果为 ss setup **+0.231ns**、
+hold **+0.277ns**、面积 **20276um²**、DRC 与天线 0（详见「结果」）。
 
 ## 快速开始
 
@@ -16,12 +20,19 @@ uv sync
 
 uv run dpm-asic-flow                 # ss 综合 + floorplan + place + CTS + MCMM route + GDS
 uv run dpm-asic-flow synth           # 只跑到 ASIC 综合网表（会先执行 ./mill emit DigitalPhaseMeterTopA）
-uv run dpm-asic-flow floorplan       # 从综合网表开始，floorplan + 四边 IO + tapcell + PDN
+uv run dpm-asic-flow floorplan       # 从综合网表开始，floorplan + 左右两边 IO + tapcell + PDN
 uv run dpm-asic-flow place
 uv run dpm-asic-flow cts
-uv run dpm-asic-flow route-opt       # 只做布线前电气规则修复（04_route_opt.odb）
-uv run dpm-asic-flow route           # 布线前修复 + 布线，输出 final.def / final.odb
+uv run dpm-asic-flow route-opt       # 全局布线 + GRT 寄生修复 + 预布线天线修复（04_route_opt.odb）
+uv run dpm-asic-flow route           # 详细布线 + 填充，输出 final.def / final.odb / final.v
 uv run dpm-asic-flow gds             # final.def + PDK 单元 GDS -> dpm_asic.gds
+
+# 单独关闭某项调优（例如虚拟 CTS 与布局迭代 resynth）
+uv run dpm-asic-flow all --no-virtual-cts --place-resynth-iters 0
+
+# 换目标频率：dspClock 频率由 DPM_DSP_FREQ_MHZ 控制（单位 MHz，默认 450），
+# 综合的 ABC 目标和 OpenROAD 的 SDC 都读同一个变量
+DPM_DSP_FREQ_MHZ=300 uv run dpm-asic-flow all
 
 uv run dpm-prepare-pdk                # 准备默认的全部 corner（ss/tt/ff）
 uv run dpm-prepare-pdk --corner ss_100C_1v60   # 也可以只准备指定的一个或多个 corner
@@ -54,21 +65,28 @@ uv run dpm-asic-flow --pdk /path/to/skywater-pdk
 `tt_025C_1v80` / `ff_100C_1v95`）；`DPM_CORNER`（空格或逗号分隔）可覆盖这个默认列表。
 
 评估/调参时用 `--utilization`（floorplan 利用率百分比，默认 60）、
-`--place-density`（默认 0.60）、`--sdc`（替换 OpenROAD 用的默认 SDC）。ABC 的 `-D`
-按域写在 `synth.ys` 的 `--clock` 参数里，`--sdc` 只影响 OpenROAD；改频率必须同时改
-SDC、`synth.ys` 的 `--clock` 与 `partition.py` 的调用参数。这些参数会转成
-`DPM_UTILIZATION` / `DPM_PLACE_DENSITY` / `DPM_SDC`，直接在环境里设置也仍然有效。
+`--place-density`（默认 0.60）、`--sdc`（替换 OpenROAD 用的默认 SDC）。dspClock
+的目标频率由环境变量 `DPM_DSP_FREQ_MHZ` 决定（MHz，默认 450）：`synth` 用它生成
+Yosys 的分模块 ABC 目标，OpenROAD 的 SDC 也读同一个变量，两边用同一套 ps 取整规则
+（450MHz -> 2222ps / 2.222ns）。只跑 OpenROAD 阶段时要 export 与综合时相同的值。
+`--utilization` / `--place-density` / `--sdc` 会转成 `DPM_UTILIZATION` /
+`DPM_PLACE_DENSITY` / `DPM_SDC`，直接在环境里设置也仍然有效。IO 摆放的边由
+`DPM_IO_SIDES` 控制（默认 `left right`；例如 `DPM_IO_SIDES="top bottom"`），
+`config.tcl` 与 `check_pins.py` 都读它，两者必须一致。
+PnR 调优与实验开关见下文「PnR 调优与实验开关」，它们同样转成 `DPM_*`；优先级是
+显式命令行参数 > 环境变量 > 内置默认值。
 
-依赖：Yosys（带 `read_slang` 前端与 `clockgate` pass，本项目在 0.71 上验证）、OpenROAD
-（本项目在 26Q4 上验证）、Python 3.12+（流程入口，由 uv 管理）、Mill/JDK（生成 SV）。
+依赖：Yosys（带 `read_slang` 前端与 `clockgate` pass，本项目在 0.71+128 /
+git 8759daead 上验证）、OpenROAD（本项目在 26Q4-2869-g9a6ae2e63d 上验证）、
+Python 3.12+（流程入口，由 uv 管理）、Mill/JDK（生成 SV）。
 KLayout 的 Python 包（`klayout.db`）只用于可选的 GDS/LYP 导出。
 
 ## 测试与格式
 
 ```bash
 uv run pytest asic/flow/tests -v              # 路径、PDK 派生逻辑与参数解析（不启动 Yosys/OpenROAD）
-uv run black --check asic/flow
-uv run isort --check-only asic/flow
+uv run black --check asic/flow asic/openroad
+uv run isort --check-only asic/flow asic/openroad
 ```
 
 单元测试用临时目录里的假 PDK 覆盖 `dpm-prepare-pdk` 的符号链接、`lpflow_*` 过滤、
@@ -86,22 +104,24 @@ asic/
 │       ├── prepare_pdk.py     # 各 corner liberty、合并 PDK LEF、补天线二极管属性
 │       └── paths.py           # 仓库根识别、build/asic 目录与阶段列表
 ├── synth/
-│   ├── synth.ys               # Yosys：read_slang + ss clockgate + 分域 ABC 时序映射
-│   ├── partition.py           # 按 clock 域拆分组合逻辑，生成分域 abc 脚本
+│   ├── synth.ys               # Yosys：read_slang + ss clockgate + 按模块边界分域 ABC
+│   ├── abc_targets.tcl        # Yosys 内置 Tcl：读 DPM_DSP_FREQ_MHZ，算顶层/PhaseMeter 的 -D
 │   ├── abc.constr             # ABC 时序约束（输入驱动 / 输出负载）
+│   ├── synth_retime.ys        # 可选实验入口：ABC 跨寄存器 retime（默认不用）
+│   ├── abc_targets_retime.tcl # 与 synth_retime.ys 配套的 ABC 目标
 │   └── dpm_asic.sdc           # 时钟、IO delay、异步时钟组与 false path
 └── openroad/
-    ├── config.tcl             # 公共路径、ss/tt/ff MCMM scene、四边 IO 摆放 proc
+    ├── config.tcl             # 公共路径、ss/tt/ff MCMM scene、按 IO_SIDES 摆 IO 的 proc
     ├── tracks.tcl             # sky130 HD 轨道
     ├── rc.tcl                 # 层 RC 估计
     ├── pdn.tcl                # 标准单元 PDN
-    ├── 01_floorplan.tcl       # 利用率 60%、四边 IO、tapcell、PDN
-    ├── 02_place.tcl           # 全局布局、修复、详细布局
+    ├── 01_floorplan.tcl       # 利用率 60%、左右两边 IO、tapcell、PDN
+    ├── 02_place.tcl           # 全局布局、修复、详细布局、可选迭代 resynth
     ├── 03_cts.tcl             # 时钟树、CTS 后修复
-    ├── 04_route_opt.tcl       # GRT 寄生下的电气规则修复，保存 04_route_opt.odb
-    ├── 05_route.tcl           # 全新全局布线、天线修复、详细布线、填充、MCMM 报告
+    ├── 04_route_opt.tcl       # 全局布线、GRT 寄生修复、预布线天线修复，保存带 guide 的 04_route_opt.odb
+    ├── 05_route.tcl           # 详细布线、布线后天线修复、填充、MCMM 报告、写 final.v（不再全局布线）
     ├── 06_gds.py              # KLayout DEF + GDS 合并（含 LEF→GDS 层映射与 .lyp 生成）
-    └── check_pins.py          # 检查 IO 是否真的分布在四边
+    └── check_pins.py          # 检查 IO 是否落在 IO_SIDES 指定的边
 ```
 
 运行产物在 `build/asic/`（已被 `.gitignore` 忽略），ASIC SV 输入在
@@ -110,73 +130,118 @@ asic/
 | 文件 | 内容 |
 | ---- | ---- |
 | `build/chisel/DigitalPhaseMeterTopA/filelist.f` | `./mill emit DigitalPhaseMeterTopA` 的 ASIC filelist（本流程的输入） |
-| `build/asic/synth/filelist.f` | 去掉 `verification/` 并改成绝对路径后的综合 filelist |
+| `build/asic/synth/filelist.f` | 去掉 `verification/`、路径相对 `filelist.f` 所在目录的综合 filelist（`read_slang -F` 读取） |
 | `build/asic/synth/dpm_asic_synth.v` | 映射到 sky130 标准单元的综合网表 |
 | `build/asic/synth/yosys.log` | Yosys 完整日志（clockgate 选择、单元统计） |
-| `build/asic/openroad/01_floorplan.def` | floorplan 与四边 IO 的 DEF |
+| `build/asic/openroad/01_floorplan.def` | floorplan 与左右两边 IO 的 DEF |
 | `build/asic/openroad/03_cts.odb` | CTS 后数据库 |
-| `build/asic/openroad/04_route_opt.odb` | 做过 GRT 寄生电气修复的布线前数据库 |
+| `build/asic/openroad/04_route_opt.odb` | 已完成全局布线、GRT 寄生修复与预布线天线修复的数据库（含完整 guide） |
 | `build/asic/openroad/final.def` / `final.odb` | 布线后的最终数据库 |
+| `build/asic/openroad/final.v` | 布线后的门级网表（保留信号名；已去掉 filler/tapcell） |
+| `build/asic/openroad/05_route.log` | 最终 DRC/天线、MCMM 时序与功耗报告 |
 | `build/asic/openroad/dpm_asic.gds` | 可选 GDS（需要 `klayout` 包；已按 sky130 层号映射） |
 | `build/asic/openroad/dpm_asic.lyp` | 与 GDS 同时生成的 KLayout 图层配置（层名/可见性，颜色用 KLayout 默认调色板） |
 
-## Yosys：read_slang、ss 综合与自动时钟门控
+## Yosys：read_slang、ss 综合、按模块边界分域 ABC 与可读网表
 
 `asic/synth/synth.ys` 的关键命令：
 
 ```text
-read_slang --std 1800-2023 --single-unit -f build/asic/synth/filelist.f
-synth -top DigitalPhaseMeterTop -flatten -noabc
+read_slang --std 1800-2023 --single-unit --best-effort-hierarchy -F build/asic/synth/filelist.f
+keep_hierarchy PhaseMeter$*              # 只保留 PhaseMeter 的模块边界
+flatten -noscopeinfo -separator _        # 其余层次压进顶层，只剩 2 个模块
+synth -top DigitalPhaseMeterTop -noabc
 opt_dff
-clockgate -liberty build/asic/sky130_fd_sc_hd__ss_100C_1v60_synth.lib -min_net_size 1
+clockgate -liberty build/asic/sky130_fd_sc_hd__ss_100C_1v60_synth.lib -min_net_size 2
 dfflibmap -liberty build/asic/sky130_fd_sc_hd__ss_100C_1v60_synth.lib
-write_json build/asic/synth/pre_abc.json
-read_liberty -lib build/asic/sky130_fd_sc_hd__ss_100C_1v60_synth.lib  # 只为 submod 提供端口方向
-script build/asic/synth/partition.ys   # 由 partition.py 生成，按域跑 abc
+read_liberty -lib build/asic/sky130_fd_sc_hd__ss_100C_1v60_synth.lib  # 为 abc 提供端口方向
+tcl asic/synth/abc_targets.tcl           # 顶层与 PhaseMeter 各跑一次 abc
+opt -fast; setundef -zero; opt_clean
+setattr -mod -unset keep_hierarchy PhaseMeter$*
+flatten -noscopeinfo -separator _        # 合并回单层网表
+hilomap -singleton ...
+rename -wire; rename -unescape           # 按被驱动信号命名单元/清理转义名
+write_verilog -attr2comment -nohex -nodec -renameprefix u build/asic/synth/dpm_asic_synth.v
 ```
 
 * **前端**固定用 `read_slang`，直接读 `build/asic/synth/filelist.f`。这份文件由
   `dpm-asic-flow synth` 从 `build/chisel/DigitalPhaseMeterTopA/filelist.f` 过滤得到：去掉
-  `verification/` 下的断言，路径改成绝对路径。ASIC 产物是显式 emit 的独立目录，
+  `verification/` 下的断言，路径保持相对（`read_slang -F` 按 `filelist.f` 所在
+  目录解析）。ASIC 产物是显式 emit 的独立目录，
   **没有平台宏、没有平台分支文件、也没有带 `A` 后缀的模块文件**；顶层就是
   `DigitalPhaseMeterTop`。
-* **顶层**固定为 `DigitalPhaseMeterTop`；`synth -flatten` 得到扁平网表，便于
-  OpenROAD 处理。
+* **保留 PhaseMeter 模块边界**：默认的 `read_slang` 会把层次展平成单个模块；这里用
+  `--best-effort-hierarchy` 保留层次，再用 `keep_hierarchy PhaseMeter$*` 给
+  `PhaseMeter$DigitalPhaseMeterTop.controller.phaseMeter` 模块加属性。
+  `flatten -noscopeinfo -separator _` 时该模块不展开，但它的子模块（DspCounter/EdgeDetector）
+  照常压进 PhaseMeter，其余模块（Controller/ControlRegs/AXI）全部压进顶层，最终
+  只剩顶层和 PhaseMeter 两个模块。脚本用 `select -assert-any PhaseMeter$*` 与
+  `select -assert-mod-count 2 *` 断言展平结果，RTL 层次或实例名变化时会直接报错，
+  而不是静默退回单模块。
+* **顶层**固定为 `DigitalPhaseMeterTop`；`synth` 不加 `-flatten`，ABC 留到分模块阶段。
+* **网表命名**：最终仍然展平成单模块（OpenROAD 直接消费），但两处 `flatten` 都加
+  `-separator _`，把默认的 `\controlRegs.sigEnable` 变成普通标识符
+  `controlRegs_sigEnable`，`\controller.phaseMeter...` 变成
+  `controller_phaseMeter...`；不需要反斜杠转义，信号名也保留 RTL 的层次路径。
+  展平后再执行 `rename -wire` 按被驱动的公共信号给单元命名（例如
+  `axiLiteSlave_awHeld_sky130_fd_sc_hd__dfrtp_1`），`rename -unescape` 清理剩余的
+  特殊字符。当前综合网表 1754 个单元里有 671 个因此得到可读名字；其余 1083 个是
+  ABC/techmap 生成的私有组合节点，RTL 里本来就没有对应名字。
+  `write_verilog -renameprefix u` 把私有线网和私有单元统一加 `u_` 前缀（线网
+  `u_0704_`、单元 `u_1087_`），与具名信号/单元区分开；`-attr2comment` 再把
+  `hdlname`/`src` 等属性写成注释，公共信号可以直接定位回
+  `build/chisel/DigitalPhaseMeterTopA/*.sv` 的对应行，私有节点没有这些属性。
+  也试过 ABC 的 `-dress`（按等价性转移名字）：本机 Yosys 0.71+128 / ABC 1.01 会把
+  `-liberty` 映射后的 `.gate` 网络改写成 LUT/SOP 逻辑网络（Yosys 读回 `$lut`），
+  最终只剩 FF 单元和 `assign` 表达式，不能作为 OpenROAD 输入，因此流程不使用它。
+* **最终门级网表**：`05_route.tcl` 在写出 `final.def`/`final.odb` 后，用
+  `write_verilog -remove_cells $PHYSICAL_CELLS final.v` 输出布线后的门级网表。
+  filler/tapcell 只服务于制造与供电，写网表时去掉；天线二极管是真实器件，保留。
+  OpenROAD 会沿用综合网表里的信号名与单元名，并为 CTS/修复插入的 buffer 与新
+  拆分的线网继续分配 `u_*`/`netN`/`splitnet_*` 等名字，因此 `final.v` 和
+  `dpm_asic_synth.v` 可以按原有信号名对照，新增名字则对应实现阶段新插入的单元。
 * **ss 时序感知综合**：`clockgate`、`dfflibmap`、`read_liberty` 与分域 ABC 全部使用
   `sky130_fd_sc_hd__ss_100C_1v60_synth.lib`（由 `dpm-prepare-pdk` 去掉 `lpflow_*`
-  后生成）。ss 是 300MHz setup 的最慢 corner，综合与实现的最紧约束保持一致。
+  后生成）。ss 是 450MHz setup 的最慢 corner，综合与实现的最紧约束保持一致。
 * **自动时钟门控**：先 `opt_dff` 把 mux 反馈提取成带 CE 的 FF，再由
   `clockgate -liberty` 按 liberty 里的 `clock_gating_integrated_cell` 自动选 ICG。
-  当前选中的是 `sky130_fd_sc_hd__dlclkp_1`（latch_posedge），综合后得到 13 个 ICG。
-* **ASIC 计数器流水线**：`Config` 中 ASIC 流水线级数为 8，32 位的 `edgeCnt` /
-  `phaseCnt` 按 `ceil(cntWidth / depth)` 拆成 **8 段、每段 4 位**。段间进位寄存，
-  每段只在本段内做 4 位加法；输出时把低段逐级延迟到与最高段对齐，因此读数整体比
-  实际计数晚 `depth - 1 = 7` 拍。输出对齐延迟链**不随 `clear` 复位**：`clear` 后
-  各段旧值要 7 拍才完全排空，排空期间输出可能是旧值与已清零高段的混合，不能读取；
-  ASIC 变体 `PhaseMeterA` 的停止响应同样按该深度延后 7 拍，且 `clear` 只在 idle
-  期间有效，保证读数时链已排空。`DspCounter` 内部按 `cfg.platform` 选择实现：FPGA
-  用单个 DSP48E1 累加器，ASIC 用这条 8×4 分段流水线；没有额外的“启用流水线”配置
-  开关。`DspCounterA` / `PhaseMeterA` 两个 Verilator 目标覆盖该 ASIC 实现（详见
-  `test/`）。
+  `-min_net_size 2` 跳过只有 1 个 FF 的 enable 组：`controlRegs.irqEnable` 是
+  CTRL 里唯一需要存储的位，单独插 ICG 比把它折成 D mux 更费面积；现在最小
+  的组是 `sigEnable`/`srcSelect` 两个 FF，共 13 个 `dlclkp_1`。
+* **ASIC 计数器流水线**：`Config.asicDspCounterPipeline` 为 16，32 位的 `edgeCnt` /
+  `phaseCnt` 按 `ceil(cntWidth / depth)` 拆成 **16 段、每段 2 位**。段间进位寄存，
+  每段只在本段内做 2 位加法，D 路径只剩「段内加法 + 进位寄存器」。`io.value` 直接取
+  各段寄存器，**没有输出对齐延迟链**：段间进位是寄存的，撤销使能后要等
+  `depth - 1 = 15` 拍输出才稳定到最终计数值（连续计数、没跨段进位时逐拍就是当前值）；
+  调用方必须等这么久再读，`PhaseMeterA` 的停止响应同样延后 15 拍，而实际读数又发生在
+  慢时钟域的响应握手里（远晚于进位传播完）。`clear` 接在计数寄存器的异步复位端，
+  clear 保持期间（idle）进位寄存器随段寄存器归零而自然清零，不需要额外排空拍数。
+  段间进位是**无条件传播**的：只有 block0 的加数受 `enable` 门控，更高段直接加前一段
+  的进位寄存器，这样 enable 撤销时不会丢掉最后一拍产生的进位。
+  `DspCounter` 内部按 `cfg.platform` 选择实现：FPGA 用单个 DSP48E1 累加器，ASIC 用这条
+  16×2 分段流水线；没有额外的“启用流水线”配置开关。`DspCounterA` / `PhaseMeterA` 两个
+  Verilator 目标覆盖该 ASIC 实现（详见 `test/`）。
 * **ABC 分域时序映射**：Yosys 的 `abc` 只有一个全局 `-D`；整片设计都用
-  dspClock 的 3333ps 时，50MHz 的 `clock` 域也会被按 3.333ns 映射。`partition.py`
-  在 `dfflibmap` 之后读取 `write_json` 网表，沿时钟网络给每个触发器/ICG 确定
-  时钟域，再按“组合逻辑的扇出能到达哪个域的寄存器”分组：同时到达多个域时取
-  周期最短的域，只驱动顶层输出的组合逻辑取最慢的域。随后用 `submod -hidden`
-  把每组移进子模块，分别执行 `abc -D 20000`（`clock`，50MHz）与
-  `abc -D 3333`（`dspClock`，300MHz），最后 `flatten` 回单层网表。跨域连接
-  本来就是触发器到触发器（`CdcToggleHandShake`），拆分不会切断组合逻辑路径。
-  修改 SDC 或 `synth.ys` 的 `--clock` 周期时，两处要同步。
-* **`read_liberty -lib`**：只为 `submod` 提供库单元的端口方向（否则会把所有
-  引脚当成 inout）。黑盒模块不会写进最终网表。
+  dspClock 的 2222ps 时，50MHz 的 `clock` 域也会被按 2.222ns 映射，整片都用
+  20000ps 又会放松测量通路。PhaseMeter 的端口全部是寄存器边界（模块内所有 FF
+  都在 `dspClock`；所有输出由 FF 驱动，输入只接 FF 的 D 和复位反相器），因此可以
+  按模块分别设置 `-D`：`select DigitalPhaseMeterTop` 后用 20000ps（`clock`，
+  50MHz），`select PhaseMeter$*` 后用 `DPM_DSP_FREQ_MHZ` 换算出的整数 ps
+  （默认 450MHz -> 2222ps）。Yosys 原生 .ys 没有环境变量读取/替换，因此这段逻辑
+  放在 `asic/synth/abc_targets.tcl`，由 `synth.ys` 用内置 `tcl` 命令调用；Tcl
+  直接读环境变量，不需要 Python 生成脚本。它与 OpenROAD SDC 使用同一个周期。
+  顶层里只剩
+  4 个 `dspClock` 域的复位同步 FF（Controller 的 `dspReset_synchronizer`）和喂给
+  PhaseMeter 的异步输入 mux，它们按 20ns 映射；这些路径在 SDC 里是 false path，
+  ABC 不感知。
+* **`read_liberty -lib`**：为 `abc` 提供库单元的端口方向（否则会把所有引脚当成
+  inout）。黑盒模块不会写进最终网表。
 * **FSM pass**：`Utils.scala` 的 firtoolOpts 带 `disallowPackedArrays`，
   `switch(state)` 因此下降成 `casez`（RTLIL 里是 `$mux`/`$pmux`，不是 `$bmux`）；
   `Controller` / `PhaseMeter` 又给 state 寄存器加了
   `addAttribute(state, "fsm_encoding = \"auto\"")`。这两点对 FPGA 与 ASIC 两份
   显式产物都生效，标准 `synth` 的 coarse 阶段就会提取并重编码两个状态机
-  （当前为 one-hot），不需要自定义 coarse 序列或 `bmuxmap`。Yosys 会对
-  “用户指定的 fsm_encoding 可能让电路变大”给出提示，但当前 300MHz 下
-  one-hot 重编码后的 WNS 与面积都满足目标（见“结果”）。
+  （当前为 one-hot），不需要自定义 coarse 序列或 `bmuxmap`。
 * **综合用 liberty**：`dpm-prepare-pdk` 生成去掉 `lpflow_*` 单元的副本。lpflow 是
   低功耗隔离单元，ABC 会把它们当普通逻辑使用，但其 SLEEP 控制/输出驱动不适合普通
   信号路径，容易在布线后留下 max transition 残余违例。
@@ -184,11 +249,13 @@ script build/asic/synth/partition.ys   # 由 partition.py 生成，按域跑 abc
   避免 OpenROAD 里出现不可布线的 `one_`/`zero_` 常量网；布局阶段再由
   `repair_tie_fanout` 拆分扇出。
 
-脚本末尾有三条自检：`select -assert-any t:sky130_fd_sc_hd__dlclkp_1` 确认门控确实
-发生，`select -assert-none t:$dff ...` 确认没有残留内部 FF 单元，
+当前综合网表共 1754 个标准单元，其中 243 个 `clkbuf_1`、215 个 `dfrtp_1`、
+10 个 `dfstp_1`、339 个 `dfxtp_1`、13 个 `dlclkp_1`。脚本末尾有三条自检：
+`select -assert-any t:sky130_fd_sc_hd__dlclkp_1` 确认门控确实发生，
+`select -assert-none t:$dff ...` 确认没有残留内部 FF 单元，
 `select -assert-none t:$_*` 确认分域 ABC 没有漏掉组合单元。
 
-## OpenROAD：floorplan、四边 IO 与利用率
+## OpenROAD：floorplan、左右两边 IO 与利用率
 
 `01_floorplan.tcl` 用：
 
@@ -196,41 +263,66 @@ script build/asic/synth/partition.ys   # 由 partition.py 生成，按域跑 abc
 initialize_floorplan -utilization 60 -aspect_ratio 1.0 -core_space 2.0 -site unithd
 ```
 
-注意 OpenROAD 的 `-utilization` 单位是**百分比**，所以 0.6 要写成 `60`。本设计
+注意 OpenROAD 的 `-utilization` 单位是**百分比**，所以 0.6 要写成 `60`。当前设计
 配置得到：
 
-* die：`199.145 x 199.145 um`（方芯片）
-* core：`(2.300, 2.720) - (196.880, 195.840) um`，core 面积 `37577.290 um^2`
-* floorplan 时的标准单元面积：`22849.414 um^2`（2004 个实例），core 有效利用率
-  `60.8%`（`initialize_floorplan` 的目标是 60%，边界按 site/row 对齐后略有偏差）
+* die：`180.485 x 180.485 um`（方芯片）
+* core：`(2.300, 2.720) - (178.480, 176.800) um`，core 面积 `30669.414 um^2`
+* floorplan 时的标准单元面积：`18687.923 um^2`（1754 个实例），core 有效利用率
+  `60.9%`（`initialize_floorplan` 的目标是 60%，边界按 site/row 对齐后略有偏差）
+* tapcell 396 个
 
 IO 摆放不是 `place_pins` 的默认行为（默认会把 161 个 pin 压到一两条边上）。
-`config.tcl` 里的 `place_io_pins` 按端口名顺序把端口平均分成四组，分别用
-`set_io_pin_constraint -region top:*|right:*|bottom:*|left:*` 约束，再调用：
+`config.tcl` 里的 `place_io_pins` 按端口名顺序把端口平均分成 `IO_SIDES` 指定的组，
+分别用 `set_io_pin_constraint -region left:*|right:*` 约束，再调用：
 
 ```tcl
 place_pins -hor_layers met3 -ver_layers met2 -corner_avoidance 1.0
 ```
 
-结果是 161 个 pin 分布为 **top 41 / right 41 / bottom 41 / left 38**。
-`check_pins.py` 在 floorplan 和 route 后各检查一次，只要有一条边没有 pin 或 pin
-落在 die 内部就失败。
+`-hor_layers` 用于左右边（水平 pin），`-ver_layers` 用于上下边（垂直 pin）。
+当前 `IO_SIDES` 是 `{left right}`，161 个 pin 全部分到**左右两边（left 81 /
+right 80）并落在 met3**；`-ver_layers met2` 只在把 IO 改到上下边时才会用到。
+`check_pins.py` 在 floorplan 和 route 后各检查一次：`IO_SIDES` 指定的边必须有
+pin，未指定的边不能有 pin，pin 也不能落在 die 内部。
 
-floorplan 之后插入 tapcell（511 个）、建立 met1/met4/met5 的 PDN；布局阶段用
-`global_placement -density 0.60`、`repair_design`、`repair_tie_fanout` 和详细布局；
-CTS 用 `clkbuf_4/8/16`，两棵时钟树（`clock` 176 个 sink、`dspClock` 342 个 sink），
-TritonCTS 把 6 个门控单元拆成 22 份，并把 26/29 个门控单元的输出缓冲重整为
-`clkbuf_16`；最终版图里有 29 个 ICG（3 个 `dlclkp_1` + 26 个 `dlclkp_4`）。
-布线前先在 CTS 数据库上做一次全局布线并用 GRT 寄生修 max slew/cap，结果保存为
-`04_route_opt.odb`（`04_route_opt.tcl`）；`05_route.tcl` 在**新的 OpenROAD 进程**
-里从该数据库重新全局布线，避免同一进程里增量布线漏掉新插入单元的 guide，然后做
-天线修复循环、详细布线和填充。
+需要换边时设 `DPM_IO_SIDES`（空格或逗号分隔，例如 `top bottom`），`config.tcl`
+和 `check_pins.py` 读同一个环境变量，两者必须一致；`place_io_pins` 的分组数按
+`llength($IO_SIDES)` 计算，不写死为四组。
+
+布局阶段用 `global_placement -density 0.60 -timing_driven` 加虚拟 CTS，再做
+`repair_design`、`repair_tie_fanout` 和详细布局；当前参数下虚拟 CTS 给 564 个
+sink 设置了估计插入延迟。默认还会在初始布局后做最多 2 次 anneal resynth +
+增量布局（`--place-resynth-iters 2`）；当前 450MHz 结果在第一次 resynth 时
+端点 slack 已满足，工具直接 no-op。
+
+CTS 用 `clkbuf_4/8/16`，当前布局后两棵时钟树为：`clock` 98 个 sink、
+`dspClock` 142 个 sink，共 2 个 clock net；9 个 ICG 被拆成 38 份（按 sink
+cluster 复制，加上未拆的 4 个共 42 个 clock gate），共插入 26 个时钟缓冲。
+CTS 后 ss WNS +0.206ns、hold +0.240ns，面积 20182um²。
+
+CTS 阶段只读 ss 一个 corner：MCMM 同时读入 ss/tt/ff 三份同名 liberty 时，
+TritonCTS 的 dummy-load 候选会遍历所有 library，选到未链接到 LEF master 的
+tt/ff 同名 cell 会报 `CTS-0118`。只读 ss 可以保留 dummy load 平衡（这是 03 阶段
+唯一的 MCMM 差异）；04/05 阶段重新 `reload_timing` 读三个 corner，修复与最终
+报告仍是 MCMM。
+`04_route_opt.tcl` 对应 ORFS 的 global route 阶段：full `global_route` 后用 GRT
+寄生做 `repair_design` / `repair_timing`，每次修复后用
+`global_route -start_incremental` / `-end_incremental` 只重布改动过的 net、补齐
+guide，再做预布线天线修复，最后写出带完整 guide 的 `04_route_opt.odb`。
+`05_route.tcl` 对应 ORFS 的 detail route 阶段：从该数据库直接 `detailed_route`
+（不再重新全局布线），然后做详细布线后的天线修复循环、填充和最终 MCMM 报告。
+预布线天线修复必须在 04 完成：05 从数据库重载时 GRT 的运行时状态（NDR 关闭、
+拥塞图）不会恢复，直接在 05 里 `repair_antennas` 会因残余拥塞报 `GRT-0232`。
+05 在写完 `final.def`/`final.odb` 后用 `write_verilog -remove_cells $PHYSICAL_CELLS`
+输出 `final.v`：网表沿用综合阶段的信号名，去掉只占版图位置的 filler/tapcell，
+是布局布线后真实逻辑连接的可读视图。
 
 ## 查看 GDS 与图层含义
 
 最终版图在 `build/asic/openroad/dpm_asic.gds`，顶层单元是 `DigitalPhaseMeterTop`，
-85 个 GDS cell 定义、1nm 数据库单位，实际几何范围约 `198.680 x 198.560 um`（die 为
-`199.145um` 见方）。用 KLayout 打开并加载与 GDS 同时生成的图层配置：
+1nm 数据库单位，die 为 `180.485um` 见方。用 KLayout 打开并加载与 GDS 同时生成的
+图层配置：
 
 ```bash
 klayout -l build/asic/openroad/dpm_asic.lyp build/asic/openroad/dpm_asic.gds
@@ -294,10 +386,11 @@ label/pin，`44` 多为 cut 或 implant，具体见下表（名称与含义取�
 
 `asic/synth/dpm_asic.sdc`：
 
-* `clock`：50MHz（20ns），对应 PS 的 `FCLK_CLK0`；`synth.ys` 里对应
-  `--clock clock=20000`；
-* `dspClock`：300MHz（3.333ns），测量通路的 ASIC 频率；`synth.ys` 里对应
-  `--clock dspClock=3333`，`partition.py` 用同一个数值。
+* `clock`：50MHz（20ns），对应 PS 的 `FCLK_CLK0`，固定不变；分模块 ABC 里顶层
+  用 20000ps；
+* `dspClock`：测量通路的 ASIC 频率，由环境变量 `DPM_DSP_FREQ_MHZ` 决定
+  （默认 450MHz -> 2.222ns）。`dpm-asic-flow` 与 SDC 用同一套规则把频率取整到
+  整数 ps（450MHz -> 2222ps），综合的 ABC `-D` 与 SDC 周期因此一致；
 * setup uncertainty 0.3ns、hold uncertainty 0.1ns，时钟 transition 0.1ns；
 * 两个时钟按异步时钟组处理（`set_clock_groups -asynchronous`）：控制器内部用
   `CdcToggleHandShake` 做跨域；
@@ -318,42 +411,98 @@ propagated clock（含时钟树延迟）。
 
 ## 结果（本机实测）
 
-2026-11-24 用 `uv run dpm-asic-flow`（`all`）在本机（Yosys 0.71 + OpenROAD 26Q4 + sky130 HD）
-跑通，单次实现的关键结果：
+当前默认流程（450MHz + PnR 调优）完整跑完综合、floorplan、place、CTS、route 与
+GDS，关键结果如下（ss corner 为主场景；OpenROAD 26Q4-2869，16 线程）。
 
-* 综合：2004 个标准单元（Yosys 统计的 2006 个 cell 中另有 2 个 `$scopeinfo`），
-  其中 152 个 `dfrtp_1`、11 个 `dfstp_1`、601 个 `dfxtp_1`、13 个
-  `sky130_fd_sc_hd__dlclkp_1`（自动时钟门控）；无 lpflow 单元。
-* floorplan：die `199.145um` 见方，标准单元 2004 个、面积 `22849.414um^2`，core
-  有效利用率 `60.8%`，161 个 IO 四边分布 `41/41/41/38`，tapcell 511 个，PDN 正常生成。
-* 布线：详细布线 DRC 报告为空（0 条），天线检查最终为 0 条；最终 `final.def` 共
-  6008 个 component（含 2004 个标准单元、511 个 tapcell、填充单元与天线二极管），
-  电源连接完整。
-* 电气规则：最终 `report_check_types -max_slew -max_capacitance -max_fanout -violators`
-  没有列出违例（`-violators` 无输出），`report_floating_nets` 也没有列出浮空网。
-* MCMM 时序（route 阶段，`set_propagated_clock` 已生效；单位 ns）：
+综合与实现规模：
 
-  | scene | setup WNS | hold WNS | setup TNS | hold TNS |
-  | --- | --- | --- | --- | --- |
-  | ss | **+0.011** | **+0.301** | 0 | 0 |
-  | tt | +1.501 | +0.098 | 0 | 0 |
-  | ff | +2.053 | +0.027 | 0 | 0 |
+* 综合网表：1754 个标准单元，其中 13 个 `dlclkp_1` 自动时钟门控；无 lpflow 单元。
+  分模块 ABC 的顶层目标 20000ps、PhaseMeter 目标 2222ps。
+* floorplan：die `180.485um` 见方，161 个 IO 左右分布 `left 81 / right 80`（全部
+  在 met3），tapcell 396 个，标准单元面积 `18687.923um^2`，有效利用率 `60.9%`。
+* CTS：`clock` 域 98 个 sink、`dspClock` 域 142 个 sink，2 个 clock net，9 个 ICG
+  拆成 38 份（共 42 个 clock gate）；CTS 后 ss WNS +0.206ns / hold +0.240ns，
+  面积 20182um^2。
+* 布线：详细布线 DRC 0 条，最终天线违规 0；route 后面积 **20276um^2**（66%
+  利用率）。
 
-  主场景 ss 的 setup 关键路径在 dspClock 域，余量只有 **+0.011ns**，属于 300MHz
-  临界；ff 的 hold 余量为 +0.027ns。两次独立 `all` 运行的最终 DEF 与上述 MCMM/面积/
-  功耗数字一致。
-* 面积：`report_design_area` 为 **25537um^2**（68% 利用率，已含 CTS 缓冲、tapcell
-  与二极管等）。
-* 功耗（默认活动率，MCMM 逐场景）：ss 约 **6.52mW**、tt 约 **8.33mW**、
-  ff 约 **10.3mW**。
+MCMM 时序（route 阶段，`set_propagated_clock` 已生效；单位 ns）：
 
-具体数字以 `build/asic/openroad/05_route.log` 的最终报告为准；不同工具版本/线程数
-可能带来小幅差异。
+| scene | setup WNS | hold WNS | setup TNS | hold TNS |
+| --- | --- | --- | --- | --- |
+| ss | **+0.231** | **+0.277** | 0 | 0 |
+| tt | +1.092 | +0.106 | 0 | 0 |
+| ff | +1.409 | +0.063 | 0 | 0 |
+
+主场景 ss 的最差 setup 是 dspClock 域的 `controller_phaseMeter__layerCapture`
+自环路径（slack +0.231ns）；`clearCnt` 到分段计数器异步复位脚的 recovery
+检查为 +0.764ns。hold/removal 最差也在 ss（`dspReset` 同步链到
+`phaseMeter_state_3` 的 RESET_B，+0.277ns），tt/ff 的 hold 也为正。
+
+功耗（默认活动率，MCMM 逐场景）：
+
+| scene | 总功耗 |
+| --- | --- |
+| ss | 4.81mW |
+| tt | 6.12mW |
+| ff | 7.66mW |
+
+电气规则：最终 `report_check_types` 无 max slew / max cap 违例；详细布线与天线
+本身都是 0 违例；`check_antennas` 最终为 0。
+
+具体数字以 `build/asic/openroad/05_route.log` 的最终报告为准。网表命名步骤
+（`flatten -separator`、`rename -wire` / `rename -unescape`）只改变最终 Verilog
+的名字，不改变综合后的单元类型与数量。同一配置的多次独立运行会因多线程布局有
+0.2ns 量级的波动，签核时要在这些数字之外留 margin。
 
 日志里还有几类可解释的告警：`IFP-0028`（core 左下角按 site/row 对齐）、`GPL-0302`
 （目标密度低于最小可行密度，placer 会自动调整）、`RSZ-0104`（AXI 高位地址与
 `awprot`/`arprot` 悬空——RTL 只按 `addr[5:2]` 译码）、`STA-2402`（没有激励时功耗
-活动率传播不收敛）。
+活动率传播不收敛）、`RSZ-0062`（route 阶段仍有个别 setup 修复未完成，最终 slack 已为正）。
+
+## PnR 调优与实验开关
+
+默认值就是当前 450MHz 收敛所用的组合；需要回到未调优配置时，用对应的 `--no-*` 或
+零值逐项关闭（例如 `--no-virtual-cts --place-resynth-iters 0`）。优先级是显式命令行
+参数 > `DPM_*` 环境变量 > 内置默认值。开关项统一成对出现（argparse 的
+`BooleanOptionalAction`），例如 `--virtual-cts` / `--no-virtual-cts`。
+
+| CLI | 环境变量 | 作用 | 默认 |
+| --- | --- | --- | --- |
+| `--timing-driven-place` / `--no-timing-driven-place` | `DPM_TIMING_DRIVEN_PLACE` | `global_placement -timing_driven` | 关（虚拟 CTS / 迭代 resynth 会自动打开） |
+| `--timing-driven-repair` / `--no-timing-driven-repair` | `DPM_TIMING_DRIVEN_REPAIR` | 布局时保留时序修复（隐含 `--timing-driven-place`） | 关 |
+| `--virtual-cts` / `--no-virtual-cts` | `DPM_VIRTUAL_CTS` | 布局时构建轻量虚拟时钟树，用估计 clock latency 参与时序驱动布局 | 开 |
+| `--virtual-cts-max-skew-fraction` | `DPM_VIRTUAL_CTS_MAX_SKEW` | 虚拟时钟树最大插入延迟占周期比例 | 0.05 |
+| `--grt-critical-nets` | `DPM_GRT_CRITICAL_NETS` | `global_route -critical_nets_percentage` | 20 |
+| `--repair-setup-margin` | `DPM_REPAIR_SETUP_MARGIN` | `repair_timing -setup_margin`（ns） | 1.0 |
+| `--gate-cloning` / `--no-gate-cloning` | `DPM_GATE_CLONING` | 允许 `repair_timing` 做 gate cloning | 开 |
+| `--place-resynth-iters` | `DPM_PLACE_RESYNTH_ITERS` | 布局阶段重复 resynth + 增量布局的次数 | 2 |
+| `--place-resynth-mode` | `DPM_PLACE_RESYNTH_MODE` | 迭代 resynth 模式（plain/anneal/genetic） | anneal |
+| `--resynth-iters` | `DPM_RESYNTH_ITERS` | 每次 resynth 搜索的 ABC 脚本迭代数 | 200 |
+| `--resynth-initial-ops` | `DPM_RESYNTH_INITIAL_OPS` | 初始 ABC 脚本的操作数 | 3 |
+| `--resynth-revert-after` | `DPM_RESYNTH_REVERT_AFTER` | 退火连续变差多少次后回退 | 50 |
+| `--resynth-seed` | `DPM_RESYNTH_SEED` | 搜索随机种子 | 1 |
+| `--resynth-temp` | `DPM_RESYNTH_TEMP` | 退火初始温度；不传则用最差端点的 required arrival time | — |
+| `--resynth-population-size` | `DPM_RESYNTH_POPULATION_SIZE` | 遗传算法种群大小 | 8 |
+| `--useful-skew` / `--no-useful-skew` | `DPM_USEFUL_SKEW` | `clock_tree_synthesis -useful_skew` | 关 |
+| `--retime` / `--no-retime` | `DPM_RETIME` | 使用 `synth_retime.ys` 做 ABC 跨寄存器 retime | 关 |
+| `--threads` | `DPM_THREADS` | OpenROAD 线程数 | 0（自动） |
+
+单独跑某个 Tcl 阶段时也可以直接 `export DPM_*`；例如：
+
+```bash
+DPM_VIRTUAL_CTS=1 DPM_REPAIR_SETUP_MARGIN=0.5 \
+    uv run dpm-asic-flow all
+```
+
+两个可选实验入口不参与交付基线：
+
+* `--retime` 选择 `asic/synth/synth_retime.ys`：异步复位/置位 FF 与 `DspCounter`
+  流水线在 ABC 前预映射成库单元，CE 交给 `abc -dff`。`DspCounter` 的流水线寄存器
+  带 `abc_retime = "false"` 属性，避免 ABC 把分段流水线拆平。当前默认综合仍用
+  `synth.ys`；450MHz 在 16×2 流水线 + 异步清零后已收敛，不依赖 retime。
+* `--useful-skew` 在新 OpenROAD 上可用，但本设计全是标准单元、没有 macro sink，
+  CTS 建的是扁平树，realization 没有可处理的 macro 层级，实际是 no-op；默认关闭。
 
 ## 已知限制
 
@@ -362,12 +511,19 @@ propagated clock（含时钟树延迟）。
 * 没有 DRC/LVS 签核：本机没有 magic/netgen，`06_gds.py` 只负责把 DEF 与 PDK 单元
   GDS 合并成版图视图，不代替 DRC/LVS。
 * 没有 IR drop / EM / 功耗签核；PDN 只做基本供电网格。
-* route 阶段已用 propagated clock 做 MCMM 报告；ss setup 余量只有 +0.011ns，
-  ff hold 余量 +0.027ns，上板/签核前仍需按实际时钟抖动与 OCV 复核。
-* 延迟链不复位意味着 `clear` 后 7 拍内计数器输出不是有效读数；当前 `PhaseMeter`
-  的空闲/停止响应时序不会在这个窗口读数，但如果后续加入短于 7 拍的测量或直接观测
-  `DspCounter`，需要额外处理。
-* 综合是扁平网表，不保留模块层次；ASIC 流程不参与 Vivado 的 IP 打包。
+* 最终时序用 `estimate_parasitics -global_routing` 估计互连寄生，没有接入签核级
+  RCX/SPEF；换一种寄生估计方式 WNS 会有 0.1ns 量级的差别（互连占比 <0.5%），
+  正式签核应使用校准后的 RCX/SPEF。
+* route 阶段已用 propagated clock 做 MCMM 报告；当前默认流程 ss setup 余量
+  +0.231ns、ff hold +0.063ns，上板/签核前仍需按实际时钟抖动与 OCV 复核。
+* 计数器没有输出对齐延迟链，段间进位要传播 `depth - 1` 拍（当前 16 段 → 15 拍）：
+  撤销使能后这段时间内读到的完整计数值可能偏低；当前 `PhaseMeter` 的停止响应延后同样
+  拍数，实际读数又发生在慢时钟域的响应握手里，不会落在进位传播窗口内。如果后续加入更短
+  的测量或直接观测 `DspCounter`，需要自己等够 `depth - 1` 拍。
+* 综合是扁平网表，不保留模块层次；展平时用 `_` 把层次路径编进信号名
+  （`controller_phaseMeter_...`），私有组合节点是 `u_NNNN_`。OpenROAD 的
+  `final.v` 同样是扁平网表，只是去掉了 filler/tapcell。ASIC 流程不参与 Vivado
+  的 IP 打包。
 
 ## 与 FPGA 流程的关系
 

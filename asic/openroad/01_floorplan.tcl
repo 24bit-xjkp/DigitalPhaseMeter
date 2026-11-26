@@ -2,8 +2,8 @@
 #
 # 关键点：
 #   * initialize_floorplan 用 -utilization 60（百分比，即 0.6）；
-#   * place_io_pins 把 161 个端口平均分到芯片四周（top/right/bottom/left）；
-#   * 输出 01_floorplan.def 供 check_pins.py 验证四边都有 pin。
+#   * place_io_pins 把 161 个端口平均分到 IO_SIDES 指定的边（默认 left/right）；
+#   * 输出 01_floorplan.def 供 check_pins.py 验证配置的边上都有 pin。
 
 source [file join [file dirname [info script]] config.tcl]
 
@@ -15,7 +15,7 @@ read_verilog $NETLIST
 link_design $DESIGN
 define_mcmm_scenes
 
-log_stage "floorplan：利用率 $UTILIZATION%，四周摆 IO"
+log_stage "floorplan：利用率 $UTILIZATION%，IO 摆在 $IO_SIDES"
 initialize_floorplan -utilization $UTILIZATION \
                      -aspect_ratio 1.0 \
                      -core_space $CORE_SPACE \
